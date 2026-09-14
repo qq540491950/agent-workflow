@@ -1,0 +1,81 @@
+# 并行评审流:分发 → 并行(安全/代码/测试) → 汇合 → 裁决
+version: "1"
+
+workflow:
+  id: parallel-review
+  name: Parallel Review
+  description: "并行执行三类评审后汇合裁决"
+
+nodes:
+  - id: start
+    name: 分发任务
+    type: human
+    prompt: "确认启动并行评审?"
+    responses: ["approve", "continue"]
+    x: 80
+    y: 200
+  - id: fanout
+    name: 并行分发
+    type: parallel
+    x: 320
+    y: 200
+  - id: security
+    name: 安全评审
+    type: agent
+    agent: mock-claude
+    mode: plan
+    x: 560
+    y: 80
+  - id: code
+    name: 代码评审
+    type: agent
+    agent: mock-claude
+    mode: review
+    x: 560
+    y: 200
+  - id: test
+    name: 测试
+    type: skill
+    skill: run-test
+    x: 560
+    y: 320
+  - id: merge
+    name: 汇合结果
+    type: merge
+    x: 800
+    y: 200
+  - id: decide
+    name: 裁决
+    type: human
+    prompt: "三方评审完成,请裁决"
+    responses: ["approve", "reject"]
+    x: 1040
+    y: 200
+  - id: done
+    name: 结束
+    type: skill
+    skill: log
+    args:
+      message: "并行评审流程结束"
+    x: 1280
+    y: 200
+
+edges:
+  - from: start
+    to: fanout
+  - from: fanout
+    to: security
+  - from: fanout
+    to: code
+  - from: fanout
+    to: test
+  - from: security
+    to: merge
+  - from: code
+    to: merge
+  - from: test
+    to: merge
+  - from: merge
+    to: decide
+  - from: decide
+    to: done

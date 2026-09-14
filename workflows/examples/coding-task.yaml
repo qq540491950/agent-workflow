@@ -1,0 +1,79 @@
+# 经典编码任务流:Plan → Execute → Review → (Fix 循环) → Submit
+version: "1"
+
+workflow:
+  id: coding-task
+  name: Coding Task
+  description: "方案制定 → 代码修改 → 评审 → 修复循环 → 提交"
+
+settings:
+  max_iterations: 5
+  on_loop_limit: wait_user
+
+nodes:
+  - id: plan
+    name: 制定方案
+    type: agent
+    agent: mock-claude
+    mode: plan
+    x: 80
+    y: 160
+    prompt:
+      template: |
+        你负责为以下任务制定技术方案(只分析,不修改代码):
+        {{task}}
+
+  - id: execute
+    name: 执行修改
+    type: agent
+    agent: mock-pi
+    mode: execute
+    x: 360
+    y: 160
+
+  - id: review
+    name: 代码评审
+    type: agent
+    agent: mock-claude
+    mode: review
+    x: 640
+    y: 160
+    prompt:
+      template: |
+        你是评审者。对比任务与产出,返回 JSON:
+        {"decision": "APPROVED" | "REJECTED", "summary": "..."}
+
+        Task: {{task}}
+        Plan: {{plan}}
+        Iteration: {{iteration}}
+
+  - id: fix
+    name: 修复问题
+    type: agent
+    agent: mock-pi
+    mode: fix
+    x: 640
+    y: 320
+
+  - id: submit
+    name: 提交
+    type: skill
+    skill: submit
+    args:
+      message: "feat: workflow submit"
+    x: 920
+    y: 160
+
+edges:
+  - from: plan
+    to: execute
+  - from: execute
+    to: review
+  - from: review
+    condition: decision == "APPROVED"
+    to: submit
+  - from: review
+    condition: decision == "REJECTED"
+    to: fix
+  - from: fix
+    to: review
