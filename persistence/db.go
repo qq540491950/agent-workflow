@@ -80,7 +80,8 @@ func (d *DB) migrate() error {
 			finished_at TEXT DEFAULT '',
 			error TEXT DEFAULT '',
 			node_states_json TEXT DEFAULT '{}',
-			snapshot_json TEXT DEFAULT ''
+			snapshot_json TEXT DEFAULT '',
+			state_json TEXT DEFAULT '{}'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_executions_workflow ON executions(workflow_id)`,
 		`CREATE TABLE IF NOT EXISTS execution_nodes (

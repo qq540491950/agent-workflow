@@ -144,6 +144,8 @@ type Execution struct {
 	FinishedAt         string            `json:"finished_at,omitempty"`
 	Error              string            `json:"error,omitempty"`
 	NodeStates         map[string]string `json:"node_states,omitempty"`
+	// StateData 是运行时的会话状态快照(用于恢复与 UI 查询)。
+	StateData map[string]any `json:"state_data,omitempty"`
 }
 
 // ExecutionNode 记录某个节点在某次 Execution 中的执行明细。

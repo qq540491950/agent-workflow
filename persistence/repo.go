@@ -157,6 +157,7 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 	variables, _ := json.Marshal(orEmpty(e.Variables))
 	iterations := anyMapInt(e.Iterations)
 	nodeStates := anyMapStr(e.NodeStates)
+	stateData := anyMapAny(e.StateData)
 	var snapshot []byte
 	if e.Snapshot != nil {
 		snapshot, _ = json.Marshal(e.Snapshot)
@@ -165,27 +166,28 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 	_ = d.sql.QueryRow(`SELECT COUNT(1) FROM executions WHERE id=?`, e.ID).Scan(&existing)
 	if existing == 0 {
 		_, err := d.sql.Exec(`INSERT INTO executions
-			(id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			(id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			e.ID, e.WorkflowID, e.WorkflowVersion, e.WorkflowName, string(e.State), e.Task,
 			string(variables), e.CurrentNodeID, string(iterations), e.CreatedAt,
-			e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot))
+			e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), string(stateData))
 		return wrap(err)
 	}
-	_, err := d.sql.Exec(`UPDATE executions SET state=?,current_node_id=?,iterations_json=?,started_at=?,finished_at=?,error=?,node_states_json=?,snapshot_json=? WHERE id=?`,
-		string(e.State), e.CurrentNodeID, string(iterations), e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), e.ID)
+	_, err := d.sql.Exec(`UPDATE executions SET state=?,current_node_id=?,iterations_json=?,started_at=?,finished_at=?,error=?,node_states_json=?,snapshot_json=?,state_json=? WHERE id=?`,
+		string(e.State), e.CurrentNodeID, string(iterations), e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), string(stateData), e.ID)
 	return wrap(err)
 }
 
 // GetExecution 读取执行记录。
 func (d *DB) GetExecution(id string) (*model.Execution, error) {
-	row := d.sql.QueryRow(`SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json FROM executions WHERE id=?`, id)
+	row := d.sql.QueryRow(`SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json FROM executions WHERE id=?`, id)
 	var e model.Execution
-	var variables, iterations, nodeStates, snapshot string
+	var variables, iterations, nodeStates, snapshot, stateData string
 	if err := row.Scan(&e.ID, &e.WorkflowID, &e.WorkflowVersion, &e.WorkflowName, &e.State, &e.Task,
-		&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot); err != nil {
+		&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData); err != nil {
 		return nil, wrap(err)
 	}
+	_ = json.Unmarshal([]byte(stateData), &e.StateData)
 	_ = json.Unmarshal([]byte(variables), &e.Variables)
 	_ = json.Unmarshal([]byte(iterations), &e.Iterations)
 	_ = json.Unmarshal([]byte(nodeStates), &e.NodeStates)
@@ -200,7 +202,7 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 
 // ListExecutions 返回执行列表(可按 workflow 过滤,limit<=0 表示全部)。
 func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, error) {
-	q := `SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json FROM executions`
+	q := `SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json FROM executions`
 	args := []any{}
 	if workflowID != "" {
 		q += ` WHERE workflow_id=?`
@@ -218,11 +220,12 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 	var out []*model.Execution
 	for rows.Next() {
 		var e model.Execution
-		var variables, iterations, nodeStates, snapshot string
+		var variables, iterations, nodeStates, snapshot, stateData string
 		if err := rows.Scan(&e.ID, &e.WorkflowID, &e.WorkflowVersion, &e.WorkflowName, &e.State, &e.Task,
-			&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot); err != nil {
+			&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData); err != nil {
 			return nil, wrap(err)
 		}
+		_ = json.Unmarshal([]byte(stateData), &e.StateData)
 		_ = json.Unmarshal([]byte(variables), &e.Variables)
 		_ = json.Unmarshal([]byte(iterations), &e.Iterations)
 		_ = json.Unmarshal([]byte(nodeStates), &e.NodeStates)
@@ -388,6 +391,14 @@ func anyMapInt(m map[string]int) string {
 }
 
 func anyMapStr(m map[string]string) string {
+	if m == nil {
+		return "{}"
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func anyMapAny(m map[string]any) string {
 	if m == nil {
 		return "{}"
 	}
