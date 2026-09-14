@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=My Product
+Comment=A agent-workflow application
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/agent-workflow %u
+Terminal=false
+Type=Application
+Icon=agent-workflow
+Categories=Utility;
+StartupWMClass=agent-workflow
+
+ 
