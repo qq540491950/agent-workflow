@@ -2,7 +2,11 @@ module agentworkflow
 
 go 1.25.0
 
-require github.com/wailsapp/wails/v3 v3.0.0-beta.20
+require (
+	github.com/expr-lang/expr v1.17.8
+	github.com/goccy/go-yaml v1.19.2
+	github.com/wailsapp/wails/v3 v3.0.0-beta.20
+)
 
 require (
 	github.com/adrg/xdg v0.5.3 // indirect
