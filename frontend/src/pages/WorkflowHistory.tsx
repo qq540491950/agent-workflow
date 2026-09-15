@@ -1,0 +1,89 @@
+import { useCallback, useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { toast } from "sonner";
+import { api, subscribeEvents } from "@/lib/api";
+import type { Execution, Workflow } from "@/lib/types";
+import { StateBadge } from "@/components/state-badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+
+// 工作流的执行历史(版本绑定关系)
+export default function WorkflowHistory() {
+  const { id = "" } = useParams();
+  const [wf, setWf] = useState<Workflow | null>(null);
+  const [execs, setExecs] = useState<Execution[]>([]);
+
+  const refresh = useCallback(() => {
+    api.getWorkflow(id).then(setWf).catch(() => {});
+    api.listExecutions(id, 100).then(setExecs).catch((e) => toast.error(e.message));
+  }, [id]);
+
+  useEffect(() => {
+    refresh();
+    return subscribeEvents((ev) => {
+      if (ev.type.startsWith("workflow.")) refresh();
+    });
+  }, [refresh]);
+
+  return (
+    <div className="h-full overflow-auto p-6">
+      <div className="mb-6">
+        <h1 className="flex items-center gap-2 text-2xl font-semibold">
+          {wf?.name ?? "…"}
+          <Badge variant="secondary">v{wf?.version ?? "?"}</Badge>
+        </h1>
+        <p className="text-sm text-muted-foreground">
+          执行历史 · Execution 绑定具体 Workflow 版本
+        </p>
+      </div>
+      <div className="rounded-lg border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Execution</TableHead>
+              <TableHead>版本</TableHead>
+              <TableHead>Task</TableHead>
+              <TableHead>State</TableHead>
+              <TableHead>开始时间</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {execs.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
+                  该工作流还没有执行记录
+                </TableCell>
+              </TableRow>
+            )}
+            {execs.map((e) => (
+              <TableRow key={e.id}>
+                <TableCell className="font-mono text-xs">
+                  <Link className="hover:underline" to={`/executions/${e.id}`}>
+                    {e.id}
+                  </Link>
+                </TableCell>
+                <TableCell>v{e.workflow_version}</TableCell>
+                <TableCell className="max-w-64 truncate text-sm text-muted-foreground">
+                  {e.task}
+                </TableCell>
+                <TableCell>
+                  <StateBadge state={e.state} />
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {(e.started_at ?? "").slice(0, 19).replace("T", " ")}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}

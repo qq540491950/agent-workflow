@@ -1,0 +1,245 @@
+// 统一服务层:桌面模式走 Wails bindings(IPC),浏览器模式走 HTTP+SSE。
+// 页面只依赖本模块,不感知底层传输方式。
+import type {
+  AgentInfo,
+  Artifact,
+  Execution,
+  ExecutionNode,
+  PermissionPolicy,
+  SkillDTO,
+  UIEvent,
+  ValidationResult,
+  Workflow,
+} from "./types";
+
+const isWails = typeof window !== "undefined" && "_wails" in window;
+
+// Wails bindings 返回生成器类型(带 null),统一断言为本项目的领域类型。
+function nn<T>(v: unknown): T {
+  return (v ?? null) as T;
+}
+
+async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  const text = await res.text();
+  let data: unknown = undefined;
+  try {
+    data = text ? JSON.parse(text) : undefined;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    const msg =
+      (data as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return data as T;
+}
+
+// Wails bindings 按需加载(仅桌面模式)。
+async function wailsBindings() {
+  const [wf, ex, ag, sk, gt, st] = await Promise.all([
+    import("@bindings/agentworkflow/app/application/workflowservice.js"),
+    import("@bindings/agentworkflow/app/application/executionservice.js"),
+    import("@bindings/agentworkflow/app/application/agentservice.js"),
+    import("@bindings/agentworkflow/app/application/skillservice.js"),
+    import("@bindings/agentworkflow/app/application/gitservice.js"),
+    import("@bindings/agentworkflow/app/application/settingsservice.js"),
+  ]);
+  return { wf, ex, ag, sk, gt, st };
+}
+
+export const api = {
+  mode: isWails ? ("desktop" as const) : ("web" as const),
+
+  // ---- Workflows ----
+  async listWorkflows(): Promise<Workflow[]> {
+    if (isWails) return nn(await (await wailsBindings()).wf.List());
+    return http("/api/workflows");
+  },
+  async getWorkflow(id: string): Promise<Workflow> {
+    if (isWails) return nn(await (await wailsBindings()).wf.Get(id));
+    return http(`/api/workflows/${id}`);
+  },
+  async saveWorkflow(wf: Workflow): Promise<Workflow> {
+    if (isWails) return nn(await (await wailsBindings()).wf.Save(wf as unknown as never));
+    return http("/api/workflows", { method: "POST", body: JSON.stringify(wf) });
+  },
+  async deleteWorkflow(id: string): Promise<void> {
+    if (isWails) return (await wailsBindings()).wf.Delete(id);
+    return http(`/api/workflows/${id}`, { method: "DELETE" });
+  },
+  async duplicateWorkflow(id: string): Promise<Workflow> {
+    if (isWails) return nn(await (await wailsBindings()).wf.Duplicate(id));
+    return http(`/api/workflows/${id}/duplicate`, { method: "POST" });
+  },
+  async setEnabled(id: string, enabled: boolean): Promise<Workflow> {
+    if (isWails) return nn(await (await wailsBindings()).wf.SetEnabled(id, enabled));
+    return http(`/api/workflows/${id}/enable?value=${enabled}`, { method: "POST" });
+  },
+  async validateWorkflow(wf: Workflow): Promise<ValidationResult> {
+    if (isWails) {
+      return nn(
+        await (await wailsBindings()).wf.Validate(wf as unknown as never),
+      );
+    }
+    return http("/api/workflows/validate", {
+      method: "POST",
+      body: JSON.stringify(wf),
+    });
+  },
+  async exportYAML(id: string): Promise<string> {
+    if (isWails) return (await wailsBindings()).wf.ExportYAML(id);
+    const res = await fetch(`/api/workflows/${id}/export`);
+    return res.text();
+  },
+
+  // ---- Executions ----
+  async runWorkflow(
+    id: string,
+    task: string,
+    variables?: Record<string, unknown>,
+  ): Promise<Execution> {
+    if (isWails)
+      return nn(
+        await (await wailsBindings()).ex.Run(id, task, variables ?? {}),
+      );
+    return http(`/api/workflows/${id}/run`, {
+      method: "POST",
+      body: JSON.stringify({ task, variables }),
+    });
+  },
+  async listExecutions(workflowID = "", limit = 50): Promise<Execution[]> {
+    if (isWails) return nn(await (await wailsBindings()).ex.List(workflowID, limit));
+    const q = workflowID
+      ? `?workflow_id=${encodeURIComponent(workflowID)}&limit=${limit}`
+      : `?limit=${limit}`;
+    return http(`/api/executions${q}`);
+  },
+  async getExecution(id: string): Promise<Execution> {
+    if (isWails) return nn(await (await wailsBindings()).ex.Get(id));
+    return http(`/api/executions/${id}`);
+  },
+  async executionNodes(id: string): Promise<ExecutionNode[]> {
+    if (isWails) return nn(await (await wailsBindings()).ex.Nodes(id));
+    return http(`/api/executions/${id}/nodes`);
+  },
+  async executionEvents(id: string): Promise<Record<string, unknown>[]> {
+    if (isWails) return nn(await (await wailsBindings()).ex.Events(id));
+    return http(`/api/executions/${id}/events`);
+  },
+  async executionArtifacts(id: string): Promise<Artifact[]> {
+    if (isWails) return nn(await (await wailsBindings()).ex.Artifacts(id));
+    return http(`/api/executions/${id}/artifacts`);
+  },
+  async provideInput(
+    id: string,
+    response: Record<string, unknown>,
+  ): Promise<Execution> {
+    if (isWails) return nn(await (await wailsBindings()).ex.ProvideInput(id, response));
+    return http(`/api/executions/${id}/input`, {
+      method: "POST",
+      body: JSON.stringify(response),
+    });
+  },
+  async cancelExecution(id: string): Promise<void> {
+    if (isWails) return (await wailsBindings()).ex.Cancel(id);
+    return http(`/api/executions/${id}/cancel`, { method: "POST" });
+  },
+
+  // ---- Agents / Skills ----
+  async listAgents(): Promise<AgentInfo[]> {
+    if (isWails) return nn(await (await wailsBindings()).ag.List());
+    return http("/api/agents");
+  },
+  async testAgent(id: string): Promise<string> {
+    if (isWails) return (await wailsBindings()).ag.Test(id);
+    const r = await http<{ output: string }>(`/api/agents/${id}/test`, {
+      method: "POST",
+    });
+    return r.output;
+  },
+  async setAgentPermission(id: string, p: PermissionPolicy): Promise<void> {
+    if (isWails) return (await wailsBindings()).ag.SetPermission(id, p);
+    return http(`/api/agents/${id}/permission`, {
+      method: "POST",
+      body: JSON.stringify(p),
+    });
+  },
+  async listSkills(): Promise<SkillDTO[]> {
+    if (isWails) return (await wailsBindings()).sk.List();
+    return http("/api/skills");
+  },
+  async testSkill(id: string): Promise<string> {
+    if (isWails) return (await wailsBindings()).sk.Test(id);
+    const r = await http<{ output: string }>(`/api/skills/${id}/test`, {
+      method: "POST",
+    });
+    return r.output;
+  },
+
+  // ---- Git ----
+  async gitStatus(): Promise<{
+    branch: string;
+    modified: string[];
+    staged: string[];
+    untracked: string[];
+  }> {
+    if (isWails) return nn(await (await wailsBindings()).gt.Status());
+    return http("/api/git/status");
+  },
+  async gitDiff(staged = false): Promise<string> {
+    if (isWails) return (await wailsBindings()).gt.Diff(staged);
+    const r = await http<{ diff: string }>(`/api/git/diff?staged=${staged}`);
+    return r.diff;
+  },
+  async gitLog(limit = 10): Promise<
+    { hash: string; author: string; date: string; subject: string }[]
+  > {
+    if (isWails) return nn(await (await wailsBindings()).gt.Log(limit));
+    return http(`/api/git/log?limit=${limit}`);
+  },
+};
+
+// ---- 实时事件(统一订阅层) ----
+
+type EventHandler = (ev: UIEvent) => void;
+const handlers = new Set<EventHandler>();
+let started = false;
+
+export function subscribeEvents(h: EventHandler): () => void {
+  handlers.add(h);
+  ensureEventStream();
+  return () => handlers.delete(h);
+}
+
+function dispatch(ev: UIEvent) {
+  handlers.forEach((h) => h(ev));
+}
+
+function ensureEventStream() {
+  if (started || typeof window === "undefined") return;
+  started = true;
+  if (isWails) {
+    import("@wailsio/runtime").then((runtime) => {
+      runtime.Events.On("ui:event", (data: unknown) => {
+        dispatch(data as UIEvent);
+      });
+    });
+  } else {
+    const es = new EventSource("/api/events");
+    es.onmessage = (m) => {
+      try {
+        dispatch(JSON.parse(m.data) as UIEvent);
+      } catch {
+        // 忽略无法解析的事件
+      }
+    };
+    es.onerror = () => {
+      // 断线由 EventSource 自动重连
+    };
+  }
+}

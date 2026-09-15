@@ -1,7 +1,31 @@
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { Toaster } from "@/components/ui/sonner";
+import Layout from "@/components/layout";
+import Dashboard from "@/pages/Dashboard";
+import Workflows from "@/pages/Workflows";
+import Designer from "@/pages/Designer";
+import WorkflowHistory from "@/pages/WorkflowHistory";
+import Executions from "@/pages/Executions";
+import ExecutionMonitor from "@/pages/ExecutionMonitor";
+import Agents from "@/pages/Agents";
+import Skills from "@/pages/Skills";
+
 export default function App() {
   return (
-    <div className="flex h-screen items-center justify-center bg-background text-foreground">
-      <h1 className="text-2xl font-semibold">Agent Workflow Orchestrator</h1>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/workflows" element={<Workflows />} />
+          <Route path="/workflows/:id/design" element={<Designer />} />
+          <Route path="/workflows/:id/history" element={<WorkflowHistory />} />
+          <Route path="/executions" element={<Executions />} />
+          <Route path="/executions/:id" element={<ExecutionMonitor />} />
+          <Route path="/agents" element={<Agents />} />
+          <Route path="/skills" element={<Skills />} />
+        </Route>
+      </Routes>
+      <Toaster position="top-center" richColors />
+    </BrowserRouter>
   );
 }

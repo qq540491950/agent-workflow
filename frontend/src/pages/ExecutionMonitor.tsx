@@ -1,0 +1,307 @@
+import { useCallback, useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { toast } from "sonner";
+import { CheckCircle2, XCircle, Circle, PauseCircle, Ban } from "lucide-react";
+import { api, subscribeEvents } from "@/lib/api";
+import type { Artifact, Execution, ExecutionNode, UIEvent } from "@/lib/types";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { StateBadge } from "@/components/state-badge";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
+
+const nodeIcon: Record<string, React.ReactNode> = {
+  SUCCESS: <CheckCircle2 className="h-4 w-4 text-green-500" />,
+  FAILED: <XCircle className="h-4 w-4 text-red-500" />,
+  RUNNING: <Circle className="h-4 w-4 animate-pulse text-blue-400" />,
+  WAITING: <PauseCircle className="h-4 w-4 text-amber-400" />,
+  SKIPPED: <Ban className="h-4 w-4 text-muted-foreground" />,
+  PENDING: <Circle className="h-4 w-4 text-muted-foreground" />,
+};
+
+export default function ExecutionMonitor() {
+  const { id = "" } = useParams();
+  const [exec, setExec] = useState<Execution | null>(null);
+  const [nodes, setNodes] = useState<ExecutionNode[]>([]);
+  const [events, setEvents] = useState<UIEvent[]>([]);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [instruction, setInstruction] = useState("");
+
+  const refresh = useCallback(async () => {
+    try {
+      const [e, ns, evs, arts] = await Promise.all([
+        api.getExecution(id),
+        api.executionNodes(id),
+        api.executionEvents(id),
+        api.executionArtifacts(id),
+      ]);
+      setExec(e);
+      setNodes(ns);
+      setEvents(
+        evs.map((x) => ({
+          type: String(x.type),
+          execution_id: String(x.execution_id),
+          node_id: String(x.node_id ?? ""),
+          timestamp: String(x.created_at),
+          data: (x.data as Record<string, unknown>) ?? {},
+        })),
+      );
+      setArtifacts(arts);
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    refresh();
+    // 实时事件:匹配当前执行则刷新
+    const pending: UIEvent[] = [];
+    let timer: number | undefined;
+    const unsub = subscribeEvents((ev) => {
+      if (ev.execution_id !== id) return;
+      pending.push(ev);
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(refresh, 120);
+    });
+    return () => {
+      unsub();
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [id, refresh]);
+
+  if (!exec) {
+    return <div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>;
+  }
+
+  const waiting =
+    exec.state === "WAITING_USER" || nodes.some((n) => n.state === "WAITING");
+  const waitingNode = nodes.find((n) => n.state === "WAITING");
+  const prompt =
+    (events.find((e) => e.type === "human.input_required")?.data?.prompt as string) ??
+    waitingNode?.error ??
+    "工作流需要人工确认";
+
+  const provide = async (response: string, extra?: string) => {
+    try {
+      await api.provideInput(exec.id, {
+        response,
+        instruction: extra ?? "",
+      });
+      toast.success("已提交,执行恢复中");
+      setInstruction("");
+      setTimeout(refresh, 300);
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  };
+
+  return (
+    <div className="h-full overflow-auto p-6">
+      <div className="mb-4 flex items-center gap-3">
+        <div>
+          <h1 className="flex items-center gap-2 text-xl font-semibold">
+            Execution
+            <span className="font-mono text-sm text-muted-foreground">{exec.id}</span>
+            <StateBadge state={exec.state} />
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            <Link className="hover:underline" to={`/workflows/${exec.workflow_id}/design`}>
+              {exec.workflow_name}
+            </Link>{" "}
+            · v{exec.workflow_version} · {exec.task}
+          </p>
+        </div>
+        <div className="ml-auto flex gap-2">
+          {(exec.state === "RUNNING" || exec.state === "WAITING_USER") && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-red-500"
+              onClick={async () => {
+                await api.cancelExecution(exec.id);
+                refresh();
+              }}
+            >
+              取消执行
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {exec.error && (
+        <div className="mb-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+          {exec.error}
+        </div>
+      )}
+
+      {/* HITL 面板 */}
+      {waiting && (
+        <Card className="mb-4 border-amber-500/50">
+          <CardHeader className="py-3">
+            <CardTitle className="flex items-center gap-2 text-amber-400">
+              <PauseCircle className="h-4 w-4" /> Workflow requires your input
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm">{prompt}</p>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={() => provide("approve")}>Approve</Button>
+              <Button size="sm" variant="outline" className="text-red-400" onClick={() => provide("reject")}>
+                Reject
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => provide("continue")}>
+                Continue
+              </Button>
+            </div>
+            <div className="flex gap-2">
+              <Textarea
+                className="min-h-16"
+                placeholder="提供补充指令后点击 Provide instruction…"
+                value={instruction}
+                onChange={(e) => setInstruction(e.target.value)}
+              />
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => provide("instruction", instruction)}
+              >
+                Provide instruction
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="grid gap-4 lg:grid-cols-5">
+        {/* 节点状态 */}
+        <Card className="lg:col-span-2">
+          <CardHeader className="py-3">
+            <CardTitle className="text-base">节点状态</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {nodes.length === 0 && (
+              <p className="py-6 text-center text-sm text-muted-foreground">等待节点执行…</p>
+            )}
+            {nodes.map((n) => (
+              <div
+                key={n.id}
+                className={cn(
+                  "flex items-center gap-2 rounded-md px-2 py-1.5",
+                  n.state === "RUNNING" && "bg-blue-500/10",
+                )}
+              >
+                {nodeIcon[n.state] ?? nodeIcon.PENDING}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm">
+                    {n.node_name}
+                    {n.attempt > 1 && (
+                      <Badge variant="secondary" className="ml-1 px-1 text-[10px]">
+                        ×{n.attempt}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    {n.node_type}
+                    {n.duration_ms ? ` · ${n.duration_ms}ms` : ""}
+                  </div>
+                </div>
+                {n.state === "FAILED" && (
+                  <div className="max-w-40 truncate text-xs text-red-400" title={n.error}>
+                    {n.error}
+                  </div>
+                )}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        {/* 日志 / 事件 / 制品 */}
+        <Card className="lg:col-span-3">
+          <CardContent className="pt-4">
+            <Tabs defaultValue="events">
+              <TabsList>
+                <TabsTrigger value="events">实时日志 ({events.length})</TabsTrigger>
+                <TabsTrigger value="nodes">节点输出</TabsTrigger>
+                <TabsTrigger value="artifacts">Artifacts ({artifacts.length})</TabsTrigger>
+              </TabsList>
+              <TabsContent value="events" className="mt-2">
+                <div className="max-h-[420px] space-y-0.5 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[11px]">
+                  {events.map((e, i) => (
+                    <div key={i} className="flex gap-2">
+                      <span className="text-muted-foreground">
+                        {(e.timestamp ?? "").slice(11, 19)}
+                      </span>
+                      <span
+                        className={cn(
+                          e.type.includes("failed") && "text-red-400",
+                          e.type.includes("approved") && "text-green-400",
+                          e.type.includes("rejected") && "text-amber-400",
+                          e.type.includes("input_required") && "text-amber-300",
+                        )}
+                      >
+                        {e.type}
+                      </span>
+                      {e.node_id && <span className="text-muted-foreground">{e.node_id}</span>}
+                    </div>
+                  ))}
+                  {events.length === 0 && (
+                    <div className="py-6 text-center text-muted-foreground">暂无日志</div>
+                  )}
+                </div>
+              </TabsContent>
+              <TabsContent value="nodes" className="mt-2">
+                <div className="max-h-[420px] space-y-2 overflow-auto">
+                  {nodes.map((n) => (
+                    <details key={n.id} className="rounded-md border">
+                      <summary className="cursor-pointer px-3 py-1.5 text-sm">
+                        {n.node_name}
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          {n.state}
+                        </span>
+                      </summary>
+                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap bg-muted/40 p-2 text-[11px]">
+                        {n.output || n.error || "(无输出)"}
+                      </pre>
+                    </details>
+                  ))}
+                  {nodes.length === 0 && (
+                    <div className="py-6 text-center text-sm text-muted-foreground">暂无</div>
+                  )}
+                </div>
+              </TabsContent>
+              <TabsContent value="artifacts" className="mt-2">
+                <div className="max-h-[420px] space-y-2 overflow-auto">
+                  {artifacts.map((a) => (
+                    <details key={a.id} className="rounded-md border">
+                      <summary className="cursor-pointer px-3 py-1.5 text-sm">
+                        {a.name}
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          {a.node_id} · {a.content_type}
+                        </span>
+                      </summary>
+                      <pre className="max-h-48 overflow-auto whitespace-pre-wrap bg-muted/40 p-2 text-[11px]">
+                        {a.content}
+                      </pre>
+                    </details>
+                  ))}
+                  {artifacts.length === 0 && (
+                    <div className="py-6 text-center text-sm text-muted-foreground">
+                      暂无制品(git diff 等会出现在这里)
+                    </div>
+                  )}
+                </div>
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}

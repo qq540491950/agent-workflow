@@ -152,6 +152,10 @@ func (s *Server) routes() {
 		err := s.app.AgentSvc.SetPermission(r.PathValue("id"), policyOf(p))
 		return writeJSON(w, map[string]any{"ok": err == nil}, err)
 	}))
+	s.mux.HandleFunc("POST /api/agents/{id}/test", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		out, err := s.app.AgentSvc.Test(r.Context(), r.PathValue("id"))
+		return writeJSON(w, map[string]any{"output": out}, err)
+	}))
 	s.mux.HandleFunc("GET /api/skills", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		return writeJSON(w, s.app.SkillSvc.List(), nil)
 	}))
