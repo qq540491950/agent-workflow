@@ -365,6 +365,11 @@ function DesignerInner() {
   };
 
   saveRef.current = save;
+  // 打开运行对话框时预填工作流变量
+  const openRun = () => {
+    setRunVars(JSON.stringify(wf?.variables ?? {}, null, 2));
+    setRunOpen(true);
+  };
   const run = async () => {
     if (!wf) return;
     let variables: Record<string, unknown> = {};
@@ -412,7 +417,7 @@ function DesignerInner() {
           <Button variant="outline" size="sm" onClick={save} disabled={saving}>
             <Save className="mr-1 h-4 w-4" /> 保存
           </Button>
-          <Button size="sm" onClick={() => setRunOpen(true)}>
+          <Button size="sm" onClick={openRun}>
             <Play className="mr-1 h-4 w-4" /> 运行
           </Button>
         </div>
