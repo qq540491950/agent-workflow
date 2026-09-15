@@ -171,6 +171,66 @@
 
 - 运行中 `pkill` 服务器 → 重启 → WAITING_USER 执行保持可恢复 → 提交 approve → 跨进程恢复 → COMPLETED。✅
 
+### 轮次 17:执行监控增强
+
+- **时间线视图**:甘特式节点条(按执行起点对齐,条长=耗时,颜色=状态),
+  并行重叠与人工等待区间一目了然。✅ 截图 `19-monitor-timeline.png`
+- 标题栏显示总耗时;循环执行显示"循环 N 轮"徽章;一键导出执行记录 JSON
+  (执行 + 节点 + 事件 + 制品打包归档)。✅ E2E 验证导出内容完整
+
+### 轮次 18:失败恢复与记录管理
+
+- 状态机新增 FAILED→RUNNING(仅用户显式重试合法);`Engine.RetryNode(skip)`
+  支持"重试失败节点"与"跳过并继续";监控页按钮直达。
+- 集成测试:失败 → 重试(仍失败)→ 跳过(SKIPPED)→ 后续节点继续;对
+  COMPLETED 执行重试被拒绝。✅ `workflow/runtime/retry_test.go`
+- 执行记录删除(级联清理节点/事件/制品)+ 列表页删除按钮。✅ E2E
+
+### 轮次 19:编排能力补强
+
+- **节点级禁用**:`config.enabled=false` → 运行时 SKIPPED(路由直通),
+  画布半透明 ⊘ 标识,属性面板开关。✅ E2E(execute SKIPPED,链路完成)
+- **Merge 聚合**:merge 节点收集分支状态,输出"汇合 N 个分支,全部成功/
+  失败分支"摘要与事件。✅
+- **工作流级权限覆盖**:DSL `permissions` 段运行时生效(克隆全局管理器 +
+  应用覆盖,不影响其他运行);持久化与列迁移。✅ E2E(mock-pi 禁写 → execute
+  PERMISSION_DENIED)
+- **工作流级超时**:`settings.timeout_seconds` 防止单轮挂死。✅ E2E(sleep 10
+  + 2s 超时 → FAILED "工作流执行超时(2s)")
+- **subworkflow 存在性警告** + **Designer Cmd/Ctrl+S 保存**。
+
+### 轮次 20:可预测性与一致性
+
+- **Bug #7**:Mock 决策序列游标跨执行共享,第二次运行行为漂移。修复:
+  每次 Start 前自动重置 Mock(ResetMock),决策序列从头开始。✅ E2E(连续两次
+  运行 review 均 attempt=2)
+- **Bug #8**:清空 Mock 行为配置后丢失内置默认脚本。修复:内置默认脚本 +
+  用户配置按 mode 合并(behavior=null 恢复默认,{} 清空某 mode)。✅ E2E
+- **Skill 启用/禁用真实生效**:运行时拒绝调用禁用 Skill(此前仅 UI 展示)。
+  ✅ E2E(禁用 submit → FAILED 明确报错 → 重新启用 → COMPLETED)
+- **HITL 指令注入**:`instruction` 文本写入 `user_instruction`,
+  后续 execute/fix 节点可通过 `{{user_instruction}}` 引用。✅ E2E(approval-demo
+  全链路:WAITING_USER → 指令恢复 → 上下文含"重点关注密码存储安全" → COMPLETED)
+
+### 轮次 21:运维与文档
+
+- `/api/health` 健康端点;`--git-dir` 启动参数;优雅关闭(SIGINT/SIGTERM →
+  Shutdown + WaitIdle 等待执行收尾);Events 分类快捷过滤(前缀匹配);
+  Agents 列表显示已配置模型;Test 真实探测 CLI 安装状态;示例工作流按 ID 补种;
+  新增 approval-demo 审批演示示例;favicon。
+- **数据备份/恢复**:设置页导出全部工作流 + Agent 配置(含明文敏感环境变量,
+  备份需妥善保管);恢复时同 ID 工作流跳过。✅ E2E(导出 11 工作流 + 2 配置 →
+  新库恢复 8 个/跳过 3 个种子重复 → 数据完整)
+
+### 并发与稳定性
+
+- `go test -race` 全量通过(runtime/persistence/agent/event 等)。
+- 连续 10 次执行全部 COMPLETED,server RSS 21MB 无泄漏迹象。
+- **真实重启恢复**:运行中 pkill 服务器 → 重启 → WAITING_USER 执行保持可恢复
+  → 提交 approve → 跨进程恢复 → COMPLETED。
+- 桌面 .app 打包(productName/Identifier 修正)并启动验证:窗口创建、
+  UI 渲染、**mode: desktop**(IPC 传输,0 次 HTTP /api 请求)。
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
