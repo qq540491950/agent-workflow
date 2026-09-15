@@ -54,7 +54,13 @@ export default function Skills() {
                 </TableCell>
                 <TableCell className="text-sm">builtin</TableCell>
                 <TableCell>
-                  <Switch checked={s.enabled} />
+                  <Switch
+                    checked={s.enabled}
+                    onCheckedChange={async (v) => {
+                      await api.setSkillEnabled(s.id, v);
+                      refresh();
+                    }}
+                  />
                 </TableCell>
                 <TableCell className="text-right">
                   <Button

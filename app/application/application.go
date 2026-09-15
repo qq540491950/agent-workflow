@@ -43,8 +43,9 @@ type App struct {
 	Perms  *permission.Manager
 	GitSvc *git.Service
 
-	DataDir  string
-	LogLevel string
+	DataDir        string
+	LogLevel       string
+	DisabledSkills map[string]bool
 	// 供 Wails/SSE 桥接实时事件。
 	eventsMu      sync.RWMutex
 	eventHandlers map[int]func(event.UIEvent)
@@ -84,11 +85,14 @@ func NewApp(dataDir string) (*App, error) {
 		Skills:        skills,
 		Perms:         perms,
 		GitSvc:        gitSvc,
-		DataDir:       dataDir,
-		eventHandlers: map[int]func(event.UIEvent){},
+		DataDir:        dataDir,
+		LogLevel:       "info",
+		DisabledSkills: map[string]bool{},
+		eventHandlers:  map[int]func(event.UIEvent){},
 	}
 	app.Engine = wfruntime.NewEngine(agents, skills, perms, bus, gitSvc, repo)
 	app.Engine.SubworkflowRunner = app.runSubworkflow
+	app.Engine.IsSkillDisabled = func(id string) bool { return app.DisabledSkills[id] }
 
 	// 内置 Skill 注册
 	for _, s := range builtin.All() {
@@ -121,6 +125,10 @@ func NewApp(dataDir string) (*App, error) {
 	app.LogLevel = lv
 	if app.LogLevel == "" {
 		app.LogLevel = "info"
+	}
+	// 禁用 Skill 恢复
+	if disabled, err := repo.ListDisabledSkills(); err == nil {
+		app.DisabledSkills = disabled
 	}
 
 	// 崩溃恢复
@@ -714,10 +722,24 @@ func (s *SkillService) List() []skill.DTO {
 	out := []skill.DTO{}
 	for _, sk := range s.app.Skills.List() {
 		out = append(out, skill.DTO{
-			ID: sk.ID(), Name: sk.Name(), Description: sk.Description(), Enabled: true,
+			ID: sk.ID(), Name: sk.Name(), Description: sk.Description(),
+			Enabled: !s.app.DisabledSkills[sk.ID()],
 		})
 	}
 	return out
+}
+
+// SetEnabled 启用/禁用 Skill(禁用后运行时拒绝调用)。
+func (s *SkillService) SetEnabled(id string, enabled bool) error {
+	if _, err := s.app.Skills.Get(id); err != nil {
+		return err
+	}
+	if enabled {
+		delete(s.app.DisabledSkills, id)
+	} else {
+		s.app.DisabledSkills[id] = true
+	}
+	return s.app.Repo.SaveSkillEnabled(id, enabled)
 }
 
 // Test 执行一次 Skill 测试调用。

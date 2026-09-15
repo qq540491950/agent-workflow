@@ -302,6 +302,10 @@ func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *m
 	if err != nil {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 	}
+	// Skill 禁用检查(Skills 页开关)
+	if e.IsSkillDisabled != nil && e.IsSkillDisabled(skillID) {
+		return compiler.NodeOutcome{State: model.NodeFailed, Error: "Skill 已被禁用: " + skillID}
+	}
 	args, _ := node.Config["args"].(map[string]any)
 	resp, err := s.Execute(ctx, skill.SkillRequest{
 		NodeID:   node.ID,

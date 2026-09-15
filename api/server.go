@@ -251,6 +251,18 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/skills", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		return writeJSON(w, s.app.SkillSvc.List(), nil)
 	}))
+	s.mux.HandleFunc("POST /api/skills/{id}/enable", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		var body struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Enabled == nil {
+			return badRequest("需要 enabled 字段")
+		}
+		if err := s.app.SkillSvc.SetEnabled(r.PathValue("id"), *body.Enabled); err != nil {
+			return err
+		}
+		return writeJSON(w, map[string]any{"ok": true}, nil)
+	}))
 	s.mux.HandleFunc("POST /api/skills/{id}/test", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		out, err := s.app.SkillSvc.Test(r.Context(), r.PathValue("id"))
 		return writeJSON(w, map[string]any{"output": out}, err)

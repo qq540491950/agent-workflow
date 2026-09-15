@@ -417,6 +417,36 @@ func (d *DB) ListAllEvents(eventType string, limit int) ([]map[string]any, error
 	return out, rows.Err()
 }
 
+// SaveSkillEnabled 保存 Skill 启用状态。
+func (d *DB) SaveSkillEnabled(id string, enabled bool) error {
+	e := 0
+	if enabled {
+		e = 1
+	}
+	_, err := d.sql.Exec(`INSERT INTO skill_configs (id,enabled,updated_at) VALUES (?,?,?)
+		ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at`,
+		id, e, nowStr())
+	return wrap(err)
+}
+
+// ListDisabledSkills 返回被禁用的 Skill 集合。
+func (d *DB) ListDisabledSkills() (map[string]bool, error) {
+	rows, err := d.sql.Query(`SELECT id FROM skill_configs WHERE enabled=0`)
+	if err != nil {
+		return nil, wrap(err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, wrap(err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 // DeleteExecution 级联删除执行及其节点/事件/制品。
 func (d *DB) DeleteExecution(id string) error {
 	tx, err := d.sql.Begin()

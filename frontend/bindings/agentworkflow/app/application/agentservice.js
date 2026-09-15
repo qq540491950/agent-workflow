@@ -58,7 +58,8 @@ export function SetPermission(id, policy) {
 }
 
 /**
- * Test 用空任务测试 Agent 可用性(仅检查注册与配置)。
+ * Test 测试 Agent 可用性:检查注册与 CLI 是否安装(claude/pi)。
+ * CLI 未安装时给出明确提示(演示可使用 Mock Agent)。
  * @param {string} id
  * @returns {$CancellablePromise<string>}
  */

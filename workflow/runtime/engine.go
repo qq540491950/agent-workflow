@@ -44,6 +44,8 @@ type Engine struct {
 	Repo   *persistence.DB
 	// SubworkflowRunner 支持嵌套工作流(由 application 层注入,避免循环依赖)。
 	SubworkflowRunner func(ctx context.Context, workflowID, task string, input map[string]any) (map[string]any, error)
+	// IsSkillDisabled 由 application 层注入(检查 Skill 启用状态)。
+	IsSkillDisabled func(id string) bool
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc

@@ -256,6 +256,15 @@ export const api = {
     if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).sk.List());
     return http("/api/skills");
   },
+  async setSkillEnabled(id: string, enabled: boolean): Promise<void> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).sk.SetEnabled(id, enabled));
+    }
+    return http(`/api/skills/${id}/enable`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+  },
   async testSkill(id: string): Promise<string> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).sk.Test(id);
     const r = await http<{ output: string }>(`/api/skills/${id}/test`, {

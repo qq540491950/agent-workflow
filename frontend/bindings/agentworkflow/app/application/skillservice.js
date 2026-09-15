@@ -25,6 +25,16 @@ export function List() {
 }
 
 /**
+ * SetEnabled 启用/禁用 Skill(禁用后运行时拒绝调用)。
+ * @param {string} id
+ * @param {boolean} enabled
+ * @returns {$CancellablePromise<void>}
+ */
+export function SetEnabled(id, enabled) {
+    return $Call.ByID(1620570695, id, enabled);
+}
+
+/**
  * Test 执行一次 Skill 测试调用。
  * @param {string} id
  * @returns {$CancellablePromise<string>}
