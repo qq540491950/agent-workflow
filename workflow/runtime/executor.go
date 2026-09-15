@@ -85,9 +85,11 @@ func (e *Engine) dispatchNode(ctx context.Context, env *compiler.RunEnv, node *m
 	case model.NodeTypeCondition:
 		// 条件节点本身无副作用:路由由 routeAgent 完成
 		return compiler.NodeOutcome{State: model.NodeSuccess}
-	case model.NodeTypeParallel, model.NodeTypeMerge:
-		// 结构节点:由 ADK Parallel/Sequential 处理
+	case model.NodeTypeParallel:
+		// 并行节点:由 ADK ParallelAgent 处理
 		return compiler.NodeOutcome{State: model.NodeSuccess}
+	case model.NodeTypeMerge:
+		return e.runMergeNode(ctx, env, node, st)
 	default:
 		return compiler.NodeOutcome{
 			State: model.NodeFailed,
@@ -388,6 +390,41 @@ func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.N
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error(), Output: string(out)}
 	}
 	return compiler.NodeOutcome{State: model.NodeSuccess, Output: string(out)}
+}
+
+// runMergeNode 汇合并行分支结果:收集所有入边分支节点的状态,
+// 输出聚合摘要(全部 SUCCESS / 部分失败一目了然)。
+func (e *Engine) runMergeNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
+	var branches []string
+	var failed []string
+	for _, edge := range env.WF.Edges {
+		if edge.To != node.ID {
+			continue
+		}
+		branchID := edge.From
+		branches = append(branches, branchID)
+		status := ""
+		if v, ok := st.Get(compiler.StatusKey(branchID)); ok {
+			status = fmt.Sprint(v)
+		}
+		if status == string(model.NodeFailed) {
+			failed = append(failed, branchID)
+		}
+	}
+	summary := fmt.Sprintf("汇合 %d 个分支", len(branches))
+	if len(failed) > 0 {
+		summary += fmt.Sprintf(",失败分支: %s", strings.Join(failed, ", "))
+	} else {
+		summary += ",全部成功"
+	}
+	e.Bus.Emit(event.New("merge.completed", env.Exec.ID, node.ID, map[string]any{
+		"branches": branches, "failed": failed,
+	}))
+	return compiler.NodeOutcome{
+		State:   model.NodeSuccess,
+		Summary: summary,
+		Data:    map[string]any{"branches": branches, "failed": failed},
+	}
 }
 
 // runHumanNode 暂停执行等待用户输入(配合 routeAgent/恢复机制)。
