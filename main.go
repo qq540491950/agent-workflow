@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 	"strings"
 
 	"agentworkflow/api"
@@ -102,10 +103,18 @@ func runServer(app *app.App, addr string) {
 		<-sig
 		logx.Info("收到退出信号,正在关闭…")
 		_ = srv.Shutdown(context.Background())
+		// 给运行中的执行最多 5 秒收尾(状态落库为 CANCELLED)
+		if left := app.Engine.WaitIdle(5 * time.Second); left > 0 {
+			logx.Warn("仍有执行未收尾", "count", left)
+		}
 	}()
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logx.Error("HTTP 服务退出", "error", err)
-		os.Exit(1)
+		if err != http.ErrServerClosed {
+			logx.Error("HTTP 服务退出", "error", err)
+			os.Exit(1)
+		}
+		// 等待执行协程收尾后再退出
+		_ = app.Engine.WaitIdle(5 * time.Second)
 	}
 }
 

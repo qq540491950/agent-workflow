@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/adk/agent"
@@ -46,6 +47,23 @@ type Engine struct {
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+	// running 统计正在执行的 execute() 协程(优雅关闭等待用)。
+	running atomic.Int64
+}
+
+// RunningCount 返回正在执行的执行协程数。
+func (e *Engine) RunningCount() int64 { return e.running.Load() }
+
+// WaitIdle 等待全部执行协程收尾,超时返回当前计数。
+func (e *Engine) WaitIdle(timeout time.Duration) int64 {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if e.RunningCount() == 0 {
+			return 0
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return e.RunningCount()
 }
 
 // NewEngine 创建运行时引擎。
@@ -258,6 +276,8 @@ func (e *Engine) RecoverPending() error {
 
 // execute 是执行主循环:编译 → ADK Runner 执行 → 收尾。
 func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string, userInput map[string]any) {
+	e.running.Add(1)
+	defer e.running.Add(-1)
 	env := &compiler.RunEnv{
 		Exec:          exec,
 		WF:            exec.Snapshot,
