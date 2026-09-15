@@ -134,6 +134,13 @@ export default function ExecutionMonitor() {
           </p>
         </div>
         <div className="ml-auto flex gap-2">
+          <a
+            className="inline-flex h-8 items-center rounded-md border px-3 text-xs hover:bg-accent"
+            href={`/api/executions/${exec.id}/export`}
+            download={`execution-${exec.id}.json`}
+          >
+            导出记录
+          </a>
           {(exec.state === "RUNNING" || exec.state === "WAITING_USER") && (
             <Button
               variant="outline"

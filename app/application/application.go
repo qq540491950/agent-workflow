@@ -542,6 +542,23 @@ func (s *ExecutionService) Cancel(ctx context.Context, id string) error {
 	return s.app.Engine.Cancel(ctx, id)
 }
 
+// Export 汇出执行完整记录(执行+节点+事件+制品),用于审计归档。
+func (s *ExecutionService) Export(id string) (map[string]any, error) {
+	exec, err := s.app.Repo.GetExecution(id)
+	if err != nil {
+		return nil, err
+	}
+	nodes, _ := s.app.Repo.ListExecutionNodes(id)
+	events, _ := s.app.Repo.ListEvents(id, 0)
+	artifacts, _ := s.app.Repo.ListArtifacts(id)
+	return map[string]any{
+		"execution": exec,
+		"nodes":     nodes,
+		"events":    events,
+		"artifacts": artifacts,
+	}, nil
+}
+
 // RetryNode 重试失败节点或跳过继续(skip=true)。
 func (s *ExecutionService) RetryNode(id string, skip bool) (*model.Execution, error) {
 	return s.app.Engine.RetryNode(context.Background(), id, skip)

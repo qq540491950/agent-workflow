@@ -188,6 +188,10 @@ export const api = {
       body: JSON.stringify({ skip }),
     });
   },
+  async exportExecutionURL(id: string): Promise<string> {
+    // 浏览器与桌面均用下载链接(桌面由资产处理器旁路到同源)
+    return `/api/executions/${id}/export`;
+  },
   async cancelExecution(id: string): Promise<void> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).ex.Cancel(id);
     return http(`/api/executions/${id}/cancel`, { method: "POST" });

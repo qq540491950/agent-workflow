@@ -121,6 +121,14 @@ func (s *Server) routes() {
 		events, err := s.app.Executions.Events(r.PathValue("id"))
 		return writeJSON(w, events, err)
 	}))
+	s.mux.HandleFunc("GET /api/executions/{id}/export", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		data, err := s.app.Executions.Export(r.PathValue("id"))
+		if err != nil {
+			return err
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="execution-`+r.PathValue("id")+`.json"`)
+		return writeJSON(w, data, nil)
+	}))
 	s.mux.HandleFunc("GET /api/executions/{id}/artifacts", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		arts, err := s.app.Executions.Artifacts(r.PathValue("id"))
 		return writeJSON(w, arts, err)
