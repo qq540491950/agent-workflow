@@ -82,6 +82,7 @@ func (e *Engine) Validate(wf *model.Workflow) *validator.Result {
 	return validator.Validate(wf,
 		func(id string) bool { _, err := e.Agents.Get(id); return err == nil },
 		func(id string) bool { _, err := e.Skills.Get(id); return err == nil },
+		func(id string) bool { _, err := e.Repo.GetWorkflow(id); return err == nil },
 	)
 }
 

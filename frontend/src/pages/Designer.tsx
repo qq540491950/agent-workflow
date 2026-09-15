@@ -162,6 +162,19 @@ function DesignerInner() {
     api.listAgents().then((as) => setAgents(as.map((a) => a.id))).catch(() => {});
   }, []);
 
+  // Cmd/Ctrl+S 快捷保存
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        saveRef.current?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  const saveRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     if (!id) return;
     api.getWorkflow(id).then((w) => {
@@ -344,6 +357,7 @@ function DesignerInner() {
     }
   };
 
+  saveRef.current = save;
   const run = async () => {
     if (!wf) return;
     try {

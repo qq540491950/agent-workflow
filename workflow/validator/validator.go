@@ -30,11 +30,21 @@ type Result struct {
 // AgentResolver 判断 Agent 是否存在(由调用方注入 Agent Registry)。
 type AgentResolver func(id string) bool
 
+// WorkflowResolver 判断子工作流是否存在。
+type WorkflowResolver func(id string) bool
+
 // SkillResolver 判断 Skill 是否存在。
 type SkillResolver func(id string) bool
 
+// WorkflowResolver 判断子工作流是否存在(可选)。
+
 // Validate 对 Workflow 执行全部校验规则。
-func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver) *Result {
+// workflowResolver 非空时额外校验 subworkflow 引用(警告级别)。
+func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, workflowResolver ...WorkflowResolver) *Result {
+	var wfResolver WorkflowResolver
+	if len(workflowResolver) > 0 {
+		wfResolver = workflowResolver[0]
+	}
 	res := &Result{Valid: true, Errors: []ValidationError{}, Warnings: []ValidationError{}}
 	addErr := func(code, node, format string, args ...any) {
 		res.Valid = false
@@ -66,6 +76,16 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver) *R
 		nodeByID[n.ID] = n
 		// 节点类型配置检查
 		validateNodeConfig(n, agents, skills, addErr)
+		// subworkflow 存在性(警告级别)
+		if n.Type == model.NodeTypeSubWorkflow && wfResolver != nil {
+			wid := ""
+			if v, ok := n.Config["workflow_id"].(string); ok {
+				wid = v
+			}
+			if wid != "" && !wfResolver(wid) {
+				addWarn("SUBWORKFLOW_NOT_FOUND", n.ID, "子工作流 %q 不存在(运行时将失败)", wid)
+			}
+		}
 		// 条件表达式语法检查
 		for _, e := range wf.OutgoingEdges(n.ID) {
 			if e.Condition != "" {
