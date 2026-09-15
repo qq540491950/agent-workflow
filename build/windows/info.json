@@ -5,11 +5,11 @@
 	"info": {
 		"0000": {
 			"ProductVersion": "0.1.0",
-			"CompanyName": "My Company",
-			"FileDescription": "A agent-workflow application",
-			"LegalCopyright": "© 2026, My Company",
-			"ProductName": "My Product",
-			"Comments": "This is a comment"
+			"CompanyName": "Agent Workflow",
+			"FileDescription": "可配置、可视化、可扩展的多 Agent 工作流编排桌面应用",
+			"LegalCopyright": "(c) 2026, Agent Workflow",
+			"ProductName": "Agent Workflow Orchestrator",
+			"Comments": "多 Agent 工作流编排"
 		}
 	}
 }

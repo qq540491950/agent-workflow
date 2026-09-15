@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
-Name=My Product
-Comment=A agent-workflow application
+Name=Agent Workflow Orchestrator
+Comment=可配置、可视化、可扩展的多 Agent 工作流编排桌面应用
 # The Exec line includes %u to pass the URL to the application
 Exec=/usr/local/bin/agent-workflow %u
 Terminal=false

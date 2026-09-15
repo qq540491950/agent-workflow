@@ -5,13 +5,13 @@ version: '3'
 
 # This information is used to generate the build assets.
 info:
-  companyName: "My Company" # The name of the company
-  productName: "My Product" # The name of the application
-  productIdentifier: "com.mycompany.myproduct" # The unique product identifier
-  description: "A program that does X" # The application description
-  copyright: "(c) 2025, My Company" # Copyright text
-  comments: "Some Product Comments" # Comments
-  version: "0.0.1" # The application version
+  companyName: "Agent Workflow" # The name of the company
+  productName: "Agent Workflow Orchestrator" # The name of the application
+  productIdentifier: "com.agentworkflow.orchestrator" # The unique product identifier
+  description: "可配置、可视化、可扩展的多 Agent 工作流编排桌面应用" # The application description
+  copyright: "(c) 2026, Agent Workflow" # Copyright text
+  comments: "多 Agent 工作流编排" # Comments
+  version: "0.1.0" # The application version
   # cfBundleIconName: "appicon" # The macOS icon name in Assets.car icon bundles (optional)
   #                               # Should match the name of your .icon file without the extension
   #                               # If not set and Assets.car exists, defaults to "appicon"
