@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -413,4 +414,46 @@ func wrap(err error) error {
 		return nil
 	}
 	return model.NewError(model.KindPersistenceError, "DB_ERROR", err.Error())
+}
+
+// ---- AgentConfig ----
+
+// SaveAgentConfig 保存某 Agent 的运行配置(模型/端点/环境变量)。
+func (d *DB) SaveAgentConfig(id string, raw []byte) error {
+	_, err := d.sql.Exec(`INSERT INTO agent_configs (id,name,enabled,config_json,updated_at)
+		VALUES (?,?,1,?,?)
+		ON CONFLICT(id) DO UPDATE SET config_json=excluded.config_json, updated_at=excluded.updated_at`,
+		id, id, string(raw), nowStr())
+	return wrap(err)
+}
+
+// GetAgentConfig 读取某 Agent 的配置 JSON(不存在返回 nil)。
+func (d *DB) GetAgentConfig(id string) ([]byte, error) {
+	var raw string
+	err := d.sql.QueryRow(`SELECT config_json FROM agent_configs WHERE id=?`, id).Scan(&raw)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, wrap(err)
+	}
+	return []byte(raw), nil
+}
+
+// ListAgentConfigs 返回全部 Agent 配置。
+func (d *DB) ListAgentConfigs() (map[string]json.RawMessage, error) {
+	rows, err := d.sql.Query(`SELECT id, config_json FROM agent_configs`)
+	if err != nil {
+		return nil, wrap(err)
+	}
+	defer rows.Close()
+	out := map[string]json.RawMessage{}
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, wrap(err)
+		}
+		out[id] = json.RawMessage(raw)
+	}
+	return out, rows.Err()
 }

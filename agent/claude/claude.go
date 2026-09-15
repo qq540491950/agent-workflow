@@ -28,6 +28,12 @@ type Config struct {
 	DefaultTimeoutSeconds int
 	// ExtraArgs 追加 CLI 参数。
 	ExtraArgs []string
+	// Model 默认模型(节点级 req.Model 优先)。
+	Model string
+	// BaseURL API 端点 → 环境变量 ANTHROPIC_BASE_URL(仅子进程)。
+	BaseURL string
+	// AgentEnv 调用级环境变量(仅子进程,不改本地配置)。
+	AgentEnv map[string]string
 	// Permissions 由 Permission Manager 提供(可选,用于校验)。
 	Perms *permission.Manager
 }
@@ -46,6 +52,22 @@ func New(cfg Config) *Agent {
 		cfg.DefaultTimeoutSeconds = 600
 	}
 	return &Agent{cfg: cfg}
+}
+
+// resolveModel 决定本次调用模型:请求级 > 配置级。
+func (a *Agent) resolveModel(reqModel string) string {
+	if reqModel != "" {
+		return reqModel
+	}
+	return a.cfg.Model
+}
+
+// agentConfig 以 agent.AgentConfig 形态暴露配置(供环境合并)。
+func (a *Agent) agentConfig() coreagent.AgentConfig {
+	return coreagent.AgentConfig{
+		BaseURL: a.cfg.BaseURL,
+		Env:     a.cfg.AgentEnv,
+	}
 }
 
 // ID 实现 agent.Agent。
@@ -71,6 +93,10 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 
 	prompt := buildPrompt(req)
 	args := []string{"-p", prompt, "--output-format", "json"}
+	// 模型:节点级(req.Model)> Agent 配置;仅通过 --model 参数作用于本次调用
+	if model := a.resolveModel(req.Model); model != "" {
+		args = append(args, "--model", model)
+	}
 	// 权限策略:默认禁写(PLAN/REVIEW/DECISION 不修改项目文件)。
 	// 即使权限策略被误配置,CLI 层也强制禁止写工具。
 	args = append(args,
@@ -85,13 +111,11 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	if req.WorkingDir != "" {
 		cmd.Dir = req.WorkingDir
 	}
-	if len(req.Environment) > 0 {
-		env := cmd.Environ()
-		for k, v := range req.Environment {
-			env = append(env, k+"="+v)
-		}
-		cmd.Env = env
-	}
+	// 环境:父环境 + Agent 配置(含 BaseURL)+ 请求级覆盖;
+	// 全部为子进程级,不落盘、不改任何本地配置。
+	env := cmd.Environ()
+	env = append(env, a.agentConfig().MergeEnv(req.Environment)...)
+	cmd.Env = env
 
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

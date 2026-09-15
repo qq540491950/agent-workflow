@@ -1,6 +1,7 @@
 // 统一服务层:桌面模式走 Wails bindings(IPC),浏览器模式走 HTTP+SSE。
 // 页面只依赖本模块,不感知底层传输方式。
 import type {
+  AgentConfig,
   AgentInfo,
   Artifact,
   Execution,
@@ -177,6 +178,23 @@ export const api = {
   async listAgents(): Promise<AgentInfo[]> {
     if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ag.List());
     return http("/api/agents");
+  },
+  async getAgentConfig(id: string): Promise<AgentConfig> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).ag.GetConfig(id));
+    }
+    return http(`/api/agents/${id}/config`);
+  },
+  async updateAgentConfig(id: string, cfg: AgentConfig): Promise<AgentConfig> {
+    if ((await detectMode()) === "desktop") {
+      return nn(
+        await (await wailsBindings()).ag.UpdateConfig(id, cfg as unknown as never),
+      );
+    }
+    return http(`/api/agents/${id}/config`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    });
   },
   async testAgent(id: string): Promise<string> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).ag.Test(id);

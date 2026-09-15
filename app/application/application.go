@@ -122,6 +122,46 @@ func NewApp(dataDir string) (*App, error) {
 	return app, nil
 }
 
+// loadAgentConfig 读取某 Agent 的持久化配置(未配置返回零值)。
+func (a *App) loadAgentConfig(id string) (agent.AgentConfig, error) {
+	raw, err := a.Repo.GetAgentConfig(id)
+	if err != nil || raw == nil {
+		return agent.AgentConfig{}, err
+	}
+	cfg := agent.AgentConfig{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return agent.AgentConfig{}, model.NewError(model.KindPersistenceError, "AGENT_CONFIG_CORRUPT", err.Error())
+	}
+	return cfg, nil
+}
+
+// applyAgentConfig 按配置热重建适配器实例(注册表 Replace)。
+func (a *App) applyAgentConfig(id string, cfg agent.AgentConfig) error {
+	switch id {
+	case "claude-code":
+		return a.Agents.Replace(claude.New(claude.Config{
+			Perms:                 a.Perms,
+			Model:                 cfg.Model,
+			BaseURL:               cfg.BaseURL,
+			AgentEnv:              cfg.Env,
+			ExtraArgs:             cfg.ExtraArgs,
+			DefaultTimeoutSeconds: cfg.TimeoutSeconds,
+		}))
+	case "pi-agent":
+		return a.Agents.Replace(pi.New(pi.Config{
+			Perms:                 a.Perms,
+			Model:                 cfg.Model,
+			BaseURL:               cfg.BaseURL,
+			AgentEnv:              cfg.Env,
+			DefaultArgs:           cfg.ExtraArgs,
+			DefaultTimeoutSeconds: cfg.TimeoutSeconds,
+		}))
+	default:
+		// mock 等内置 Agent 不支持模型配置,静默保留
+		return nil
+	}
+}
+
 // reloadAgents 根据持久化配置注册 Agent 适配器。
 // 注意:必须复用传入 Engine 的同一个 permission.Manager 实例。
 func (a *App) reloadAgents() {
@@ -168,6 +208,16 @@ func (a *App) reloadAgents() {
 				GitCommit:       boolOf(p["git_commit"]),
 				GitPush:         boolOf(p["git_push"]),
 			})
+		}
+	}
+
+	// 从 DB 应用各 Agent 的模型/端点/环境变量配置(启动即生效)
+	if saved, err := a.Repo.ListAgentConfigs(); err == nil {
+		for id, raw := range saved {
+			cfg := agent.AgentConfig{}
+			if json.Unmarshal(raw, &cfg) == nil {
+				_ = a.applyAgentConfig(id, cfg)
+			}
 		}
 	}
 }
@@ -449,6 +499,51 @@ func (s *AgentService) SetPermission(id string, policy permission.Policy) error 
 	}
 	s.app.Perms.Set(id, policy)
 	return nil
+}
+
+// GetConfig 返回某 Agent 的运行配置(环境变量值已掩码为 ***)。
+func (s *AgentService) GetConfig(id string) (agent.AgentConfig, error) {
+	cfg, err := s.app.loadAgentConfig(id)
+	if err != nil {
+		return agent.AgentConfig{}, err
+	}
+	return cfg.Masked(), nil
+}
+
+// UpdateConfig 保存某 Agent 的运行配置并热重建适配器实例。
+// 隔离原则:配置只影响本应用对该 Agent 的调用(CLI 参数 + 子进程环境变量),
+// 不会修改用户的本地配置文件;环境变量值为 "***" 表示保留原值,空串表示删除。
+func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
+	// 合并掩码值:*** → 沿用已存值
+	stored, err := s.app.loadAgentConfig(id)
+	if err != nil {
+		return err
+	}
+	if cfg.Env != nil {
+		for k, v := range cfg.Env {
+			switch v {
+			case agent.MaskedValue:
+				if old, ok := stored.Env[k]; ok {
+					cfg.Env[k] = old
+				} else {
+					delete(cfg.Env, k)
+				}
+			case "":
+				delete(cfg.Env, k)
+			}
+		}
+		if len(cfg.Env) == 0 {
+			cfg.Env = nil
+		}
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if err := s.app.Repo.SaveAgentConfig(id, raw); err != nil {
+		return err
+	}
+	return s.app.applyAgentConfig(id, cfg)
 }
 
 // Test 用空任务测试 Agent 可用性(仅检查注册与配置)。

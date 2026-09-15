@@ -142,3 +142,12 @@ export interface ValidationResult {
   errors: ValidationError[];
   warnings: ValidationError[];
 }
+
+export interface AgentConfig {
+  model: string;
+  base_url: string;
+  timeout_seconds: number;
+  extra_args: string[];
+  env: Record<string, string> | null;
+  default_working_dir: string;
+}

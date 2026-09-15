@@ -13,14 +13,28 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as agent$0 from "../../agent/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as permission$0 from "../../permission/models.js";
+
+/**
+ * GetConfig 返回某 Agent 的运行配置(环境变量值已掩码为 ***)。
+ * @param {string} id
+ * @returns {$CancellablePromise<agent$0.AgentConfig>}
+ */
+export function GetConfig(id) {
+    return $Call.ByID(931224948, id).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType0($result);
+    }));
+}
 
 /**
  * @returns {$CancellablePromise<{ [_ in string]?: any }[]>}
  */
 export function List() {
     return $Call.ByID(188410106).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType1($result);
+        return $$createType2($result);
     }));
 }
 
@@ -43,6 +57,19 @@ export function Test(id) {
     return $Call.ByID(3353976630, id);
 }
 
+/**
+ * UpdateConfig 保存某 Agent 的运行配置并热重建适配器实例。
+ * 隔离原则:配置只影响本应用对该 Agent 的调用(CLI 参数 + 子进程环境变量),
+ * 不会修改用户的本地配置文件;环境变量值为 "***" 表示保留原值,空串表示删除。
+ * @param {string} id
+ * @param {agent$0.AgentConfig} cfg
+ * @returns {$CancellablePromise<void>}
+ */
+export function UpdateConfig(id, cfg) {
+    return $Call.ByID(1994183317, id, cfg);
+}
+
 // Private type creation functions
-const $$createType0 = $Create.Map($Create.Any, $Create.Any);
-const $$createType1 = $Create.Array($$createType0);
+const $$createType0 = agent$0.AgentConfig.createFrom;
+const $$createType1 = $Create.Map($Create.Any, $Create.Any);
+const $$createType2 = $Create.Array($$createType1);

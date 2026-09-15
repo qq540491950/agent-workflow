@@ -35,6 +35,9 @@ const (
 type AgentRequest struct {
 	Task         string
 	Mode         string
+	// Model 允许节点级覆盖模型;空串表示使用 Agent 配置的默认模型。
+	// 模型仅通过本次调用的 CLI 参数/环境变量传递,不会修改任何本地配置。
+	Model        string
 	Context      map[string]any
 	Instructions string
 	WorkingDir   string
@@ -62,6 +65,8 @@ type Agent interface {
 // Registry 管理 Agent 的注册与查找。
 type Registry interface {
 	Register(a Agent) error
+	// Replace 注册或替换 Agent(用于配置变更后重建适配器实例)。
+	Replace(a Agent) error
 	Get(id string) (Agent, error)
 	List() []Agent
 }
@@ -86,6 +91,17 @@ func (r *registry) Register(a Agent) error {
 	if _, exists := r.agents[a.ID()]; exists {
 		return fmt.Errorf("agent: %q already registered", a.ID())
 	}
+	r.agents[a.ID()] = a
+	return nil
+}
+
+// Replace 注册或覆盖同 ID 的 Agent。
+func (r *registry) Replace(a Agent) error {
+	if a == nil || a.ID() == "" {
+		return fmt.Errorf("agent: register requires non-nil agent with id")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.agents[a.ID()] = a
 	return nil
 }

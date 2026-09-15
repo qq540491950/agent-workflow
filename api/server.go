@@ -11,6 +11,7 @@ import (
 	"agentworkflow/app/application"
 	"agentworkflow/event"
 	"agentworkflow/logx"
+	"agentworkflow/agent"
 	"agentworkflow/permission"
 	"agentworkflow/workflow/model"
 )
@@ -151,6 +152,26 @@ func (s *Server) routes() {
 		}
 		err := s.app.AgentSvc.SetPermission(r.PathValue("id"), policyOf(p))
 		return writeJSON(w, map[string]any{"ok": err == nil}, err)
+	}))
+	s.mux.HandleFunc("GET /api/agents/{id}/config", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		cfg, err := s.app.AgentSvc.GetConfig(r.PathValue("id"))
+		return writeJSON(w, cfg, err)
+	}))
+	s.mux.HandleFunc("PUT /api/agents/{id}/config", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			return badRequest(err.Error())
+		}
+		rawJSON, _ := json.Marshal(raw)
+		var cfg agent.AgentConfig
+		if err := json.Unmarshal(rawJSON, &cfg); err != nil {
+			return badRequest(err.Error())
+		}
+		if err := s.app.AgentSvc.UpdateConfig(r.PathValue("id"), cfg); err != nil {
+			return err
+		}
+		masked, err := s.app.AgentSvc.GetConfig(r.PathValue("id"))
+		return writeJSON(w, masked, err)
 	}))
 	s.mux.HandleFunc("POST /api/agents/{id}/test", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		out, err := s.app.AgentSvc.Test(r.Context(), r.PathValue("id"))

@@ -25,6 +25,12 @@ type Config struct {
 	DefaultArgs []string
 	// DefaultTimeoutSeconds 默认超时。
 	DefaultTimeoutSeconds int
+	// Model 默认模型(节点级 req.Model 优先)。
+	Model string
+	// BaseURL API 端点 → 环境变量 PI_BASE_URL(仅子进程)。
+	BaseURL string
+	// AgentEnv 调用级环境变量(仅子进程,不改本地配置)。
+	AgentEnv map[string]string
 	// Perms 权限管理器(执行前校验)。
 	Perms *permission.Manager
 }
@@ -74,6 +80,12 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 		"--mode", req.Mode,
 		"--task", req.Task,
 	)
+	// 模型:节点级(req.Model)> Agent 配置;仅作用于本次调用
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	} else if a.cfg.Model != "" {
+		args = append(args, "--model", a.cfg.Model)
+	}
 	if req.Instructions != "" {
 		args = append(args, "--instructions", req.Instructions)
 	}
@@ -85,13 +97,14 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	if req.WorkingDir != "" {
 		cmd.Dir = req.WorkingDir
 	}
-	if len(req.Environment) > 0 {
-		env := cmd.Environ()
-		for k, v := range req.Environment {
-			env = append(env, k+"="+v)
-		}
-		cmd.Env = env
-	}
+	// 环境:父环境 + Agent 配置(含 BaseURL)+ 请求级覆盖;
+	// 全部为子进程级,不落盘、不改任何本地配置。
+	env := cmd.Environ()
+	env = append(env, coreagent.AgentConfig{
+		BaseURL: a.cfg.BaseURL,
+		Env:     a.cfg.AgentEnv,
+	}.MergeEnv(req.Environment)...)
+	cmd.Env = env
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 

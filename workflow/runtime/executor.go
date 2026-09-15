@@ -114,6 +114,7 @@ func cfgInt(node *model.Node, key string) int {
 
 // runAgentNode 执行 Agent 节点:
 // 权限检查 → 上下文构造(最小化) → Prompt 模板渲染 → 调用 Agent → 结构化结果。
+// 支持节点级 retry(指数/固定退避)与节点级 model 覆盖。
 func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
 	agentID := cfgStr(node, "agent")
 	mode := cfgStr(node, "mode")
@@ -154,9 +155,13 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		instructions = strings.TrimSpace(rendered + "\n\n" + r2)
 	}
 
+	// 节点级 model 覆盖(DSL config.model)> Agent 默认模型
+	nodeModel := cfgStr(node, "model")
+
 	req := coreagent.AgentRequest{
 		Task:         env.Exec.Task,
 		Mode:         mode,
+		Model:        nodeModel,
 		Context:      data,
 		Instructions: instructions,
 		WorkingDir:   cfgStr(node, "working_dir"),
@@ -167,19 +172,56 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		req.WorkingDir = wd
 	}
 
-	// Agent 输出事件(实时)
-	done := make(chan struct{})
-	go e.streamAgentOutput(ctx, env, node.ID, a.ID(), req, done)
-	defer close(done)
+	// 重试策略:retry.max_attempts(默认 1 = 不重试),backoff: fixed | exponential
+	maxAttempts, backoff := retryPolicyOf(node)
+	var outcome compiler.NodeOutcome
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			delay := retryBackoffDelay(attempt, backoff)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return compiler.NodeOutcome{State: model.NodeFailed, Error: "执行取消"}
+			}
+		}
 
-	ectx := ctx
-	if req.Timeout > 0 {
-		var cancel context.CancelFunc
-		ectx, cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
-		defer cancel()
+		// Agent 输出事件(实时)
+		done := make(chan struct{})
+		go e.streamAgentOutput(ctx, env, node.ID, a.ID(), req, done)
+
+		ectx := ctx
+		if req.Timeout > 0 {
+			var cancel context.CancelFunc
+			ectx, cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
+			outcome = e.invokeAgent(ectx, a, req)
+			cancel()
+		} else {
+			outcome = e.invokeAgent(ctx, a, req)
+		}
+		close(done)
+
+		if outcome.State != model.NodeFailed || ctx.Err() != nil {
+			break
+		}
+		if attempt < maxAttempts {
+			e.Bus.Emit(event.New("agent.retry", env.Exec.ID, node.ID, map[string]any{
+				"agent": agentID, "attempt": attempt, "max_attempts": maxAttempts,
+				"error": outcome.Error,
+			}))
+		}
 	}
+	if outcome.State == model.NodeSuccess {
+		// 保存节点输出到上下文(review/plan 等按需引用)
+		e.CtxMgr.SaveNodeOutput(mode, node.ID, map[string]any{
+			"summary": outcome.Summary, "output": outcome.Output, "issues": outcome.Data["issues"],
+		}, e.stateView(st))
+	}
+	return outcome
+}
 
-	resp, err := a.Execute(ectx, req)
+// invokeAgent 调用 Agent 并把结果映射为节点结果。
+func (e *Engine) invokeAgent(ctx context.Context, a coreagent.Agent, req coreagent.AgentRequest) compiler.NodeOutcome {
+	resp, err := a.Execute(ctx, req)
 	if err != nil {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 	}
@@ -201,13 +243,48 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		}
 		outcome.Data["responses"] = []string{"approve", "reject", "continue", "instruction"}
 	}
-	if resp.Status == coreagent.StatusSuccess {
-		// 保存节点输出到上下文(review/plan 等按需引用)
-		e.CtxMgr.SaveNodeOutput(mode, node.ID, map[string]any{
-			"summary": resp.Summary, "output": resp.Output, "issues": resp.Data["issues"],
-		}, e.stateView(st))
-	}
 	return outcome
+}
+
+// retryPolicyOf 读取节点 retry 配置。
+func retryPolicyOf(node *model.Node) (maxAttempts int, backoff string) {
+	maxAttempts = 1
+	backoff = "fixed"
+	raw, ok := node.Config["retry"].(map[string]any)
+	if !ok {
+		return
+	}
+	if v, ok := raw["max_attempts"]; ok {
+		switch n := v.(type) {
+		case float64:
+			maxAttempts = int(n)
+		case int:
+			maxAttempts = n
+		}
+	}
+	if v, ok := raw["backoff"].(string); ok && v != "" {
+		backoff = v
+	}
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	if maxAttempts > 10 {
+		maxAttempts = 10
+	}
+	return
+}
+
+// retryBackoffDelay 计算第 attempt 次重试前的等待时间。
+func retryBackoffDelay(attempt int, backoff string) time.Duration {
+	if backoff == "exponential" {
+		// 1s, 2s, 4s... 上限 30s
+		d := time.Second << (attempt - 1)
+		if d > 30*time.Second {
+			d = 30 * time.Second
+		}
+		return d
+	}
+	return 2 * time.Second
 }
 
 // runSkillNode 执行 Skill 节点。
