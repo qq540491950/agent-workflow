@@ -464,6 +464,14 @@ function DesignerInner() {
             deleteKeyCode={["Backspace", "Delete"]}
             fitView
           >
+            {nodes.length === 0 && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="rounded-xl border border-dashed px-6 py-4 text-center text-sm text-muted-foreground">
+                  画布为空:从左侧拖入节点开始编排
+                  <div className="mt-1 text-xs">拖到画布后连线,顶部「校验」检查结构,「保存」并「运行」</div>
+                </div>
+              </div>
+            )}
             <Background gap={20} />
             <Controls />
             <MiniMap pannable zoomable />
