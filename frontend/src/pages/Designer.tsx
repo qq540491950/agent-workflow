@@ -5,6 +5,7 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
+  ReactFlowProvider,
   useReactFlow,
   type Connection,
   type Edge as RFEdge,
@@ -128,6 +129,14 @@ function sublabelOf(n: WFNode): string {
 // ---- Designer 页面 ----
 
 export default function Designer() {
+  return (
+    <ReactFlowProvider>
+      <DesignerInner />
+    </ReactFlowProvider>
+  );
+}
+
+function DesignerInner() {
   const { id = "" } = useParams();
   const nav = useNavigate();
   const [wf, setWf] = useState<Workflow | null>(null);
