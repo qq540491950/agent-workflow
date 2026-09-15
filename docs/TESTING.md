@@ -111,6 +111,66 @@
 
 ---
 
+---
+
+## 第二阶段迭代(模型配置 + 功能完善,00:40 - 01:35)
+
+**目标**:每个 Agent 可配置模型,且不影响用户本地配置;持续探索完善功能。
+
+### 轮次 9:每 Agent 模型/端点/环境变量配置
+
+- 后端:`agent.AgentConfig`(Model/BaseURL/Timeout/ExtraArgs/Env/WorkingDir)+ `agent_configs` 表持久化 +
+  `Registry.Replace` 热重建适配器 + `GET/PUT /api/agents/{id}/config`。
+- **隔离原则(需求核心)**:配置仅通过每次调用的 CLI 参数(`--model`)与子进程环境变量
+  (`ANTHROPIC_BASE_URL`/`PI_BASE_URL`/自定义)传递;不读写 `~/.claude`、`~/.pi` 等本地配置文件;
+  敏感值 API 返回以 `***` 掩码,保存时 `***`=保留原值、空串=删除;不进入日志与工作流定义。
+- 单测:假 CLI 捕获参数验证 `--model cfg-model`、环境变量注入、节点级覆盖(`--model node-model`)、
+  掩码/合并优先级(请求级 > 配置级)。✅ `agent/model_config_test.go`
+- E2E:保存 → GET 掩码 → **重启服务器后仍持久化** → `***` 保留语义 → 空串删除语义。✅
+- 视觉:Agents 配置对话框(模型/端点/超时/附加参数/环境变量/隔离提示)。✅ 截图 `11-agent-model-config.png`
+
+### 轮次 10:节点级 model 覆盖 + 重试策略
+
+- DSL `config.model` → `AgentRequest.Model`(优先于 Agent 默认模型);`config.retry.{max_attempts,backoff}`
+  (fixed/exponential,上限 10 次)在执行器内实现重试循环,重试发出 `agent.retry` 事件。
+- 视觉:Designer 属性面板出现 Model/重试次数/退避策略字段。✅ 截图 `13-designer-node-model.png`
+
+### 轮次 11:YAML 导入
+
+- `POST /api/workflows/import`(ID 冲突自动换新 ID,导入前强制校验)+ 前端导入对话框。
+- E2E:导入示例 → 二次导入换 ID → 非法 YAML 被结构化拒绝。✅
+
+### 轮次 12:Git 面板页
+
+- 状态(已暂存/已修改/未跟踪)、Diff 视图、提交历史、一键提交(commit API + 权限约束);
+  Git 默认工作目录改为进程当前目录,`--git-dir` 启动参数可覆盖。✅ 截图 `12-git-panel.png`(正确显示当时未提交的改动)
+
+### 轮次 13:设置页 + 审计事件页
+
+- 设置:数据目录(只读)、Git 工作目录、日志级别(即时生效,持久化)。✅ 截图 `14-settings.png`
+- Events:跨执行审计流,SSE 实时刷新,按类型过滤。✅ 截图 `15-events-audit.png`
+
+### 轮次 14:Designer 自动布局(@dagrejs/dagre)
+
+- 一键按连线方向 TB 重排节点并适配视图。✅ 截图 `16-auto-layout.png`(循环回边清晰)
+
+### 轮次 15:失败执行的重试/跳过恢复
+
+- 状态机新增 FAILED→RUNNING(仅用户显式重试合法);`Engine.RetryNode(skip)` + 监控页按钮。
+- 集成测试:失败 → 重试(仍失败)→ 跳过(SKIPPED)→ 完成后续节点;对 COMPLETED 重试被拒绝。✅ `workflow/runtime/retry_test.go`
+
+### 轮次 16:细节完善与 Bug 修复
+
+- **Bug #6**:清空 Mock 行为配置后丢失内置默认演示脚本(Decision=DONE 不匹配任何路由,
+  误触发循环保护)。修复:内置默认脚本 + 用户配置按 mode 合并。E2E 复验两种语义均 COMPLETED。✅
+- Dashboard 每工作流执行统计(成功率条);执行监控 State 会话状态查看器(隐藏内部键);
+  HITL 用户指令注入 execute/fix 上下文;工作流列表过滤;桌面通知(完成/失败/等待输入);
+  监控页耗时显示;执行记录一键导出 JSON。✅ 截图 `17-dashboard-stats.png`
+
+### 真实崩溃恢复测试
+
+- 运行中 `pkill` 服务器 → 重启 → WAITING_USER 执行保持可恢复 → 提交 approve → 跨进程恢复 → COMPLETED。✅
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
