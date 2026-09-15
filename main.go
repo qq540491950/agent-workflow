@@ -6,12 +6,15 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"flag"
 	"io/fs"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"strings"
 
 	"agentworkflow/api"
@@ -90,7 +93,17 @@ func runServer(app *app.App, addr string) {
 	})
 
 	logx.Info("HTTP 服务启动", "addr", addr, "mode", "server")
-	if err := http.ListenAndServe(addr, mux); err != nil {
+
+	srv := &http.Server{Addr: addr, Handler: mux}
+	// 优雅关闭:SIGINT/SIGTERM 时先停接收新请求,给运行中执行一次收尾机会
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		logx.Info("收到退出信号,正在关闭…")
+		_ = srv.Shutdown(context.Background())
+	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logx.Error("HTTP 服务退出", "error", err)
 		os.Exit(1)
 	}

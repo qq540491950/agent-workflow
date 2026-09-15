@@ -13,8 +13,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
+const stateOptions = ["", "RUNNING", "WAITING_USER", "COMPLETED", "FAILED", "CANCELLED"] as const;
+
 export default function Executions() {
   const [execs, setExecs] = useState<Execution[]>([]);
+  const [stateFilter, setStateFilter] = useState<string>("");
 
   const refresh = useCallback(() => {
     api.listExecutions("", 100).then((x) => setExecs((x ?? []) as never)).catch((e) => toast.error(e.message));
@@ -27,11 +30,29 @@ export default function Executions() {
     });
   }, [refresh]);
 
+  const shown = stateFilter ? execs.filter((e) => e.state === stateFilter) : execs;
+
   return (
     <div className="h-full overflow-auto p-6">
       <div className="mb-6">
         <h1 className="text-2xl font-semibold">Executions</h1>
         <p className="text-sm text-muted-foreground">全部执行记录(持久化于 SQLite)</p>
+      </div>
+      <div className="mb-3 flex items-center gap-2">
+        {stateOptions.map((st) => (
+          <button
+            key={st || "all"}
+            onClick={() => setStateFilter(st)}
+            className={
+              "rounded-md border px-3 py-1.5 text-xs " +
+              (stateFilter === st
+                ? "border-accent bg-accent/10 text-foreground"
+                : "text-muted-foreground hover:bg-accent/40")
+            }
+          >
+            {st || "全部"}
+          </button>
+        ))}
       </div>
       <div className="rounded-lg border">
         <Table>
@@ -47,14 +68,14 @@ export default function Executions() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {execs.length === 0 && (
+            {shown.length === 0 && (
               <TableRow>
                 <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
                   暂无执行
                 </TableCell>
               </TableRow>
             )}
-            {execs.map((e) => (
+            {shown.map((e) => (
               <TableRow key={e.id}>
                 <TableCell className="font-mono text-xs">
                   <Link className="hover:underline" to={`/executions/${e.id}`}>

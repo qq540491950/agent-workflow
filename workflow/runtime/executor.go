@@ -390,6 +390,12 @@ func (e *Engine) runHumanNode(ctx context.Context, env *compiler.RunEnv, node *m
 	if ui, ok := st.Get(compiler.KeyUserInput); ok && ui != nil {
 		if m, ok := ui.(map[string]any); ok && len(m) > 0 {
 			raw, _ := json.Marshal(m)
+			// 人工指令写入上下文,后续 execute/fix 节点可用 {{user_instruction}} 引用
+			if inst, _ := m["instruction"].(string); inst != "" {
+				st.Set("user_instruction", inst)
+			} else if resp, _ := m["response"].(string); resp != "" && resp != "approve" && resp != "reject" && resp != "continue" {
+				st.Set("user_instruction", resp)
+			}
 			return compiler.NodeOutcome{
 				State:   model.NodeSuccess,
 				Summary: "用户输入: " + string(raw),
