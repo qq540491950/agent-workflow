@@ -99,6 +99,11 @@ export default function Workflows() {
     }
   };
 
+  const openRun = (w: Workflow) => {
+    setRunTarget(w);
+    setTask(localStorage.getItem(`last-task:${w.id}`) ?? "");
+  };
+
   const run = async () => {
     if (!runTarget) return;
     let variables: Record<string, unknown> = {};
@@ -111,6 +116,7 @@ export default function Workflows() {
     try {
       const exec = await api.runWorkflow(runTarget.id, task || "默认任务", variables);
       toast.success("执行已启动: " + exec.id);
+      localStorage.setItem(`last-task:${runTarget.id}`, task);
       setRunTarget(null);
       setTask("");
       nav(`/executions/${exec.id}`);
@@ -222,7 +228,7 @@ export default function Workflows() {
                       size="icon"
                       variant="ghost"
                       title="运行"
-                      onClick={() => setRunTarget(w)}
+                      onClick={() => openRun(w)}
                     >
                       <Play className="h-4 w-4" />
                     </Button>
