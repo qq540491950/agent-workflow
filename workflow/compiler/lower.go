@@ -385,10 +385,11 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 				//    用户输入决定了继续方向。
 				if resumeNode, ok := st.Get(KeyResumeNode); ok && fmt.Sprint(resumeNode) == decisionNode.ID {
 					st.Set(KeyResumeNode, "")
-					resp := ""
+					resp, instruction := "", ""
 					if ui, ok := st.Get(KeyUserInput); ok {
 						if m, ok := ui.(map[string]any); ok {
 							resp, _ = m["response"].(string)
+							instruction, _ = m["instruction"].(string)
 						} else {
 							resp = fmt.Sprint(ui)
 						}
@@ -404,7 +405,9 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 						return
 					default: // continue / instruction:再来一轮修复
 						st.Set(KeyDecision, "")
-						if resp != "" && resp != "continue" {
+						if instruction != "" {
+							st.Set("user_instruction", instruction)
+						} else if resp != "" && resp != "continue" {
 							st.Set("user_instruction", resp)
 						}
 					}
