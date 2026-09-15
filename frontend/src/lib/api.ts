@@ -247,6 +247,16 @@ export const api = {
     const r = await http<{ diff: string }>(`/api/git/diff?staged=${staged}`);
     return r.diff;
   },
+  async gitCommit(message: string): Promise<string> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).gt.Commit(message));
+    }
+    const r = await http<{ output: string }>(`/api/git/commit`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    });
+    return r.output;
+  },
   async gitLog(limit = 10): Promise<
     { hash: string; author: string; date: string; subject: string }[]
   > {

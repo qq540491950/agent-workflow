@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"agentworkflow/app/application"
 	"agentworkflow/event"
@@ -200,6 +201,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/git/diff", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		out, err := s.app.GitAPI.Diff(r.Context(), r.URL.Query().Get("staged") == "true")
 		return writeJSON(w, map[string]any{"diff": out}, err)
+	}))
+	s.mux.HandleFunc("POST /api/git/commit", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		var body struct {
+			Message string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			return badRequest(err.Error())
+		}
+		if strings.TrimSpace(body.Message) == "" {
+			return badRequest("commit message 不能为空")
+		}
+		out, err := s.app.GitAPI.Commit(r.Context(), body.Message)
+		return writeJSON(w, map[string]any{"output": out}, err)
 	}))
 	s.mux.HandleFunc("GET /api/git/log", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		logs, err := s.app.GitAPI.Log(r.Context(), queryInt(r, "limit", 10))
