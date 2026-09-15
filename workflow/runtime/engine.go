@@ -116,6 +116,12 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 		err.Detail = string(raw)
 		return nil, err
 	}
+	// 重置可重置的 Agent(如 Mock),使每次运行决策序列从头开始
+	for _, a := range e.Agents.List() {
+		if r, ok := a.(interface{ ResetMock() }); ok {
+			r.ResetMock()
+		}
+	}
 
 	now := time.Now().Format(time.RFC3339Nano)
 	exec := &model.Execution{

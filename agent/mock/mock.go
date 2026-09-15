@@ -85,6 +85,15 @@ func (a *Agent) Summaries(mode string) []string {
 	return out
 }
 
+// ResetMock 清空调用计数与历史,使决策序列从头开始。
+// 每次工作流执行前由 runtime 调用,保证多次运行行为一致。
+func (a *Agent) ResetMock() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = map[string]int{}
+	a.summaries = map[string][]string{}
+}
+
 // Execute 实现 agent.Agent:按脚本生成结构化响应。
 func (a *Agent) Execute(ctx context.Context, req agent.AgentRequest) (*agent.AgentResponse, error) {
 	a.mu.Lock()
