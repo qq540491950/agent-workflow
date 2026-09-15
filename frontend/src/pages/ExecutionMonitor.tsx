@@ -171,6 +171,9 @@ export default function ExecutionMonitor() {
             Execution
             <span className="font-mono text-sm text-muted-foreground">{exec.id}</span>
             <StateBadge state={exec.state} />
+            {(exec.iterations?.loop ?? 0) > 0 && (
+              <Badge variant="secondary" className="text-[11px]">循环 {exec.iterations?.loop} 轮</Badge>
+            )}
           </h1>
           <p className="text-sm text-muted-foreground">
             <Link className="hover:underline" to={`/workflows/${exec.workflow_id}/design`}>
