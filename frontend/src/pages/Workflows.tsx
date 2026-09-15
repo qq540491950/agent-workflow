@@ -53,11 +53,22 @@ export default function Workflows() {
   const [runVars, setRunVars] = useState("{}");
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
+  const [statsMap, setStatsMap] = useState<Record<string, { running: number; total: number }>>({});
 
   const refresh = useCallback(() => {
     api.listWorkflows().then((x) => setWorkflows((x ?? []) as never)).catch((e) => toast.error(e.message));
+    api
+      .stats()
+      .then((arr) => {
+        const m: Record<string, { running: number; total: number }> = {};
+        (arr ?? []).forEach((s) => (m[s.workflow_id] = { running: s.running, total: s.total }));
+        setStatsMap(m);
+      })
+      .catch(() => {});
   }, []);
-  useEffect(refresh, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   const create = async () => {
     try {
@@ -143,6 +154,7 @@ export default function Workflows() {
               <TableHead>ID</TableHead>
               <TableHead>版本</TableHead>
               <TableHead>节点</TableHead>
+              <TableHead>执行</TableHead>
               <TableHead>状态</TableHead>
               <TableHead>更新时间</TableHead>
               <TableHead className="w-40 text-right">操作</TableHead>
@@ -151,7 +163,7 @@ export default function Workflows() {
           <TableBody>
             {workflows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
                   暂无工作流,点击右上角"新建工作流"开始
                 </TableCell>
               </TableRow>
@@ -180,6 +192,18 @@ export default function Workflows() {
                 <TableCell className="font-mono text-xs">{w.id}</TableCell>
                 <TableCell>v{w.version}</TableCell>
                 <TableCell>{w.nodes.length}</TableCell>
+                <TableCell>
+                  {statsMap[w.id] ? (
+                    <span className="text-xs">
+                      共 {statsMap[w.id].total} 次
+                      {statsMap[w.id].running > 0 && (
+                        <span className="ml-1 text-blue-400">● {statsMap[w.id].running} 运行中</span>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">-</span>
+                  )}
+                </TableCell>
                 <TableCell>
                   <Switch
                     checked={w.enabled}
@@ -236,7 +260,20 @@ export default function Workflows() {
                             a.click();
                           }}
                         >
-                          <FileDown className="mr-2 h-4 w-4" /> 导出 YAML
+                          <FileDown className="mr-2 h-4 w-4" /> 下载 YAML
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={async () => {
+                            const yml = await api.copyYAML(w.id);
+                            try {
+                              await navigator.clipboard.writeText(yml);
+                              toast.success("YAML 已复制到剪贴板");
+                            } catch {
+                              toast.error("剪贴板不可用");
+                            }
+                          }}
+                        >
+                          <Copy className="mr-2 h-4 w-4" /> 复制 YAML
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           onClick={() => nav(`/workflows/${w.id}/history`)}

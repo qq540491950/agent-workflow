@@ -278,6 +278,9 @@ export const api = {
   > {
     return http("/api/stats");
   },
+  async copyYAML(id: string): Promise<string> {
+    return this.exportYAML(id);
+  },
   async allEvents(q: string): Promise<
     {
       seq: number;
