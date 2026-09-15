@@ -6,6 +6,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"agentworkflow/app/application"
@@ -81,6 +82,14 @@ func (s *Server) routes() {
 			return badRequest(err.Error())
 		}
 		return writeJSON(w, s.app.Workflows.Validate(parseWorkflow(wf)), nil)
+	}))
+	s.mux.HandleFunc("POST /api/workflows/import", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return badRequest(err.Error())
+		}
+		wf, err := s.app.Workflows.ImportYAML(string(body))
+		return writeJSON(w, wf, err)
 	}))
 	s.mux.HandleFunc("GET /api/workflows/{id}/export", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		out, err := s.app.Workflows.ExportYAML(r.PathValue("id"))

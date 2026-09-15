@@ -104,6 +104,16 @@ export const api = {
     if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).wf.SetEnabled(id, enabled));
     return http(`/api/workflows/${id}/enable?value=${enabled}`, { method: "POST" });
   },
+  async importYAML(content: string): Promise<Workflow> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).wf.ImportYAML(content));
+    }
+    return http("/api/workflows/import", {
+      method: "POST",
+      body: content,
+      headers: { "Content-Type": "application/yaml" },
+    });
+  },
   async validateWorkflow(wf: Workflow): Promise<ValidationResult> {
     if ((await detectMode()) === "desktop") {
       return nn(

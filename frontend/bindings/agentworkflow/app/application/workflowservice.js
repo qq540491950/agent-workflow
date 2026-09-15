@@ -57,6 +57,18 @@ export function Get(id) {
 }
 
 /**
+ * ImportYAML 导入 DSL 文本创建工作流。
+ * ID 冲突时自动分配新 ID;导入前必须通过校验。
+ * @param {string} content
+ * @returns {$CancellablePromise<model$0.Workflow | null>}
+ */
+export function ImportYAML(content) {
+    return $Call.ByID(1216022400, content).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType1($result);
+    }));
+}
+
+/**
  * @returns {$CancellablePromise<(model$0.Workflow | null)[]>}
  */
 export function List() {

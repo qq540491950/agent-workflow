@@ -388,6 +388,21 @@ func (s *WorkflowService) SetEnabled(id string, enabled bool) (*model.Workflow, 
 	return wf, nil
 }
 
+// ImportYAML 导入 DSL 文本创建工作流。
+// ID 冲突时自动分配新 ID;导入前必须通过校验。
+func (s *WorkflowService) ImportYAML(content string) (*model.Workflow, error) {
+	doc, err := dsl.Parse([]byte(content))
+	if err != nil {
+		return nil, err
+	}
+	wf := doc.ToModel()
+	if existing, err := s.app.Repo.GetWorkflow(wf.ID); err == nil && existing != nil {
+		wf.ID = "wf-" + strings.ToLower(randHex(6))
+	}
+	wf.Version = 0
+	return s.Save(wf)
+}
+
 // Validate 返回结构化校验结果。
 func (s *WorkflowService) Validate(wf *model.Workflow) *validator.Result {
 	return s.app.Engine.Validate(wf)

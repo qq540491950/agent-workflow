@@ -10,6 +10,7 @@ import {
   FileDown,
   History,
   Power,
+  FileUp,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Workflow } from "@/lib/types";
@@ -37,6 +38,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { MoreHorizontal } from "lucide-react";
 
 export default function Workflows() {
@@ -47,6 +49,8 @@ export default function Workflows() {
   const [newDesc, setNewDesc] = useState("");
   const [runTarget, setRunTarget] = useState<Workflow | null>(null);
   const [task, setTask] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
 
   const refresh = useCallback(() => {
     api.listWorkflows().then((x) => setWorkflows((x ?? []) as never)).catch((e) => toast.error(e.message));
@@ -104,9 +108,14 @@ export default function Workflows() {
             创建、编辑、运行工作流
           </p>
         </div>
-        <Button onClick={() => setCreating(true)}>
-          <Plus className="mr-1 h-4 w-4" /> 新建工作流
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setImportOpen(true)}>
+            <FileUp className="mr-1 h-4 w-4" /> 导入 YAML
+          </Button>
+          <Button onClick={() => setCreating(true)}>
+            <Plus className="mr-1 h-4 w-4" /> 新建工作流
+          </Button>
+        </div>
       </div>
 
       <div className="rounded-lg border">
@@ -229,6 +238,41 @@ export default function Workflows() {
           </TableBody>
         </Table>
       </div>
+
+      {/* 导入对话框 */}
+      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>从 YAML 导入工作流</DialogTitle>
+          </DialogHeader>
+          <Textarea
+            className="min-h-64 font-mono text-xs"
+            placeholder={"version: \"1\"\nworkflow:\n  id: my-flow\n  name: My Flow\nnodes:\n  - id: a\n    type: human\n…"}
+            value={importText}
+            onChange={(e) => setImportText(e.target.value)}
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setImportOpen(false)}>
+              取消
+            </Button>
+            <Button
+              onClick={async () => {
+                try {
+                  const wf = await api.importYAML(importText);
+                  toast.success(`已导入: ${wf.name} (v${wf.version})`);
+                  setImportOpen(false);
+                  setImportText("");
+                  refresh();
+                } catch (e) {
+                  toast.error((e as Error).message);
+                }
+              }}
+            >
+              导入
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 新建对话框 */}
       <Dialog open={creating} onOpenChange={setCreating}>
