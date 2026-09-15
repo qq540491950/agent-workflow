@@ -254,6 +254,7 @@ export default function ExecutionMonitor() {
                 <TabsTrigger value="events">实时日志 ({events.length})</TabsTrigger>
                 <TabsTrigger value="nodes">节点输出</TabsTrigger>
                 <TabsTrigger value="artifacts">Artifacts ({artifacts.length})</TabsTrigger>
+                <TabsTrigger value="state">State</TabsTrigger>
               </TabsList>
               <TabsContent value="events" className="mt-2">
                 <div className="max-h-[420px] space-y-0.5 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[11px]">
@@ -299,6 +300,29 @@ export default function ExecutionMonitor() {
                     <div className="py-6 text-center text-sm text-muted-foreground">暂无</div>
                   )}
                 </div>
+              </TabsContent>
+              <TabsContent value="state" className="mt-2">
+                <pre className="max-h-[420px] overflow-auto rounded-md bg-muted/40 p-3 font-mono text-[11px]">
+                  {exec.state_data
+                    ? JSON.stringify(
+                        Object.fromEntries(
+                          Object.entries(exec.state_data).filter(
+                            ([k, v]) =>
+                              !k.startsWith("node:") &&
+                              !k.startsWith("revisit:") &&
+                              v !== null &&
+                              v !== "" &&
+                              v !== false,
+                          ),
+                        ),
+                        null,
+                        2,
+                      )
+                    : "(无状态数据)"}
+                </pre>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  运行时会话状态(task/plan/review/git_diff/decision 等),供恢复与调试;内部键已省略。
+                </p>
               </TabsContent>
               <TabsContent value="artifacts" className="mt-2">
                 <div className="max-h-[420px] space-y-2 overflow-auto">

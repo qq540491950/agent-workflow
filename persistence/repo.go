@@ -333,6 +333,45 @@ func (d *DB) ListEvents(executionID string, limit int) ([]map[string]any, error)
 	return out, rows.Err()
 }
 
+// WorkflowStats 是某工作流的执行统计。
+type WorkflowStats struct {
+	WorkflowID string `json:"workflow_id"`
+	Name       string `json:"name"`
+	Total      int    `json:"total"`
+	Completed  int    `json:"completed"`
+	Failed     int    `json:"failed"`
+	Waiting    int    `json:"waiting"`
+	Running    int    `json:"running"`
+}
+
+// GetWorkflowStats 按工作流聚合执行状态。
+func (d *DB) GetWorkflowStats() ([]WorkflowStats, error) {
+	rows, err := d.sql.Query(`
+		SELECT w.id, w.name,
+			COUNT(e.id) AS total,
+			COALESCE(SUM(CASE WHEN e.state='COMPLETED' THEN 1 ELSE 0 END),0) AS completed,
+			COALESCE(SUM(CASE WHEN e.state IN ('FAILED','CANCELLED') THEN 1 ELSE 0 END),0) AS failed,
+			COALESCE(SUM(CASE WHEN e.state='WAITING_USER' THEN 1 ELSE 0 END),0) AS waiting,
+			COALESCE(SUM(CASE WHEN e.state='RUNNING' THEN 1 ELSE 0 END),0) AS running
+		FROM workflows w
+		LEFT JOIN executions e ON e.workflow_id = w.id
+		GROUP BY w.id, w.name
+		ORDER BY total DESC`)
+	if err != nil {
+		return nil, wrap(err)
+	}
+	defer rows.Close()
+	out := []WorkflowStats{}
+	for rows.Next() {
+		var st WorkflowStats
+		if err := rows.Scan(&st.WorkflowID, &st.Name, &st.Total, &st.Completed, &st.Failed, &st.Waiting, &st.Running); err != nil {
+			return nil, wrap(err)
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
 // ListAllEvents 返回全局事件流(最新在后),支持按类型过滤与条数限制。
 func (d *DB) ListAllEvents(eventType string, limit int) ([]map[string]any, error) {
 	q := `SELECT seq,execution_id,node_id,type,data_json,created_at FROM events`

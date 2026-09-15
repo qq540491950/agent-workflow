@@ -513,6 +513,11 @@ func (s *ExecutionService) Artifacts(id string) ([]*model.Artifact, error) {
 	return s.app.Repo.ListArtifacts(id)
 }
 
+// Stats 返回每工作流执行统计。
+func (s *ExecutionService) Stats() ([]persistence.WorkflowStats, error) {
+	return s.app.Repo.GetWorkflowStats()
+}
+
 // AllEvents 跨执行审计事件流。
 func (s *ExecutionService) AllEvents(eventType string, limit int) ([]map[string]any, error) {
 	return s.app.Repo.ListAllEvents(eventType, limit)

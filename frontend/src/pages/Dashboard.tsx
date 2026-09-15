@@ -24,15 +24,28 @@ import {
 } from "@/components/ui/table";
 import { StateBadge } from "@/components/state-badge";
 
+interface WfStats {
+  workflow_id: string;
+  name: string;
+  total: number;
+  completed: number;
+  failed: number;
+  waiting: number;
+  running: number;
+}
+
 export default function Dashboard() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [stats, setStats] = useState<WfStats[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
 
   useEffect(() => {
     api.listWorkflows().then((x) => setWorkflows(x ?? [])).catch(() => {});
     api.listExecutions("", 8).then((x) => setExecutions(x ?? [])).catch(() => {});
+    api.stats().then((x) => setStats(x ?? [])).catch(() => {});
     const unsub = subscribeRefresh(() => {
-      api.listExecutions("", 8).then(setExecutions).catch(() => {});
+      api.listExecutions("", 8).then((x) => setExecutions(x ?? [])).catch(() => {});
+      api.stats().then((x) => setStats(x ?? [])).catch(() => {});
     });
     return unsub;
   }, []);
@@ -84,6 +97,54 @@ export default function Dashboard() {
           tone="bad"
         />
       </div>
+
+      {stats.length > 0 && (
+        <Card className="mt-6">
+          <CardContent className="pt-4">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Workflow</TableHead>
+                  <TableHead>总执行</TableHead>
+                  <TableHead>Completed</TableHead>
+                  <TableHead>Failed</TableHead>
+                  <TableHead>Waiting</TableHead>
+                  <TableHead>成功率</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {stats.map((st) => {
+                  const rate = st.total > 0 ? Math.round((st.completed / st.total) * 100) : 0;
+                  return (
+                    <TableRow key={st.workflow_id}>
+                      <TableCell className="text-sm font-medium">
+                        <Link className="hover:underline" to={`/workflows/${st.workflow_id}/history`}>
+                          {st.name}
+                        </Link>
+                      </TableCell>
+                      <TableCell>{st.total}</TableCell>
+                      <TableCell className="text-green-400">{st.completed}</TableCell>
+                      <TableCell className={st.failed ? "text-red-400" : ""}>{st.failed}</TableCell>
+                      <TableCell className={st.waiting ? "text-amber-400" : ""}>{st.waiting}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
+                            <div
+                              className={cn("h-full", rate >= 80 ? "bg-green-500" : rate >= 50 ? "bg-amber-500" : "bg-red-500")}
+                              style={{ width: `${rate}%` }}
+                            />
+                          </div>
+                          <span className="text-xs text-muted-foreground">{rate}%</span>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <Card>

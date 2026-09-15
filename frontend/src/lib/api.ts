@@ -241,6 +241,11 @@ export const api = {
     return r.output;
   },
 
+  async stats(): Promise<
+    { workflow_id: string; name: string; total: number; completed: number; failed: number; waiting: number; running: number }[]
+  > {
+    return http("/api/stats");
+  },
   async allEvents(q: string): Promise<
     {
       seq: number;
