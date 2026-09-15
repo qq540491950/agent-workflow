@@ -17,6 +17,57 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
+// Timeline 把各节点执行区间画成水平条,直观展示并行与循环。
+function Timeline({
+  nodes,
+  startedAt,
+  finishedAt,
+}: {
+  nodes: ExecutionNode[];
+  startedAt?: string;
+  finishedAt?: string;
+}) {
+  if (!startedAt || nodes.length === 0) return null;
+  const t0 = new Date(startedAt).getTime();
+  const t1 = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+  const span = Math.max(1, t1 - t0);
+  const stateColor: Record<string, string> = {
+    SUCCESS: "bg-green-500",
+    FAILED: "bg-red-500",
+    RUNNING: "bg-blue-400",
+    WAITING: "bg-amber-400",
+    SKIPPED: "bg-muted-foreground/40",
+  };
+  return (
+    <div className="mb-3 space-y-1 rounded-md border p-2">
+      <div className="text-[10px] text-muted-foreground">时间线(0 → {(span / 1000).toFixed(1)}s)</div>
+      {nodes.map((n) => {
+        const s0 = n.started_at ? new Date(n.started_at).getTime() : t0;
+        const dur = n.duration_ms ?? (n.finished_at ? new Date(n.finished_at).getTime() - s0 : 0);
+        const left = Math.max(0, Math.min(100, ((s0 - t0) / span) * 100));
+        const width = Math.max(1.5, Math.min(100 - left, (dur / span) * 100));
+        return (
+          <div key={n.id} className="flex items-center gap-2">
+            <span className="w-20 shrink-0 truncate text-[10px] text-muted-foreground" title={n.node_name}>
+              {n.node_name}
+            </span>
+            <div className="relative h-2.5 flex-1 rounded bg-muted/40">
+              <div
+                className={cn("absolute h-full rounded", stateColor[n.state] ?? "bg-muted-foreground")}
+                style={{ left: `${left}%`, width: `${width}%` }}
+                title={`${n.node_name} ${n.state} ${n.duration_ms ?? 0}ms @+${((s0 - t0) / 1000).toFixed(1)}s`}
+              />
+            </div>
+            <span className="w-10 shrink-0 text-right text-[10px] text-muted-foreground">
+              {n.duration_ms ? `${n.duration_ms}ms` : ""}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function durationStr(start?: string, end?: string): string {
   if (!start) return "-";
   const t0 = new Date(start).getTime();
@@ -232,6 +283,8 @@ export default function ExecutionMonitor() {
             <CardTitle className="text-base">节点状态</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1">
+            {/* 时间线(甘特式):按执行起点对齐,条长=耗时 */}
+            {nodes.length > 0 && <Timeline nodes={nodes} startedAt={exec.started_at} finishedAt={exec.finished_at} />}
             {nodes.length === 0 && (
               <p className="py-6 text-center text-sm text-muted-foreground">等待节点执行…</p>
             )}
