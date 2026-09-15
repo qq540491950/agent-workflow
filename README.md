@@ -19,6 +19,18 @@ go build -o bin/agent-workflow-desktop . && ./bin/agent-workflow-desktop
 go build -tags server -o bin/agent-workflow-server . && ./bin/agent-workflow-server --server --addr 127.0.0.1:8080
 ```
 
+## 功能亮点
+
+- **可视化编排**:React Flow 画布,9 种可注册节点类型,拖拽/连线/自动布局/复制,结构化校验并定位问题节点
+- **每 Agent 模型配置**:模型 / API 端点 / 超时 / 环境变量逐 Agent 配置,仅通过调用级参数与环境变量生效,**不影响本地配置文件**;节点可再逐节点覆盖
+- **循环与保护**:Review→Fix 循环自动识别,`max_iterations` + 停滞检测,达到上限转人工(wait_user)或失败
+- **Human-in-the-loop**:执行暂停等待输入(Approve / Reject / Continue / Instruction),指令注入后续上下文;失败执行可重试或跳过
+- **并行编排**:parallel → merge 分支并行,汇合后继续
+- **持久化与恢复**:执行实时写 SQLite,重启后可恢复;Execution 绑定工作流版本
+- **可观测**:实时事件流(SSE/IPC)、跨执行审计页、节点输出、会话 State 查看器、Artifacts(git diff)、桌面通知
+- **Git 集成**:status/diff/log/branch/checkout/commit 节点 + Git 面板,权限策略约束
+- **配置即代码**:YAML 导入导出;Mock Agent 决策脚本可配置,无需真实模型即可演示完整闭环
+
 ## 架构原则
 
 - UI → Application API → Workflow DSL(Parser/Validator)→ Compiler → ADK Runtime

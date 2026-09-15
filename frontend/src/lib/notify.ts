@@ -38,7 +38,9 @@ export function initNotifications() {
       const n = new Notification(title, { body, tag: ev.execution_id + ev.type });
       n.onclick = () => {
         window.focus();
-        window.location.hash = `/executions/${ev.execution_id}`;
+        // 通过 popstate 触发 React Router 的客户端导航(避免整页刷新)
+        history.pushState({}, "", `/executions/${ev.execution_id}`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
         n.close();
       };
     } catch {

@@ -234,7 +234,7 @@ export const api = {
     });
   },
   async listSkills(): Promise<SkillDTO[]> {
-    if ((await detectMode()) === "desktop") return (await wailsBindings()).sk.List();
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).sk.List());
     return http("/api/skills");
   },
   async testSkill(id: string): Promise<string> {

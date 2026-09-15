@@ -15,6 +15,16 @@ import {
 import { Badge } from "@/components/ui/badge";
 
 // 工作流的执行历史(版本绑定关系)
+function dur(e: Execution): string {
+  if (!e.started_at) return "-";
+  const t0 = new Date(e.started_at).getTime();
+  const t1 = e.finished_at ? new Date(e.finished_at).getTime() : Date.now();
+  const ms = Math.max(0, t1 - t0);
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+}
+
 export default function WorkflowHistory() {
   const { id = "" } = useParams();
   const [wf, setWf] = useState<Workflow | null>(null);
@@ -52,6 +62,7 @@ export default function WorkflowHistory() {
               <TableHead>Task</TableHead>
               <TableHead>State</TableHead>
               <TableHead>开始时间</TableHead>
+              <TableHead>耗时</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -79,6 +90,7 @@ export default function WorkflowHistory() {
                 <TableCell className="text-xs text-muted-foreground">
                   {(e.started_at ?? "").slice(0, 19).replace("T", " ")}
                 </TableCell>
+                <TableCell className="text-xs text-muted-foreground">{dur(e)}</TableCell>
               </TableRow>
             ))}
           </TableBody>
