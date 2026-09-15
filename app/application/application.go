@@ -357,12 +357,8 @@ func (a *App) ConnectEvents() {
 	})
 }
 
-// seedExamples 首次启动时导入示例工作流。
+// seedExamples 导入示例工作流(按示例文件的工作流 ID 补种缺失的)。
 func (a *App) seedExamples() {
-	existing, err := a.Repo.ListWorkflows()
-	if err == nil && len(existing) > 0 {
-		return
-	}
 	dir := "workflows/examples"
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -382,6 +378,10 @@ func (a *App) seedExamples() {
 			continue
 		}
 		wf := doc.ToModel()
+		// 已存在同 ID 工作流则跳过(用户可能已修改)
+		if existing, err := a.Repo.GetWorkflow(wf.ID); err == nil && existing != nil {
+			continue
+		}
 		if res := validator.Validate(wf, nil, nil); !res.Valid {
 			logx.Warn("示例工作流校验失败", "file", entry.Name())
 			continue
