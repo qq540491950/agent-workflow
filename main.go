@@ -56,6 +56,7 @@ func main() {
 }
 
 // runServer HTTP 服务器模式:REST API + SSE + 静态前端资源。
+// 非 API 且无扩展名的路径回退到 index.html(SPA 前端路由)。
 func runServer(app *app.App, addr string) {
 	apiHandler := api.NewServer(app)
 
@@ -68,7 +69,17 @@ func runServer(app *app.App, addr string) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler.Handler())
-	mux.Handle("/", static)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// SPA fallback:无扩展名的路径返回 index.html,由前端路由接管
+		if r.URL.Path != "/" && filepath.Ext(r.URL.Path) == "" {
+			if indexHTML, readErr := fs.ReadFile(dist, "index.html"); readErr == nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = w.Write(indexHTML)
+				return
+			}
+		}
+		static.ServeHTTP(w, r)
+	})
 
 	logx.Info("HTTP 服务启动", "addr", addr, "mode", "server")
 	if err := http.ListenAndServe(addr, mux); err != nil {
