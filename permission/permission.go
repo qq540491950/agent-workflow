@@ -71,6 +71,12 @@ func NewManager() *Manager {
 	}
 	// Mock Agent 仅读。
 	m.policies["mock"] = Policy{FilesystemRead: true}
+	// workflow 执行主体(Git 节点等):默认可读仓库、可提交(推送永远禁用)。
+	m.policies["workflow"] = Policy{
+		FilesystemRead: true,
+		GitRead:        true,
+		GitCommit:      true,
+	}
 	return m
 }
 
