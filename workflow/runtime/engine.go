@@ -280,6 +280,12 @@ func (e *Engine) RecoverPending() error {
 func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string, userInput map[string]any) {
 	e.running.Add(1)
 	defer e.running.Add(-1)
+	// 工作流级权限覆盖:克隆全局策略后应用(不影响其他运行中的执行)
+	runPerms := e.Perms.Clone()
+	if len(exec.Snapshot.Permission) > 0 {
+		runPerms.Apply(exec.Snapshot.Permission)
+	}
+
 	env := &compiler.RunEnv{
 		Exec:          exec,
 		WF:            exec.Snapshot,
@@ -287,6 +293,7 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 		Bus:           e.Bus,
 		Vars:          exec.Variables,
 		MaxIterations: loopLimit(exec.Snapshot),
+		Perms:         runPerms,
 	}
 
 	root, err := compiler.Compile(env)

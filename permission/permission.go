@@ -133,6 +133,22 @@ func (m *Manager) ApplyWorkflowOverrides(overrides map[string]any) {
 	}
 }
 
+// Clone 返回策略表的深拷贝(用于工作流运行期作用域覆盖)。
+func (m *Manager) Clone() *Manager {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := NewManager()
+	for id, p := range m.policies {
+		out.policies[id] = p
+	}
+	return out
+}
+
+// Apply 应用覆盖到当前实例(与 ApplyWorkflowOverrides 相同结构)。
+func (m *Manager) Apply(overrides map[string]any) {
+	m.ApplyWorkflowOverrides(overrides)
+}
+
 // Snapshot 返回当前全部策略(给前端展示)。
 func (m *Manager) Snapshot() map[string]Policy {
 	m.mu.RLock()

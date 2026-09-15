@@ -127,12 +127,12 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 	agentID := cfgStr(node, "agent")
 	mode := cfgStr(node, "mode")
 
-	// 权限策略:执行前检查(fs:read 为最低要求)
-	if err := e.Perms.Check(agentID, permission.FSRead); err != nil {
+	// 权限策略:执行前检查(fs:read 为最低要求);工作流覆盖优先
+	if err := e.perms(env).Check(agentID, permission.FSRead); err != nil {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 	}
 	if mode == "execute" || mode == "fix" {
-		if err := e.Perms.Check(agentID, permission.FSWrite); err != nil {
+		if err := e.perms(env).Check(agentID, permission.FSWrite); err != nil {
 			return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 		}
 	}
@@ -341,11 +341,11 @@ func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *mod
 	op := cfgStr(node, "operation")
 	switch op {
 	case "status", "diff", "log", "branch":
-		if err := e.Perms.Check("workflow", permission.GitRead); err != nil {
+		if err := e.perms(env).Check("workflow", permission.GitRead); err != nil {
 			return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 		}
 	case "commit":
-		if err := e.Perms.Check("workflow", permission.GitCommit); err != nil {
+		if err := e.perms(env).Check("workflow", permission.GitCommit); err != nil {
 			return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 		}
 	case "checkout":
@@ -531,6 +531,19 @@ func truncate(s string, n int) string {
 // attemptKey 生成节点尝试次数的状态键。
 func attemptKey(nodeID string) string {
 	return "node:" + nodeID + ":attempt"
+}
+
+// perms 返回本次运行的权限检查器:工作流覆盖的运行期实例优先。
+func (e *Engine) perms(env *compiler.RunEnv) RunPerms {
+	if env.Perms != nil {
+		return env.Perms
+	}
+	return e.Perms
+}
+
+// RunPerms 权限检查接口。
+type RunPerms interface {
+	Check(agentID string, a permission.Action) error
 }
 
 var _ = strings.TrimSpace

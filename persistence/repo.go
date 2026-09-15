@@ -25,6 +25,7 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 	nodes, _ := json.Marshal(wf.Nodes)
 	edges, _ := json.Marshal(wf.Edges)
 	settings, _ := json.Marshal(wf.Settings)
+	permData, _ := json.Marshal(orEmpty(wf.Permission))
 	enabled := 0
 	if wf.Enabled {
 		enabled = 1
@@ -42,14 +43,14 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 		wf.Version = 1
 		wf.CreatedAt = now
 		_, err = tx.Exec(`INSERT INTO workflows
-			(id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,created_at,updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			(id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 			wf.ID, wf.Name, wf.Description, wf.Version, enabled,
-			string(variables), string(nodes), string(edges), string(settings), now, now)
+			string(variables), string(nodes), string(edges), string(settings), string(permData), now, now)
 	} else {
-		_, err = tx.Exec(`UPDATE workflows SET name=?,description=?,version=?,enabled=?,variables_json=?,nodes_json=?,edges_json=?,settings_json=?,updated_at=? WHERE id=?`,
+		_, err = tx.Exec(`UPDATE workflows SET name=?,description=?,version=?,enabled=?,variables_json=?,nodes_json=?,edges_json=?,settings_json=?,permission_json=?,updated_at=? WHERE id=?`,
 			wf.Name, wf.Description, wf.Version, enabled,
-			string(variables), string(nodes), string(edges), string(settings), now, wf.ID)
+			string(variables), string(nodes), string(edges), string(settings), string(permData), now, wf.ID)
 	}
 	if err != nil {
 		return wrap(err)
@@ -71,13 +72,13 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 
 // GetWorkflow 按 ID 读取 Workflow。
 func (d *DB) GetWorkflow(id string) (*model.Workflow, error) {
-	row := d.sql.QueryRow(`SELECT id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,created_at,updated_at FROM workflows WHERE id=?`, id)
+	row := d.sql.QueryRow(`SELECT id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows WHERE id=?`, id)
 	return scanWorkflow(row)
 }
 
 // ListWorkflows 返回全部 Workflow。
 func (d *DB) ListWorkflows() ([]*model.Workflow, error) {
-	rows, err := d.sql.Query(`SELECT id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,created_at,updated_at FROM workflows ORDER BY updated_at DESC`)
+	rows, err := d.sql.Query(`SELECT id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -135,14 +136,15 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 	var wf model.Workflow
-	var variables, nodes, edges, settings string
+	var variables, nodes, edges, settings, permData string
 	var enabled int
 	if err := r.Scan(&wf.ID, &wf.Name, &wf.Description, &wf.Version, &enabled,
-		&variables, &nodes, &edges, &settings, &wf.CreatedAt, &wf.UpdatedAt); err != nil {
+		&variables, &nodes, &edges, &settings, &permData, &wf.CreatedAt, &wf.UpdatedAt); err != nil {
 		return nil, wrap(err)
 	}
 	wf.Enabled = enabled == 1
 	_ = json.Unmarshal([]byte(variables), &wf.Variables)
+	_ = json.Unmarshal([]byte(permData), &wf.Permission)
 	_ = json.Unmarshal([]byte(nodes), &wf.Nodes)
 	_ = json.Unmarshal([]byte(edges), &wf.Edges)
 	_ = json.Unmarshal([]byte(settings), &wf.Settings)

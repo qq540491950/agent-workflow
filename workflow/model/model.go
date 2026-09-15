@@ -57,9 +57,11 @@ type Workflow struct {
 	Version     int              `json:"version"`
 	Enabled     bool             `json:"enabled"`
 	Variables   map[string]any   `json:"variables,omitempty"`
-	Nodes       []Node           `json:"nodes"`
-	Edges       []Edge           `json:"edges"`
-	Settings    WorkflowSettings `json:"settings"`
+	// Permission 工作流级权限覆盖(需求:DSL permissions 段)。
+	Permission map[string]any   `json:"permission,omitempty"`
+	Nodes      []Node           `json:"nodes"`
+	Edges      []Edge           `json:"edges"`
+	Settings   WorkflowSettings `json:"settings"`
 	CreatedAt   string           `json:"created_at,omitempty"`
 	UpdatedAt   string           `json:"updated_at,omitempty"`
 }

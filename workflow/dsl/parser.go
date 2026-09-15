@@ -67,6 +67,7 @@ func (d *Document) ToModel() *model.Workflow {
 		Description: d.Workflow.Description,
 		Enabled:     d.Workflow.Enabled == nil || *d.Workflow.Enabled,
 		Variables:   d.Variables,
+		Permission:  d.Permission,
 		Settings: model.WorkflowSettings{
 			MaxIterations: d.Settings.MaxIterations,
 			OnLoopLimit:   d.Settings.OnLoopLimit,
@@ -115,8 +116,9 @@ func FromModel(wf *model.Workflow) *Document {
 	doc := &Document{
 		Version:  "1",
 		Workflow: WorkflowMeta{ID: wf.ID, Name: wf.Name, Description: wf.Description, Enabled: &enabled},
-		Variables: wf.Variables,
-		Settings:  Settings{MaxIterations: wf.Settings.MaxIterations, OnLoopLimit: wf.Settings.OnLoopLimit},
+		Variables:   wf.Variables,
+		Permission:  wf.Permission,
+		Settings:    Settings{MaxIterations: wf.Settings.MaxIterations, OnLoopLimit: wf.Settings.OnLoopLimit},
 	}
 	for _, n := range wf.Nodes {
 		x, y := n.Position.X, n.Position.Y

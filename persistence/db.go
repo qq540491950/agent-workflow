@@ -140,5 +140,13 @@ func (d *DB) migrate() error {
 			return fmt.Errorf("persistence: migrate: %w", err)
 		}
 	}
+	// 轻量列迁移:老库升级(列已存在时忽略错误)
+	alters := []string{
+		`ALTER TABLE workflows ADD COLUMN permission_json TEXT DEFAULT '{}'`,
+		`ALTER TABLE executions ADD COLUMN state_json TEXT DEFAULT '{}'`,
+	}
+	for _, a := range alters {
+		_, _ = d.sql.Exec(a)
+	}
 	return nil
 }

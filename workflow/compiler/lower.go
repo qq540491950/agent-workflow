@@ -16,6 +16,7 @@ import (
 
 	coreagent "agentworkflow/agent"
 	"agentworkflow/event"
+	"agentworkflow/permission"
 	"agentworkflow/workflow/model"
 )
 
@@ -90,6 +91,13 @@ type RunEnv struct {
 	Bus       *event.Bus
 	Vars      map[string]any
 	MaxIterations int
+	// Perms 运行期权限管理器(全局克隆 + 工作流覆盖);nil 时回退全局。
+	Perms RunPermissionChecker
+}
+
+// RunPermissionChecker 由 runtime 注入的策略检查接口。
+type RunPermissionChecker interface {
+	Check(agentID string, a permission.Action) error
 }
 
 // Compile 将 Workflow 编译为 ADK 根 Agent。
