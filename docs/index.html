@@ -108,7 +108,7 @@
       <span class="badge">运行时 <b>ADK Go v1.7.0</b></span>
       <span class="badge">持久化 <b>SQLite</b></span>
       <span class="badge">前端 <b>React + TS + shadcn/ui + React Flow</b></span>
-      <span class="badge">测试 <b>8 轮(含 7 轮视觉测试)</b></span>
+      <span class="badge">测试 <b>16 轮(含 10+ 轮视觉测试)</b></span>
     </div>
   </div>
 </header>
@@ -123,6 +123,8 @@
     <a href="#run">运行与监控</a>
     <a href="#hitl">人工交互</a>
     <a href="#dsl">DSL</a>
+    <a href="#model-config">模型配置</a>
+    <a href="#ops">运行利器</a>
     <a href="#architecture">架构</a>
     <a href="#testing">测试</a>
   </div>
@@ -261,8 +263,42 @@ go build -tags server -o bin/agent-workflow-server .
 <img class="screenshot" src="screenshots/09-skills.png" alt="Skills" />
 <p class="shot-caption">▲ Skills:内置 submit / run-test / log,可一键 Test;Runtime 不感知 Skill 内部实现</p>
 
+<!-- ================= 模型配置 ================= -->
+<h2 id="model-config"><span class="no">09</span>每个 Agent 的模型配置(不影响本地配置)</h2>
+<img class="screenshot" src="screenshots/11-agent-model-config.png" alt="Agent 模型配置" />
+<p class="shot-caption">▲ Agents → 配置:默认模型 / API 端点 / 超时 / 附加参数 / 环境变量</p>
+<p>每个 Agent 可以独立配置<b>默认模型</b>(如 <code>claude-sonnet-4-5</code>)、<b>API 端点</b>、
+  <b>超时</b>、<b>附加 CLI 参数</b>与<b>调用级环境变量</b>(如 <code>ANTHROPIC_AUTH_TOKEN</code>)。
+  节点还能在 <code>config.model</code> 中逐节点覆盖,让同一 Agent 在不同节点用不同模型。</p>
+<div class="card" style="margin:12px 0">
+  <h4 style="color:var(--amber)">隔离保证 — 为什么不影响你的本地配置</h4>
+  <p style="margin-top:6px">
+    以上配置只通过<b>每次调用的 CLI 参数与子进程环境变量</b>传给 Agent 进程:
+    本应用不读取、不写入、不修改 <code>~/.claude</code>、<code>~/.pi</code> 等任何本地配置文件;
+    你本地的 API Key、默认模型、权限设置完全不受影响。
+    敏感环境变量保存在本应用自己的 SQLite 中,API 回显一律 <code>***</code> 掩码
+    (保存时 <code>***</code>=保留原值、清空=删除),且不会出现在日志与工作流定义里。
+  </p>
+</div>
+<p>Mock Agent 还支持<b>决策脚本</b>:在配置里写下
+  <code>{"review": {"decisions": ["REJECTED","APPROVED"]}}</code> 即可自定义演示序列,
+  用来在无真实模型的情况下复现"拒绝→修复→通过"或触发循环保护。</p>
+
+<!-- ================= 运行利器 ================= -->
+<h2 id="ops"><span class="no">10</span>运行利器 — 让编排更好用</h2>
+<div class="grid2">
+  <div class="card"><h4>自动布局</h4><p>Designer 顶栏一键按连线方向重排节点(dagre),循环回边清晰可读。</p></div>
+  <div class="card"><h4>失败重试 / 跳过</h4><p>执行失败后可一键重试失败节点或跳过继续;节点也可预配 retry(次数+退避)自动重试。</p></div>
+  <div class="card"><h4>YAML 导入 / 导出</h4><p>配置即代码:工作流可导出为 YAML 存档,也可粘贴导入(ID 冲突自动分配新 ID)。</p></div>
+  <div class="card"><h4>Git 面板</h4><p>状态 / Diff / 提交历史 / 一键提交,与工作流 git 节点共用同一权限与目录。</p></div>
+  <div class="card"><h4>Events 审计流</h4><p>跨执行的全部事件实时滚动,支持按类型过滤,可跳转到对应执行。</p></div>
+  <div class="card"><h4>统计与归档</h4><p>Dashboard 每工作流成功率;执行页耗时显示;执行记录一键导出 JSON(含事件与制品)。</p></div>
+  <div class="card"><h4>State 查看器</h4><p>执行监控页可查看运行时会话状态(plan / review / git_diff / decision…),便于调试模板与路由。</p></div>
+  <div class="card"><h4>桌面通知</h4><p>执行完成 / 失败 / 等待输入时发送系统通知,点击直达执行详情。</p></div>
+</div>
+
 <!-- ================= DSL ================= -->
-<h2 id="dsl"><span class="no">09</span>配置驱动 — Workflow DSL</h2>
+<h2 id="dsl"><span class="no">11</span>配置驱动 — Workflow DSL</h2>
 <p>画布只是 DSL 的可视化外衣。以下是与上面画布等价的 YAML(可在 Workflows 页导出):</p>
 <pre><code>version: "1"
 
@@ -314,7 +350,7 @@ edges:
   路由依据 <code>decision</code> 字段判断,禁止字符串猜测。</p>
 
 <!-- ================= 架构 ================= -->
-<h2 id="architecture"><span class="no">10</span>架构与目录</h2>
+<h2 id="architecture"><span class="no">12</span>架构与目录</h2>
 <div class="flow">UI (React + React Flow)
    ↓  Wails IPC / HTTP+SSE(同一套前端代码,自动探测)
 Application API(Workflow / Execution / Agent / Skill / Git / Settings Service)
@@ -339,10 +375,11 @@ SQLite(workflows / versions / executions / nodes / events / artifacts)</div>
 └── docs/        使用说明(本页)与测试报告</code></pre>
 
 <!-- ================= 测试 ================= -->
-<h2 id="testing"><span class="no">11</span>测试验证</h2>
-<p>本项目共执行 <b>8 轮测试</b>(≥5 轮要求),其中 7 轮为浏览器视觉测试:
-  后端全量单测/集成测试 → Dashboard → 列表/SPA 路由 → Designer → UI 运行+监控 → HITL+并行 → Agents/Skills → 双模式传输回归。
-  过程中发现并修复 5 个 Bug,每次修复独立提交 git。
+<h2 id="testing"><span class="no">13</span>测试验证</h2>
+<p>本项目共执行 <b>16 轮测试</b>(≥5 轮要求),其中 10+ 轮为浏览器视觉测试。
+  第一阶段 8 轮:后端全量 → Dashboard → 列表/SPA 路由 → Designer → UI 运行+监控 → HITL+并行 → Agents/Skills → 双模式回归;
+  第二阶段 8 轮:模型配置 → 节点覆盖/重试 → YAML 导入 → Git 面板 → 设置/审计 → 自动布局 → 失败重试/跳过 → 细节完善与真实重启恢复。
+  过程中发现并修复 6 个 Bug,每次修复独立提交 git。
   详细记录见仓库 <code>docs/TESTING.md</code>;本页全部截图即视觉测试实证。</p>
 <table>
   <tr><th>轮次</th><th>类型</th><th>结果</th><th>修复</th></tr>
