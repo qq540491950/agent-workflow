@@ -17,6 +17,7 @@ import {
   MarkerType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import Dagre from "@dagrejs/dagre";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
@@ -32,6 +33,7 @@ import {
   Save,
   Play,
   ShieldCheck,
+  LayoutGrid,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { ValidationError, Workflow, WFNode } from "@/lib/types";
@@ -227,6 +229,27 @@ function DesignerInner() {
     };
   }
 
+  // autoLayout 用 dagre 按连线方向重排节点(自上而下)
+  const autoLayout = useCallback(() => {
+    const g = new Dagre.graphlib.Graph();
+    g.setDefaultEdgeLabel(() => ({}));
+    g.setGraph({ rankdir: "TB", nodesep: 60, ranksep: 90 });
+    nodes.forEach((n) => g.setNode(n.id, { width: 176, height: 56 }));
+    edges.forEach((e) => g.setEdge(e.source, e.target));
+    Dagre.layout(g);
+    setNodes((nds) =>
+      nds.map((n) => {
+        const pos = g.node(n.id);
+        if (!pos) return n;
+        return {
+          ...n,
+          position: { x: pos.x - 88, y: pos.y - 28 },
+        };
+      }),
+    );
+    setTimeout(() => fitView({ padding: 0.15 }), 60);
+  }, [nodes, edges, setNodes, fitView]);
+
   const onConnect = useCallback(
     (c: Connection) => {
       setEdges((eds) =>
@@ -349,6 +372,9 @@ function DesignerInner() {
         <Badge variant="secondary">v{wf.version}</Badge>
         <Badge variant="outline" className="font-mono text-[10px]">{wf.id}</Badge>
         <div className="ml-auto flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={autoLayout} title="按连线方向自动排列节点">
+            <LayoutGrid className="mr-1 h-4 w-4" /> 自动布局
+          </Button>
           <Button variant="outline" size="sm" onClick={() => validate()}>
             <ShieldCheck className="mr-1 h-4 w-4" /> 校验
           </Button>
