@@ -152,6 +152,7 @@ function DesignerInner() {
   const [errors, setErrors] = useState<ValidationError[] | null>(null);
   const [runOpen, setRunOpen] = useState(false);
   const [task, setTask] = useState("");
+  const [runVars, setRunVars] = useState("{}");
   const [agents, setAgents] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const idCounter = useRef(1);
@@ -366,8 +367,15 @@ function DesignerInner() {
   saveRef.current = save;
   const run = async () => {
     if (!wf) return;
+    let variables: Record<string, unknown> = {};
     try {
-      const exec = await api.runWorkflow(wf.id, task || "默认任务");
+      variables = JSON.parse(runVars || "{}");
+    } catch {
+      toast.error("变量不是合法 JSON");
+      return;
+    }
+    try {
+      const exec = await api.runWorkflow(wf.id, task || "默认任务", variables);
       toast.success("执行已启动");
       setRunOpen(false);
       nav(`/executions/${exec.id}`);
@@ -569,6 +577,12 @@ function DesignerInner() {
             placeholder="任务描述(将作为 {{task}} 注入 Prompt)"
             value={task}
             onChange={(e) => setTask(e.target.value)}
+          />
+          <Textarea
+            className="min-h-16 font-mono text-xs"
+            placeholder='{"key": "value"}(可选变量,{{variable.key}} 引用)'
+            value={runVars}
+            onChange={(e) => setRunVars(e.target.value)}
           />
           <DialogFooter>
             <Button variant="outline" onClick={() => setRunOpen(false)}>取消</Button>
