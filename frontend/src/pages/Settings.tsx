@@ -111,6 +111,17 @@ export default function Settings() {
 
         <Card>
           <CardHeader className="py-3">
+            <CardTitle className="text-base">关于</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1 font-mono text-xs text-muted-foreground">
+            <div>app: Agent Workflow Orchestrator v0.1.0</div>
+            {ver.adk && <div>adk: {ver.adk}</div>}
+            {ver.wails && <div>wails: {ver.wails}</div>}
+          </CardContent>
+        </Card>
+
+        <Card className="mt-4">
+          <CardHeader className="py-3">
             <CardTitle className="text-base">安全说明</CardTitle>
           </CardHeader>
           <CardContent className="text-xs text-muted-foreground">
