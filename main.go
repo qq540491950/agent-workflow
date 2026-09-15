@@ -1,87 +1,124 @@
+// Agent Workflow Orchestrator — 可配置、可视化、可扩展的多 Agent 工作流编排桌面应用。
+//
+// 运行模式:
+//   - 默认:Wails 桌面应用(GUI)
+//   - --server:HTTP 服务器模式(REST + SSE,无 GUI,用于浏览器访问与测试)
 package main
 
 import (
 	"embed"
+	"flag"
+	"io/fs"
+	"net/http"
+	"os"
+	"path/filepath"
 
-	"log"
-	"time"
+	"agentworkflow/api"
+	app "agentworkflow/app/application"
+	"agentworkflow/event"
+	"agentworkflow/logx"
 
-	"github.com/wailsapp/wails/v3/pkg/application"
+	wails "github.com/wailsapp/wails/v3/pkg/application"
 )
-
-// Wails uses Go's `embed` package to embed the frontend files into the binary.
-// Any files in the frontend/dist folder will be embedded into the binary and
-// made available to the frontend.
-// See https://pkg.go.dev/embed for more information.
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
-func init() {
-	// Register a custom event whose associated data type is string.
-	// This is not required, but the binding generator will pick up registered events
-	// and provide a strongly typed JS/TS API for them.
-	application.RegisterEvent[string]("time")
+func main() {
+	serverMode := flag.Bool("server", false, "以 HTTP 服务器模式运行(无 GUI)")
+	addr := flag.String("addr", "127.0.0.1:8080", "HTTP 监听地址")
+	dataDir := flag.String("data", "", "数据目录(默认用户配置目录)")
+	logLevel := flag.String("log", "info", "日志级别 debug|info|warn|error")
+	flag.Parse()
+
+	logx.SetLevel(*logLevel)
+
+	dir := *dataDir
+	if dir == "" {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			base = "."
+		}
+		dir = filepath.Join(base, "agent-workflow")
+	}
+
+	app, err := app.NewApp(dir)
+	if err != nil {
+		logx.Error("应用初始化失败", "error", err)
+		os.Exit(1)
+	}
+
+	if *serverMode {
+		runServer(app, *addr)
+		return
+	}
+	runDesktop(app)
 }
 
-// main function serves as the application's entry point. It initializes the application, creates a window,
-// and starts a goroutine that emits a time-based event every second. It subsequently runs the application and
-// logs any error that might occur.
-func main() {
+// runServer HTTP 服务器模式:REST API + SSE + 静态前端资源。
+func runServer(app *app.App, addr string) {
+	apiHandler := api.NewServer(app)
 
-	// Create a new Wails application by providing the necessary options.
-	// Variables 'Name' and 'Description' are for application metadata.
-	// 'Assets' configures the asset server with the 'FS' variable pointing to the frontend files.
-	// 'Bind' is a list of Go struct instances. The frontend has access to the methods of these instances.
-	// 'Mac' options tailor the application when running an macOS.
-	app := application.New(application.Options{
-		Name:        "agent-workflow",
-		Description: "A demo of using raw HTML & CSS",
-		Services: []application.Service{
-			application.NewService(&GreetService{}),
+	dist, err := fs.Sub(assets, "frontend/dist")
+	if err != nil {
+		logx.Error("嵌入资源加载失败", "error", err)
+		os.Exit(1)
+	}
+	static := http.FileServer(http.FS(dist))
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/", apiHandler.Handler())
+	mux.Handle("/", static)
+
+	logx.Info("HTTP 服务启动", "addr", addr, "mode", "server")
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		logx.Error("HTTP 服务退出", "error", err)
+		os.Exit(1)
+	}
+}
+
+// runDesktop Wails 桌面模式。
+func runDesktop(app *app.App) {
+	wailsApp := wails.New(wails.Options{
+		Name:        "Agent Workflow Orchestrator",
+		Description: "可配置、可视化、可扩展的多 Agent 工作流编排",
+		Services: []wails.Service{
+			wails.NewService(app.Workflows),
+			wails.NewService(app.Executions),
+			wails.NewService(app.AgentSvc),
+			wails.NewService(app.SkillSvc),
+			wails.NewService(app.GitAPI),
+			wails.NewService(app.Settings),
 		},
-		Assets: application.AssetOptions{
-			Handler: application.AssetFileServerFS(assets),
+		Assets: wails.AssetOptions{
+			Handler: wails.AssetFileServerFS(assets),
 		},
-		Mac: application.MacOptions{
+		Mac: wails.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
 
-	// Create a new window with the necessary options.
-	// 'Title' is the title of the window.
-	// 'Mac' options tailor the window when running on macOS.
-	// 'BackgroundColour' is the background colour of the window.
-	// 'URL' is the URL that will be loaded into the webview.
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title: "Window 1",
-		// Window sized to the golden ratio (1000 / 618 ≈ 1.618).
-		Width:  1000,
-		Height: 618,
-		Mac: application.MacWindow{
+	// 实时事件桥接:总线 → Wails 事件(前端统一监听 ui:event)
+	app.ConnectEvents()
+	_ = app.Subscribe(func(ev event.UIEvent) {
+		wailsApp.Event.Emit("ui:event", ev)
+	})
+
+	wailsApp.Window.NewWithOptions(wails.WebviewWindowOptions{
+		Title:  "Agent Workflow Orchestrator",
+		Width:  1440,
+		Height: 900,
+		Mac: wails.MacWindow{
 			InvisibleTitleBarHeight: 50,
-			Backdrop:                application.MacBackdropTranslucent,
-			TitleBar:                application.MacTitleBarHiddenInset,
+			Backdrop:                wails.MacBackdropTranslucent,
+			TitleBar:                wails.MacTitleBarHiddenInset,
 		},
-		BackgroundColour: application.NewRGB(6, 7, 15),
+		BackgroundColour: wails.NewRGB(13, 17, 23),
 		URL:              "/",
 	})
 
-	// Create a goroutine that emits an event containing the current time every second.
-	// The frontend can listen to this event and update the UI accordingly.
-	go func() {
-		for {
-			now := time.Now().Format(time.RFC1123)
-			app.Event.Emit("time", now)
-			time.Sleep(time.Second)
-		}
-	}()
-
-	// Run the application. This blocks until the application has been exited.
-	err := app.Run()
-
-	// If an error occurred while running the application, log it and exit.
-	if err != nil {
-		log.Fatal(err)
+	if err := wailsApp.Run(); err != nil {
+		logx.Error("应用退出异常", "error", err)
+		os.Exit(1)
 	}
 }

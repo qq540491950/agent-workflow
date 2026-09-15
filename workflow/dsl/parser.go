@@ -82,9 +82,10 @@ func (d *Document) ToModel() *model.Workflow {
 		if cfg == nil {
 			cfg = map[string]any{}
 		}
-		// x/y 由位置字段承载,避免与 inline map 重复
-		delete(cfg, "x")
-		delete(cfg, "y")
+		// id/name/type/x/y 由结构化字段承载,避免与 inline map 重复
+		for _, k := range []string{"x", "y", "id", "name", "type"} {
+			delete(cfg, k)
+		}
 		mn := model.Node{
 			ID:     n.ID,
 			Name:   n.Name,
