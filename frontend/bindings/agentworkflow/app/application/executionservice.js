@@ -49,6 +49,15 @@ export function Cancel(id) {
 }
 
 /**
+ * Delete 删除执行记录(级联删除节点/事件/制品)。
+ * @param {string} id
+ * @returns {$CancellablePromise<void>}
+ */
+export function Delete(id) {
+    return $Call.ByID(343207234, id);
+}
+
+/**
  * @param {string} id
  * @returns {$CancellablePromise<{ [_ in string]?: any }[]>}
  */

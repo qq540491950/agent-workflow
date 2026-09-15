@@ -180,6 +180,9 @@ func (s *Server) routes() {
 		evs, err := s.app.Executions.AllEvents(r.URL.Query().Get("type"), queryInt(r, "limit", 200))
 		return writeJSON(w, evs, err)
 	}))
+	s.mux.HandleFunc("DELETE /api/executions/{id}", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		return s.app.Executions.Delete(r.PathValue("id"))
+	}))
 	s.mux.HandleFunc("POST /api/executions/{id}/retry", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var body struct {
 			Skip bool `json:"skip"`

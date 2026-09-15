@@ -417,6 +417,26 @@ func (d *DB) ListAllEvents(eventType string, limit int) ([]map[string]any, error
 	return out, rows.Err()
 }
 
+// DeleteExecution 级联删除执行及其节点/事件/制品。
+func (d *DB) DeleteExecution(id string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return wrap(err)
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM execution_nodes WHERE execution_id=?`,
+		`DELETE FROM events WHERE execution_id=?`,
+		`DELETE FROM artifacts WHERE execution_id=?`,
+		`DELETE FROM executions WHERE id=?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return wrap(err)
+		}
+	}
+	return tx.Commit()
+}
+
 // SaveArtifact 保存制品。
 func (d *DB) SaveArtifact(a *model.Artifact) error {
 	_, err := d.sql.Exec(`INSERT OR REPLACE INTO artifacts (id,execution_id,node_id,name,content_type,content,created_at) VALUES (?,?,?,?,?,?,?)`,

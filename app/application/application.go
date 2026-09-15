@@ -572,6 +572,11 @@ func (s *ExecutionService) Export(id string) (map[string]any, error) {
 	}, nil
 }
 
+// Delete 删除执行记录(级联删除节点/事件/制品)。
+func (s *ExecutionService) Delete(id string) error {
+	return s.app.Repo.DeleteExecution(id)
+}
+
 // RetryNode 重试失败节点或跳过继续(skip=true)。
 func (s *ExecutionService) RetryNode(id string, skip bool) (*model.Execution, error) {
 	return s.app.Engine.RetryNode(context.Background(), id, skip)

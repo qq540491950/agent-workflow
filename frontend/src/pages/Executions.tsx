@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
+import { Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { api, subscribeEvents } from "@/lib/api";
 import type { Execution } from "@/lib/types";
 import { StateBadge } from "@/components/state-badge";
@@ -65,6 +67,7 @@ export default function Executions() {
               <TableHead>当前节点</TableHead>
               <TableHead>开始时间</TableHead>
               <TableHead>结束时间</TableHead>
+              <TableHead className="w-12"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -81,6 +84,22 @@ export default function Executions() {
                   <Link className="hover:underline" to={`/executions/${e.id}`}>
                     {e.id}
                   </Link>
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    title="删除记录"
+                    className="text-muted-foreground hover:text-red-500"
+                    onClick={async (ev) => {
+                      ev.stopPropagation();
+                      if (!confirm(`删除执行记录 ${e.id}?`)) return;
+                      await api.deleteExecution(e.id);
+                      refresh();
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </TableCell>
                 <TableCell className="text-sm">{e.workflow_name}</TableCell>
                 <TableCell className="max-w-48 truncate text-sm text-muted-foreground">

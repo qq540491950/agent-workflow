@@ -192,6 +192,12 @@ export const api = {
       body: JSON.stringify(response),
     });
   },
+  async deleteExecution(id: string): Promise<void> {
+    if ((await detectMode()) === "desktop") {
+      return (await wailsBindings()).ex.Delete(id);
+    }
+    return http(`/api/executions/${id}`, { method: "DELETE" });
+  },
   async retryExecution(id: string, skip: boolean): Promise<Execution> {
     if ((await detectMode()) === "desktop") {
       return nn(await (await wailsBindings()).ex.RetryNode(id, skip));
