@@ -407,7 +407,10 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 		return
 	}
 	_ = e.transitionAndSave(exec, model.ExecutionCompleted)
-	e.Bus.Emit(event.New(event.WorkflowCompleted, exec.ID, exec.CurrentNodeID, nil))
+	e.Bus.Emit(event.New(event.WorkflowCompleted, exec.ID, exec.CurrentNodeID, map[string]any{
+		"nodes": exec.NodeStates,
+		"iterations": exec.Iterations,
+	}))
 }
 
 // collectResult 把 ADK 会话状态同步回 Execution 记录。
