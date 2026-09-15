@@ -179,6 +179,15 @@ export const api = {
       body: JSON.stringify(response),
     });
   },
+  async retryExecution(id: string, skip: boolean): Promise<Execution> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).ex.RetryNode(id, skip));
+    }
+    return http(`/api/executions/${id}/retry`, {
+      method: "POST",
+      body: JSON.stringify({ skip }),
+    });
+  },
   async cancelExecution(id: string): Promise<void> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).ex.Cancel(id);
     return http(`/api/executions/${id}/cancel`, { method: "POST" });

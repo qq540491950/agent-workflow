@@ -90,6 +90,7 @@ const (
 )
 
 // CanTransitionExecution 校验 Execution 状态机的合法转换,禁止非法状态跳转。
+// FAILED→RUNNING 仅允许用户显式重试(Engine.RetryNode)。
 func CanTransitionExecution(from, to ExecutionState) bool {
 	allowed := map[ExecutionState][]ExecutionState{
 		ExecutionCreated:     {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
@@ -97,7 +98,7 @@ func CanTransitionExecution(from, to ExecutionState) bool {
 		ExecutionPaused:      {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
 		ExecutionWaitingUser: {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
 		ExecutionCompleted:   {},
-		ExecutionFailed:      {},
+		ExecutionFailed:      {ExecutionRunning}, // 用户显式重试
 		ExecutionCancelled:   {},
 	}
 	for _, t := range allowed[from] {

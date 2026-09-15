@@ -486,6 +486,11 @@ func (s *ExecutionService) Cancel(ctx context.Context, id string) error {
 	return s.app.Engine.Cancel(ctx, id)
 }
 
+// RetryNode 重试失败节点或跳过继续(skip=true)。
+func (s *ExecutionService) RetryNode(id string, skip bool) (*model.Execution, error) {
+	return s.app.Engine.RetryNode(context.Background(), id, skip)
+}
+
 // ---- AgentService ----
 
 // AgentService Agent 管理与权限配置。

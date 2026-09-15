@@ -189,6 +189,53 @@ func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 	return nil
 }
 
+// RetryNode 对失败执行发起恢复:重试失败节点(skip=false)或跳过它(skip=true)。
+// 已成功的节点在重放时自动跳过;FAILED→RUNNING 是用户显式重试的合法转换。
+func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (*model.Execution, error) {
+	exec, err := e.loadExec(executionID)
+	if err != nil {
+		return nil, err
+	}
+	if exec.State != model.ExecutionFailed {
+		return nil, model.NewError(model.KindStateError, "INVALID_RETRY",
+			fmt.Sprintf("执行 %s 状态为 %s,仅 FAILED 可重试", executionID, exec.State))
+	}
+	nodeID := exec.CurrentNodeID
+	if nodeID == "" {
+		return nil, model.NewError(model.KindStateError, "NO_FAILED_NODE", "无法定位失败节点")
+	}
+	if skip {
+		exec.StateData[compiler.StatusKey(nodeID)] = string(model.NodeSkipped)
+	} else {
+		delete(exec.StateData, compiler.StatusKey(nodeID))
+	}
+	delete(exec.StateData, compiler.KeyAbort)
+	delete(exec.StateData, "_error")
+	exec.Error = ""
+
+	if err := e.transition(exec, model.ExecutionRunning); err != nil {
+		return nil, err
+	}
+	e.save(exec)
+	e.Bus.Emit(event.New(event.WorkflowResumed, exec.ID, nodeID, map[string]any{
+		"retry": !skip, "skip": skip,
+	}))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	e.mu.Lock()
+	e.cancels[exec.ID] = cancel
+	e.mu.Unlock()
+	go func() {
+		defer func() {
+			e.mu.Lock()
+			delete(e.cancels, exec.ID)
+			e.mu.Unlock()
+		}()
+		e.execute(runCtx, exec, "resume", nil)
+	}()
+	return exec, nil
+}
+
 // RecoverPending 在应用启动时调用:把上次崩溃遗留的 RUNNING 执行标记为
 // FAILED(可再次运行),WAITING_USER/PAUSED 保持可恢复状态。
 func (e *Engine) RecoverPending() error {

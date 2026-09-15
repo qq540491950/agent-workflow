@@ -87,6 +87,18 @@ export function ProvideInput(id, response) {
 }
 
 /**
+ * RetryNode 重试失败节点或跳过继续(skip=true)。
+ * @param {string} id
+ * @param {boolean} skip
+ * @returns {$CancellablePromise<model$0.Execution | null>}
+ */
+export function RetryNode(id, skip) {
+    return $Call.ByID(3308931305, id, skip).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType6($result);
+    }));
+}
+
+/**
  * Run 启动执行(异步,立即返回 Execution 记录)。
  * 使用脱离请求的生命周期 context:HTTP 响应返回后执行继续在后台进行。
  * @param {string} workflowID

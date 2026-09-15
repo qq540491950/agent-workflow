@@ -136,8 +136,32 @@ export default function ExecutionMonitor() {
       </div>
 
       {exec.error && (
-        <div className="mb-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-          {exec.error}
+        <div className="mb-4 flex items-center justify-between rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+          <span>{exec.error}</span>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={async () => {
+                await api.retryExecution(exec.id, false);
+                toast.success("重试失败节点");
+                setTimeout(refresh, 300);
+              }}
+            >
+              重试失败节点
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={async () => {
+                await api.retryExecution(exec.id, true);
+                toast.success("已跳过失败节点");
+                setTimeout(refresh, 300);
+              }}
+            >
+              跳过并继续
+            </Button>
+          </div>
         </div>
       )}
 
