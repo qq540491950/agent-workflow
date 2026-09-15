@@ -29,6 +29,7 @@ func main() {
 	serverMode := flag.Bool("server", false, "以 HTTP 服务器模式运行(无 GUI)")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP 监听地址")
 	dataDir := flag.String("data", "", "数据目录(默认用户配置目录)")
+	gitDir := flag.String("git-dir", "", "Git 工作目录(默认当前目录)")
 	logLevel := flag.String("log", "info", "日志级别 debug|info|warn|error")
 	flag.Parse()
 
@@ -47,6 +48,10 @@ func main() {
 	if err != nil {
 		logx.Error("应用初始化失败", "error", err)
 		os.Exit(1)
+	}
+	// 启动参数优先:Git 工作目录(默认进程当前目录,亦可在设置页修改)
+	if *gitDir != "" {
+		_ = app.GitAPI.SetWorkingDir(*gitDir)
 	}
 
 	if *serverMode {

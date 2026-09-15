@@ -71,7 +71,9 @@ func NewApp(dataDir string) (*App, error) {
 	agents := agent.NewRegistry()
 	skills := skill.NewRegistry()
 	perms := permission.NewManager()
-	gitSvc := git.New(dataDir) // 默认工作目录为数据目录,可在设置中修改
+	// Git 默认工作目录 = 进程当前目录(桌面/服务器通用),可在设置页覆盖
+	cwd, _ := os.Getwd()
+	gitSvc := git.New(cwd)
 
 	app := &App{
 		Repo:          repo,
