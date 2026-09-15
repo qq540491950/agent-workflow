@@ -183,6 +183,22 @@ func (s *Server) routes() {
 		stats, err := s.app.Executions.Stats()
 		return writeJSON(w, stats, err)
 	}))
+	s.mux.HandleFunc("GET /api/backup", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		data, err := s.app.Settings.ExportBackup()
+		if err != nil {
+			return err
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="agent-workflow-backup.json"`)
+		return writeJSON(w, data, nil)
+	}))
+	s.mux.HandleFunc("POST /api/backup/restore", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		var backup map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&backup); err != nil {
+			return badRequest(err.Error())
+		}
+		result, err := s.app.Settings.RestoreBackup(backup)
+		return writeJSON(w, result, err)
+	}))
 	s.mux.HandleFunc("GET /api/events/all", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		evs, err := s.app.Executions.AllEvents(r.URL.Query().Get("type"), queryInt(r, "limit", 200))
 		return writeJSON(w, evs, err)

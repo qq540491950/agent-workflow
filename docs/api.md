@@ -69,6 +69,8 @@
 | --- | --- | --- |
 | GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 |
 | POST | `/api/settings` | 更新设置(日志级别即时生效) |
+| GET | `/api/backup` | 导出备份(工作流 + Agent 配置,含明文敏感环境变量) |
+| POST | `/api/backup/restore` | 恢复备份(已存在工作流跳过) |
 | GET | `/api/events` | **SSE** 实时事件流(UIEvent) |
 | GET | `/api/events/all?type=&limit=` | 跨执行审计事件(支持类型前缀过滤) |
 | GET | `/api/stats` | 每工作流执行统计 |

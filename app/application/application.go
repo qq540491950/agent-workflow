@@ -824,6 +824,74 @@ func (s *SettingsService) Info() *SettingsInfo {
 }
 
 // Update 更新设置:git_working_dir / log_level(日志级别即时生效)。
+// ExportBackup 导出全部工作流与 Agent 配置(备份用;含明文敏感环境变量,请妥善保管)。
+func (s *SettingsService) ExportBackup() (map[string]any, error) {
+	wfs, err := s.app.Repo.ListWorkflows()
+	if err != nil {
+		return nil, err
+	}
+	configs, err := s.app.Repo.ListAgentConfigs()
+	if err != nil {
+		return nil, err
+	}
+	cfgMap := map[string]json.RawMessage{}
+	for id, raw := range configs {
+		// 环境变量保留明文(备份用途),其余数据同样原样导出
+		cfgMap[id] = raw
+	}
+	return map[string]any{
+		"exported_at":   time.Now().Format(time.RFC3339),
+		"version":       1,
+		"workflows":     wfs,
+		"agent_configs": cfgMap,
+	}, nil
+}
+
+// RestoreBackup 恢复备份:已存在同 ID 工作流跳过(避免覆盖用户修改),
+// Agent 配置覆盖写入。
+func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, error) {
+	restoredWf, skipped := 0, 0
+	if rawWfs, ok := backup["workflows"].([]any); ok {
+		for _, raw := range rawWfs {
+			b, err := json.Marshal(raw)
+			if err != nil {
+				continue
+			}
+			wf := model.Workflow{}
+			if err := json.Unmarshal(b, &wf); err != nil || wf.ID == "" {
+				continue
+			}
+			if existing, err := s.app.Repo.GetWorkflow(wf.ID); err == nil && existing != nil {
+				skipped++
+				continue
+			}
+			wf.Version = 0
+			if err := s.app.Repo.SaveWorkflow(&wf, false); err != nil {
+				return nil, err
+			}
+			restoredWf++
+		}
+	}
+	restoredCfg := 0
+	if cfgs, ok := backup["agent_configs"].(map[string]any); ok {
+		for id, raw := range cfgs {
+			b, err := json.Marshal(raw)
+			if err != nil {
+				continue
+			}
+			if err := s.app.Repo.SaveAgentConfig(id, b); err != nil {
+				return nil, err
+			}
+			cfg := agent.AgentConfig{}
+			if json.Unmarshal(b, &cfg) == nil {
+				_ = s.app.applyAgentConfig(id, cfg)
+			}
+			restoredCfg++
+		}
+	}
+	return map[string]any{"workflows_restored": restoredWf, "workflows_skipped": skipped, "agent_configs_restored": restoredCfg}, nil
+}
+
 func (s *SettingsService) Update(gitWorkingDir, logLevel string) (*SettingsInfo, error) {
 	if gitWorkingDir != "" {
 		s.app.GitSvc.WorkingDir = gitWorkingDir

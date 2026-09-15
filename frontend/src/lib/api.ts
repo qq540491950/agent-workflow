@@ -316,6 +316,20 @@ export const api = {
     return http("/api/settings", { method: "POST", body: JSON.stringify(patch) });
   },
 
+  backupURL(): string {
+    return "/api/backup";
+  },
+  async restoreBackup(backup: Record<string, unknown>): Promise<{
+    workflows_restored: number;
+    workflows_skipped: number;
+    agent_configs_restored: number;
+  }> {
+    return http("/api/backup/restore", {
+      method: "POST",
+      body: JSON.stringify(backup),
+    });
+  },
+
   // ---- Git ----
   async gitStatus(): Promise<{
     branch: string;
