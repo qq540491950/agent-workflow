@@ -593,9 +593,14 @@ func (s *AgentService) List() []map[string]any {
 	out := []map[string]any{}
 	for _, a := range s.app.Agents.List() {
 		p := s.app.Perms.Get(a.ID())
+		model := ""
+		if cfg, err := s.app.loadAgentConfig(a.ID()); err == nil {
+			model = cfg.Model
+		}
 		out = append(out, map[string]any{
 			"id":          a.ID(),
 			"name":        a.Name(),
+			"model":       model,
 			"permissions": p,
 		})
 	}

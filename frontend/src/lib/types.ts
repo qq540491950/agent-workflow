@@ -120,6 +120,7 @@ export interface PermissionPolicy {
 export interface AgentInfo {
   id: string;
   name: string;
+  model?: string;
   permissions: PermissionPolicy;
 }
 

@@ -84,6 +84,7 @@ export default function Agents() {
             <TableRow>
               <TableHead>Agent</TableHead>
               <TableHead>ID</TableHead>
+              <TableHead>模型</TableHead>
               <TableHead>fs:read</TableHead>
               <TableHead>fs:write</TableHead>
               <TableHead>git:read</TableHead>
@@ -98,6 +99,9 @@ export default function Agents() {
                 <TableCell className="font-medium">{a.name}</TableCell>
                 <TableCell>
                   <Badge variant="outline" className="font-mono text-xs">{a.id}</Badge>
+                </TableCell>
+                <TableCell className="font-mono text-xs">
+                  {a.model || <span className="text-muted-foreground">默认</span>}
                 </TableCell>
                 {(
                   [
