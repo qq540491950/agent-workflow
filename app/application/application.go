@@ -5,6 +5,7 @@ package application
 import (
 	"context"
 	crypto_rand "crypto/rand"
+	"os/exec"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -680,11 +681,24 @@ func (s *AgentService) ResetConfig(id string) error {
 	return s.UpdateConfig(id, cfg)
 }
 
-// Test 用空任务测试 Agent 可用性(仅检查注册与配置)。
+// Test 测试 Agent 可用性:检查注册与 CLI 是否安装(claude/pi)。
+// CLI 未安装时给出明确提示(演示可使用 Mock Agent)。
 func (s *AgentService) Test(ctx context.Context, id string) (string, error) {
 	a, err := s.app.Agents.Get(id)
 	if err != nil {
 		return "", err
+	}
+	switch id {
+	case "claude-code":
+		if _, err := exec.LookPath("claude"); err != nil {
+			return "已注册,但未找到 claude CLI(演示请使用 mock-claude)", nil
+		}
+		return "已注册且 claude CLI 可用", nil
+	case "pi-agent":
+		if _, err := exec.LookPath("pi-agent"); err != nil {
+			return "已注册,但未找到 pi-agent CLI(演示请使用 mock-pi)", nil
+		}
+		return "已注册且 pi-agent CLI 可用", nil
 	}
 	return fmt.Sprintf("Agent %s(%s) 已注册,可被工作流引用", a.Name(), a.ID()), nil
 }
