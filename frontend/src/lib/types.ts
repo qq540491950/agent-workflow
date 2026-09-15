@@ -150,4 +150,6 @@ export interface AgentConfig {
   extra_args: string[];
   env: Record<string, string> | null;
   default_working_dir: string;
+  /** 仅 Mock Agent:演示用决策序列脚本 */
+  behavior?: Record<string, { decisions?: string[]; summary_template?: string; fail_with?: string }> | null;
 }

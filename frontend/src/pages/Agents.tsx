@@ -7,6 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
   Dialog,
@@ -189,6 +190,25 @@ export default function Agents() {
                   />
                 </div>
               </div>
+              {configTarget?.id.startsWith("mock") && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">
+                    Mock 决策脚本(JSON,mode → decisions 序列;演示循环/保护用)
+                  </Label>
+                  <Textarea
+                    className="min-h-24 font-mono text-xs"
+                    placeholder={'{"review": {"decisions": ["REJECTED", "APPROVED"]}}'}
+                    value={JSON.stringify(cfg.behavior ?? {}, null, 2)}
+                    onChange={(e) => {
+                      try {
+                        setCfg({ ...cfg, behavior: JSON.parse(e.target.value || "{}") });
+                      } catch {
+                        // 输入过程中允许暂不合法的 JSON
+                      }
+                    }}
+                  />
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">附加 CLI 参数(空格分隔)</Label>
                 <Input

@@ -49,6 +49,7 @@ export default function Workflows() {
   const [newDesc, setNewDesc] = useState("");
   const [runTarget, setRunTarget] = useState<Workflow | null>(null);
   const [task, setTask] = useState("");
+  const [runVars, setRunVars] = useState("{}");
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
 
@@ -88,8 +89,15 @@ export default function Workflows() {
 
   const run = async () => {
     if (!runTarget) return;
+    let variables: Record<string, unknown> = {};
     try {
-      const exec = await api.runWorkflow(runTarget.id, task || "默认任务");
+      variables = JSON.parse(runVars || "{}");
+    } catch {
+      toast.error("变量不是合法 JSON");
+      return;
+    }
+    try {
+      const exec = await api.runWorkflow(runTarget.id, task || "默认任务", variables);
       toast.success("执行已启动: " + exec.id);
       setRunTarget(null);
       setTask("");
@@ -315,6 +323,12 @@ export default function Workflows() {
             placeholder="任务描述(将传递给工作流)"
             value={task}
             onChange={(e) => setTask(e.target.value)}
+          />
+          <Textarea
+            className="min-h-16 font-mono text-xs"
+            placeholder='{"max_review_iterations": 3}(可选变量)'
+            value={runVars}
+            onChange={(e) => setRunVars(e.target.value)}
           />
           <DialogFooter>
             <Button variant="outline" onClick={() => setRunTarget(null)}>

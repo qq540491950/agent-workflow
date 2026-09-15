@@ -168,10 +168,46 @@ func (a *App) applyAgentConfig(id string, cfg agent.AgentConfig) error {
 			DefaultArgs:           cfg.ExtraArgs,
 			DefaultTimeoutSeconds: cfg.TimeoutSeconds,
 		}))
+	case "mock-claude", "mock-pi", "mock":
+		return a.Agents.Replace(buildMock(id, cfg.Behavior))
 	default:
-		// mock 等内置 Agent 不支持模型配置,静默保留
+		// 其他内置 Agent 不支持运行时配置,静默保留
 		return nil
 	}
+}
+
+// buildMock 按行为配置构造 Mock Agent(演示用,决策序列可自定义)。
+func buildMock(id string, behavior map[string]any) agent.Agent {
+	name := id
+	switch id {
+	case "mock-claude":
+		name = "Mock Claude(演示)"
+	case "mock-pi":
+		name = "Mock Pi(演示)"
+	}
+	scripts := map[string]*mock.Script{}
+	for mode, raw := range behavior {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		sc := &mock.Script{}
+		if arr, ok := m["decisions"].([]any); ok {
+			for _, d := range arr {
+				sc.Decisions = append(sc.Decisions, agent.AgentDecision(strings.ToUpper(fmt.Sprint(d))))
+			}
+		}
+		if tpl, ok := m["summary_template"].(string); ok {
+			sc.SummaryTemplate = tpl
+		}
+		if fail, ok := m["fail_with"].(string); ok && fail != "" {
+			sc.FailWith = fail
+		}
+		scripts[mode] = sc
+	}
+	def := scripts["*"]
+	delete(scripts, "*")
+	return mock.New(mock.Options{ID: id, Name: name, Scripts: scripts, Default: def})
 }
 
 // reloadAgents 根据持久化配置注册 Agent 适配器。

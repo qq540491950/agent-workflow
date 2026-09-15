@@ -22,6 +22,9 @@ type AgentConfig struct {
 	Env map[string]string `json:"env"`
 	// DefaultWorkingDir 默认工作目录(节点未指定时使用)。
 	DefaultWorkingDir string `json:"default_working_dir"`
+	// Behavior 仅用于 Mock Agent 的演示脚本:
+	// {"review": {"decisions": ["REJECTED","APPROVED"], "summary_template": "..."}}
+	Behavior map[string]any `json:"behavior,omitempty"`
 }
 
 // MaskEnv 返回掩码后的环境变量副本(值替换为 ***)。
