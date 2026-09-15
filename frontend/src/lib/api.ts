@@ -232,6 +232,31 @@ export const api = {
     return r.output;
   },
 
+  // ---- Settings ----
+  async getSettings(): Promise<{
+    data_dir: string;
+    git_working_dir: string;
+    log_level: string;
+  }> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).st.Info());
+    }
+    return http("/api/settings");
+  },
+  async updateSettings(patch: {
+    git_working_dir?: string;
+    log_level?: string;
+  }): Promise<{
+    data_dir: string;
+    git_working_dir: string;
+    log_level: string;
+  }> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).st.Update(patch.git_working_dir ?? "", patch.log_level ?? ""));
+    }
+    return http("/api/settings", { method: "POST", body: JSON.stringify(patch) });
+  },
+
   // ---- Git ----
   async gitStatus(): Promise<{
     branch: string;

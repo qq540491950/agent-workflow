@@ -8,6 +8,7 @@ import {
   Wrench,
   Activity,
   GitCompare,
+  Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, detectMode, subscribeEvents } from "@/lib/api";
@@ -20,6 +21,7 @@ const nav = [
   { to: "/agents", label: "Agents", icon: Bot },
   { to: "/skills", label: "Skills", icon: Wrench },
   { to: "/git", label: "Git", icon: GitCompare },
+  { to: "/settings", label: "Settings", icon: Settings },
 ];
 
 export default function Layout() {

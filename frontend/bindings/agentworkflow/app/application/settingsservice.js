@@ -11,6 +11,10 @@
 // @ts-ignore: Unused imports
 import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "@wailsio/runtime";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as $models from "./models.js";
+
 /**
  * @param {string} key
  * @param {any} out
@@ -21,6 +25,16 @@ export function Get(key, out) {
 }
 
 /**
+ * Info 返回当前设置。
+ * @returns {$CancellablePromise<$models.SettingsInfo | null>}
+ */
+export function Info() {
+    return $Call.ByID(3803811458).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType1($result);
+    }));
+}
+
+/**
  * @param {string} key
  * @param {any} value
  * @returns {$CancellablePromise<void>}
@@ -28,3 +42,19 @@ export function Get(key, out) {
 export function Set(key, value) {
     return $Call.ByID(833733018, key, value);
 }
+
+/**
+ * Update 更新设置:git_working_dir / log_level(日志级别即时生效)。
+ * @param {string} gitWorkingDir
+ * @param {string} logLevel
+ * @returns {$CancellablePromise<$models.SettingsInfo | null>}
+ */
+export function Update(gitWorkingDir, logLevel) {
+    return $Call.ByID(1778497747, gitWorkingDir, logLevel).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType1($result);
+    }));
+}
+
+// Private type creation functions
+const $$createType0 = $models.SettingsInfo.createFrom;
+const $$createType1 = $Create.Nullable($$createType0);

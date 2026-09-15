@@ -42,7 +42,8 @@ type App struct {
 	Perms  *permission.Manager
 	GitSvc *git.Service
 
-	DataDir string
+	DataDir  string
+	LogLevel string
 	// 供 Wails/SSE 桥接实时事件。
 	eventsMu      sync.RWMutex
 	eventHandlers map[int]func(event.UIEvent)
@@ -110,6 +111,15 @@ func NewApp(dataDir string) (*App, error) {
 	var wd string
 	if err := repo.GetSetting("git_working_dir", &wd); err == nil && wd != "" {
 		gitSvc.WorkingDir = wd
+	}
+	// 日志级别持久化
+	var lv string
+	if err := repo.GetSetting("log_level", &lv); err == nil && lv != "" {
+		logx.SetLevel(lv)
+	}
+	app.LogLevel = lv
+	if app.LogLevel == "" {
+		app.LogLevel = "info"
 	}
 
 	// 崩溃恢复
@@ -647,4 +657,39 @@ func (s *SettingsService) Get(key string, out any) error {
 
 func (s *SettingsService) Set(key string, value any) error {
 	return s.app.Repo.SaveSetting(key, value)
+}
+
+// SettingsInfo 是设置页展示的只读信息 + 可修改项。
+type SettingsInfo struct {
+	DataDir       string `json:"data_dir"`
+	GitWorkingDir string `json:"git_working_dir"`
+	LogLevel      string `json:"log_level"`
+}
+
+// Info 返回当前设置。
+func (s *SettingsService) Info() *SettingsInfo {
+	var wd string
+	_ = s.app.Repo.GetSetting("git_working_dir", &wd)
+	if wd == "" {
+		wd = s.app.GitSvc.WorkingDir
+	}
+	return &SettingsInfo{
+		DataDir:       s.app.DataDir,
+		GitWorkingDir: wd,
+		LogLevel:      s.app.LogLevel,
+	}
+}
+
+// Update 更新设置:git_working_dir / log_level(日志级别即时生效)。
+func (s *SettingsService) Update(gitWorkingDir, logLevel string) (*SettingsInfo, error) {
+	if gitWorkingDir != "" {
+		s.app.GitSvc.WorkingDir = gitWorkingDir
+		_ = s.Set("git_working_dir", gitWorkingDir)
+	}
+	if logLevel != "" {
+		s.app.LogLevel = logLevel
+		logx.SetLevel(logLevel)
+		_ = s.Set("log_level", logLevel)
+	}
+	return s.Info(), nil
 }

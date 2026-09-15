@@ -16,3 +16,7 @@ export {
     SkillService,
     WorkflowService
 };
+
+export {
+    SettingsInfo
+} from "./models.js";

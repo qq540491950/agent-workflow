@@ -220,6 +220,22 @@ func (s *Server) routes() {
 		return writeJSON(w, logs, err)
 	}))
 
+	// 设置
+	s.mux.HandleFunc("GET /api/settings", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		return writeJSON(w, s.app.Settings.Info(), nil)
+	}))
+	s.mux.HandleFunc("POST /api/settings", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		var body struct {
+			GitWorkingDir string `json:"git_working_dir"`
+			LogLevel      string `json:"log_level"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			return badRequest(err.Error())
+		}
+		info, err := s.app.Settings.Update(body.GitWorkingDir, body.LogLevel)
+		return writeJSON(w, info, err)
+	}))
+
 	// SSE 实时事件
 	s.mux.HandleFunc("GET /api/events", s.handleSSE)
 }
