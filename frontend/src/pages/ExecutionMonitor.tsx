@@ -383,8 +383,10 @@ export default function ExecutionMonitor() {
                         Object.fromEntries(
                           Object.entries(exec.state_data).filter(
                             ([k, v]) =>
-                              !k.startsWith("node:") &&
-                              !k.startsWith("revisit:") &&
+                              ((!k.startsWith("node:") &&
+                                !k.startsWith("revisit:") &&
+                                !k.startsWith("_")) ||
+                                k === "_user_input") &&
                               v !== null &&
                               v !== "" &&
                               v !== false,
