@@ -329,7 +329,13 @@ function DesignerInner() {
       const res = await api.validateWorkflow(toModel());
       if (res.valid) {
         setErrors([]);
-        if (!silent) toast.success("校验通过");
+        if (res.warnings?.length) {
+          // 警告以错误面板形式提示但不阻断
+          setErrors(res.warnings.map((w) => ({ ...w, code: "⚠ " + w.code })));
+          if (!silent) toast.warning(`校验通过,但有 ${res.warnings.length} 个建议`);
+        } else if (!silent) {
+          toast.success("校验通过");
+        }
         return true;
       }
       setErrors(res.errors);
