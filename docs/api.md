@@ -49,6 +49,7 @@
 | POST | `/api/agents/{id}/test` | 可用性测试(CLI 探测) |
 | GET | `/api/agents/{id}/config` | 读取运行配置(env 值以 `***` 掩码) |
 | PUT | `/api/agents/{id}/config` | 保存配置并热重建适配器(env `***`=保留,空=删除) |
+| POST | `/api/agents/{id}/reset` | 清空运行配置,恢复适配器内置默认 |
 | POST | `/api/agents/{id}/permission` | 更新权限策略 |
 | GET | `/api/skills` | Skill 注册表(含启用状态) |
 | POST | `/api/skills/{id}/enable` | 启用/禁用 `{enabled}` |
