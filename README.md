@@ -4,7 +4,7 @@
 
 - **运行时**:ADK Go v1.7.0(Workflow Runtime)+ Wails 3(桌面壳)+ SQLite(持久化)
 - **前端**:React + TypeScript + Vite + shadcn/ui + React Flow + Tailwind CSS 4
-- **文档**:[网页版使用说明(带截图)](docs/index.html) · [测试报告(8 轮,含视觉测试)](docs/TESTING.md)
+- **文档**:[网页版使用说明(带截图)](docs/index.html) · [测试报告(22+ 轮,含视觉测试)](docs/TESTING.md) · [HTTP API 参考](docs/api.md)
 
 ## 快速开始
 
