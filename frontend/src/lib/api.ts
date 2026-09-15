@@ -241,6 +241,19 @@ export const api = {
     return r.output;
   },
 
+  async allEvents(q: string): Promise<
+    {
+      seq: number;
+      execution_id: string;
+      node_id: string;
+      type: string;
+      data: Record<string, unknown>;
+      created_at: string;
+    }[]
+  > {
+    return http(`/api/events/all${q}`);
+  },
+
   // ---- Settings ----
   async getSettings(): Promise<{
     data_dir: string;

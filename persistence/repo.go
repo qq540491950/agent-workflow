@@ -333,6 +333,44 @@ func (d *DB) ListEvents(executionID string, limit int) ([]map[string]any, error)
 	return out, rows.Err()
 }
 
+// ListAllEvents 返回全局事件流(最新在后),支持按类型过滤与条数限制。
+func (d *DB) ListAllEvents(eventType string, limit int) ([]map[string]any, error) {
+	q := `SELECT seq,execution_id,node_id,type,data_json,created_at FROM events`
+	args := []any{}
+	if eventType != "" {
+		q += ` WHERE type=?`
+		args = append(args, eventType)
+	}
+	q += ` ORDER BY seq DESC`
+	if limit > 0 {
+		q += fmt.Sprintf(` LIMIT %d`, limit)
+	}
+	rows, err := d.sql.Query(q, args...)
+	if err != nil {
+		return nil, wrap(err)
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var seq int
+		var execID, nodeID, typ, dataJSON, createdAt string
+		if err := rows.Scan(&seq, &execID, &nodeID, &typ, &dataJSON, &createdAt); err != nil {
+			return nil, wrap(err)
+		}
+		data := map[string]any{}
+		_ = json.Unmarshal([]byte(dataJSON), &data)
+		out = append(out, map[string]any{
+			"seq": seq, "execution_id": execID, "node_id": nodeID,
+			"type": typ, "data": data, "created_at": createdAt,
+		})
+	}
+	// 反转成时间升序
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, rows.Err()
+}
+
 // SaveArtifact 保存制品。
 func (d *DB) SaveArtifact(a *model.Artifact) error {
 	_, err := d.sql.Exec(`INSERT OR REPLACE INTO artifacts (id,execution_id,node_id,name,content_type,content,created_at) VALUES (?,?,?,?,?,?,?)`,

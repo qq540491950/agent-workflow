@@ -477,6 +477,11 @@ func (s *ExecutionService) Artifacts(id string) ([]*model.Artifact, error) {
 	return s.app.Repo.ListArtifacts(id)
 }
 
+// AllEvents 跨执行审计事件流。
+func (s *ExecutionService) AllEvents(eventType string, limit int) ([]map[string]any, error) {
+	return s.app.Repo.ListAllEvents(eventType, limit)
+}
+
 // ProvideInput 人工输入后恢复执行(同样使用脱离请求的 context)。
 func (s *ExecutionService) ProvideInput(ctx context.Context, id string, response map[string]any) (*model.Execution, error) {
 	return s.app.Engine.Resume(context.Background(), id, response)

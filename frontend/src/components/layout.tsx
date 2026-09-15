@@ -9,6 +9,7 @@ import {
   Activity,
   GitCompare,
   Settings,
+  ScrollText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, detectMode, subscribeEvents } from "@/lib/api";
@@ -18,6 +19,7 @@ const nav = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/workflows", label: "Workflows", icon: GitBranch },
   { to: "/executions", label: "Executions", icon: PlayCircle },
+  { to: "/events", label: "Events", icon: ScrollText },
   { to: "/agents", label: "Agents", icon: Bot },
   { to: "/skills", label: "Skills", icon: Wrench },
   { to: "/git", label: "Git", icon: GitCompare },

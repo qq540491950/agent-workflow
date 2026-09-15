@@ -817,6 +817,19 @@ function WorkflowPropertyPanel({
           onChange={(e) => onChange({ description: e.target.value })}
         />
       </Row>
+      <Row label="Variables(JSON,可用 {{variable.xxx}} 引用)">
+        <Textarea
+          className="min-h-20 font-mono text-xs"
+          value={JSON.stringify(wf.variables ?? {}, null, 2)}
+          onChange={(e) => {
+            try {
+              onChange({ variables: JSON.parse(e.target.value || "{}") });
+            } catch {
+              // 输入过程中允许暂不合法的 JSON
+            }
+          }}
+        />
+      </Row>
       <Row label="Max Iterations(循环上限)">
         <Input
           type="number"

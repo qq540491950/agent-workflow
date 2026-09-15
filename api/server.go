@@ -144,6 +144,10 @@ func (s *Server) routes() {
 		exec, err := s.app.Executions.ProvideInput(r.Context(), r.PathValue("id"), response)
 		return writeJSON(w, exec, err)
 	}))
+	s.mux.HandleFunc("GET /api/events/all", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		evs, err := s.app.Executions.AllEvents(r.URL.Query().Get("type"), queryInt(r, "limit", 200))
+		return writeJSON(w, evs, err)
+	}))
 	s.mux.HandleFunc("POST /api/executions/{id}/retry", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var body struct {
 			Skip bool `json:"skip"`

@@ -11,6 +11,7 @@ import Agents from "@/pages/Agents";
 import Skills from "@/pages/Skills";
 import GitPanel from "@/pages/GitPanel";
 import Settings from "@/pages/Settings";
+import EventsAudit from "@/pages/EventsAudit";
 
 export default function App() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
           <Route path="/skills" element={<Skills />} />
           <Route path="/git" element={<GitPanel />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/events" element={<EventsAudit />} />
         </Route>
       </Routes>
       <Toaster position="top-center" richColors />
