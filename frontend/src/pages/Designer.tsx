@@ -398,6 +398,14 @@ function DesignerInner() {
 
   return (
     <div className="flex h-full flex-col">
+      <datalist id="common-models">
+        <option value="claude-sonnet-4-5" />
+        <option value="claude-opus-4-1" />
+        <option value="claude-haiku-4-5" />
+        <option value="glm-4.7" />
+        <option value="glm-4.7-flash" />
+        <option value="gpt-5.1-codex" />
+      </datalist>
       {/* 顶栏 */}
       <div className="flex items-center gap-3 border-b px-4 py-2.5">
         <Input
@@ -696,6 +704,7 @@ function NodePropertyPanel({
           <Row label="Model(可选,覆盖 Agent 默认模型)">
             <Input
               className="font-mono text-xs"
+              list="common-models"
               placeholder="留空 = 使用 Agent 配置的默认模型"
               value={String(cfg.model ?? "")}
               onChange={(e) => setCfg("model", e.target.value)}

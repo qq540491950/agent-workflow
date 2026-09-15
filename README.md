@@ -31,7 +31,8 @@ wails3 task package   # 产物 build/bin/agent-workflow.app
 - **循环与保护**:Review→Fix 循环自动识别,`max_iterations` + 停滞检测,达到上限转人工(wait_user)或失败
 - **Human-in-the-loop**:执行暂停等待输入(Approve / Reject / Continue / Instruction),指令注入后续上下文;失败执行可重试或跳过
 - **并行编排**:parallel → merge 分支并行,汇合后继续
-- **持久化与恢复**:执行实时写 SQLite,重启后可恢复;Execution 绑定工作流版本
+- **持久化与恢复**:执行实时写 SQLite,重启后可恢复;Execution 绑定工作流版本;数据一键备份/恢复
+- **可靠性**:工作流级超时、节点级重试(次数+退避)、循环上限与停滞检测、失败节点重试/跳过
 - **可观测**:实时事件流(SSE/IPC)、跨执行审计页、节点输出、会话 State 查看器、Artifacts(git diff)、桌面通知
 - **Git 集成**:status/diff/log/branch/checkout/commit 节点 + Git 面板,权限策略约束
 - **配置即代码**:YAML 导入导出;Mock Agent 决策脚本可配置,无需真实模型即可演示完整闭环
