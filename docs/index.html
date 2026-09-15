@@ -248,6 +248,8 @@ go build -tags server -o bin/agent-workflow-server .
   <li><b>Continue</b> — 清除决策再执行一轮(修复 + 复审);</li>
   <li><b>Provide instruction</b> — 输入补充指令后继续,指令会注入后续上下文。</li>
 </ul>
+<p>内置示例 <b>Approval Demo</b> 即为完整演示:方案制定 → 人工审批(可提供补充指令,指令通过
+  <code>{{user_instruction}}</code> 注入执行上下文)→ 执行 → 完成。</p>
 <p>提交后通过 SSE / Wails 事件实时刷新,执行从暂停点恢复(已完成的节点自动跳过)。
   下图为 Approve 后并行评审流完整跑通的最终状态:</p>
 <img class="screenshot" src="screenshots/07-parallel-completed.png" alt="并行评审完成" />
@@ -297,6 +299,9 @@ go build -tags server -o bin/agent-workflow-server .
   <div class="card"><h4>桌面通知</h4><p>执行完成 / 失败 / 等待输入时发送系统通知,点击直达执行详情。</p></div>
   <div class="card"><h4>节点级禁用</h4><p>节点配置开关关闭后运行时置为 SKIPPED,画布半透明 ⊘ 标识,便于对照调试。</p></div>
   <div class="card"><h4>记录管理</h4><p>执行页按状态过滤、删除记录(级联清理);执行记录一键导出 JSON 归档。</p></div>
+  <div class="card"><h4>工作流级超时</h4><p><code>settings.timeout_seconds</code> 防止单轮执行挂死,超时转 FAILED 并给出明确错误。</p></div>
+  <div class="card"><h4>备份与恢复</h4><p>设置页一键导出全部工作流与 Agent 配置(含环境变量);恢复时同 ID 工作流自动跳过。</p></div>
+  <div class="card"><h4>快捷与自动化</h4><p>Designer 支持 Cmd/Ctrl+S 保存;执行完成/失败/等待输入发送系统通知。</p></div>
 </div>
 
 <img class="screenshot" src="screenshots/18-monitor-disabled-export.png" alt="执行监控:禁用节点/耗时/导出" />
