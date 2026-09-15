@@ -394,6 +394,8 @@ SQLite(workflows / versions / executions / nodes / events / artifacts)</div>
   第一阶段 8 轮:后端全量 → Dashboard → 列表/SPA 路由 → Designer → UI 运行+监控 → HITL+并行 → Agents/Skills → 双模式回归;
   第二阶段 8 轮:模型配置 → 节点覆盖/重试 → YAML 导入 → Git 面板 → 设置/审计 → 自动布局 → 失败重试/跳过 → 细节完善与真实重启恢复。
   过程中发现并修复 6 个 Bug,每次修复独立提交 git。
+  可重复执行的冒烟脚本:<code>scripts/smoke.sh</code>(健康检查 / 示例种子 /
+  正常闭环 / 循环保护 / HITL 恢复 / 记录导出 / 事件流,7 项断言)。
   详细记录见仓库 <code>docs/TESTING.md</code>;本页全部截图即视觉测试实证。</p>
 <table>
   <tr><th>轮次</th><th>类型</th><th>结果</th><th>修复</th></tr>
