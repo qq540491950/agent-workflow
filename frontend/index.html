@@ -7,6 +7,11 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      window.__ERRS = [];
+      window.onerror = function (m, s, l, c) { window.__ERRS.push(String(m) + " @" + (s||'') + ":" + l + ":" + c); };
+      window.addEventListener("unhandledrejection", function (e) { window.__ERRS.push("rej: " + String(e.reason)); });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

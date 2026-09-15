@@ -30,7 +30,8 @@ export default function Layout() {
     const refresh = () => {
       api
         .listExecutions("", 50)
-        .then((execs: Execution[]) => {
+        .then((execs: Execution[] | null) => {
+          execs = execs ?? [];
           runningCount = execs.filter(
             (e) => e.state === "RUNNING" || e.state === "WAITING_USER",
           ).length;

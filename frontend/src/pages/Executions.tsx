@@ -17,7 +17,7 @@ export default function Executions() {
   const [execs, setExecs] = useState<Execution[]>([]);
 
   const refresh = useCallback(() => {
-    api.listExecutions("", 100).then(setExecs).catch((e) => toast.error(e.message));
+    api.listExecutions("", 100).then((x) => setExecs((x ?? []) as never)).catch((e) => toast.error(e.message));
   }, []);
 
   useEffect(() => {

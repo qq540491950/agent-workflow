@@ -17,7 +17,7 @@ import {
 export default function Agents() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
 
-  const refresh = () => api.listAgents().then(setAgents).catch((e) => toast.error(e.message));
+  const refresh = () => api.listAgents().then((x) => setAgents((x ?? []) as AgentInfo[])).catch((e) => toast.error(e.message));
   useEffect(() => {
     refresh();
   }, []);

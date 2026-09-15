@@ -80,7 +80,7 @@ func (d *DB) ListWorkflows() ([]*model.Workflow, error) {
 		return nil, wrap(err)
 	}
 	defer rows.Close()
-	var out []*model.Workflow
+	out := []*model.Workflow{}
 	for rows.Next() {
 		wf, err := scanWorkflow(rows)
 		if err != nil {
@@ -217,7 +217,7 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 		return nil, wrap(err)
 	}
 	defer rows.Close()
-	var out []*model.Execution
+	out := []*model.Execution{}
 	for rows.Next() {
 		var e model.Execution
 		var variables, iterations, nodeStates, snapshot, stateData string
@@ -284,7 +284,7 @@ func (d *DB) ListExecutionNodes(executionID string) ([]*model.ExecutionNode, err
 		return nil, wrap(err)
 	}
 	defer rows.Close()
-	var out []*model.ExecutionNode
+	out := []*model.ExecutionNode{}
 	for rows.Next() {
 		var n model.ExecutionNode
 		if err := rows.Scan(&n.ID, &n.ExecutionID, &n.NodeID, &n.NodeType, &n.NodeName, &n.State, &n.Attempt,
@@ -315,7 +315,7 @@ func (d *DB) ListEvents(executionID string, limit int) ([]map[string]any, error)
 		return nil, wrap(err)
 	}
 	defer rows.Close()
-	var out []map[string]any
+	out := []map[string]any{}
 	for rows.Next() {
 		var seq int
 		var execID, nodeID, typ, dataJSON, createdAt string
@@ -346,7 +346,7 @@ func (d *DB) ListArtifacts(executionID string) ([]*model.Artifact, error) {
 		return nil, wrap(err)
 	}
 	defer rows.Close()
-	var out []*model.Artifact
+	out := []*model.Artifact{}
 	for rows.Next() {
 		var a model.Artifact
 		if err := rows.Scan(&a.ID, &a.ExecutionID, &a.NodeID, &a.Name, &a.ContentType, &a.Content, &a.CreatedAt); err != nil {

@@ -49,7 +49,7 @@ export default function Workflows() {
   const [task, setTask] = useState("");
 
   const refresh = useCallback(() => {
-    api.listWorkflows().then(setWorkflows).catch((e) => toast.error(e.message));
+    api.listWorkflows().then((x) => setWorkflows((x ?? []) as never)).catch((e) => toast.error(e.message));
   }, []);
   useEffect(refresh, [refresh]);
 

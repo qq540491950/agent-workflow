@@ -17,7 +17,7 @@ import {
 export default function Skills() {
   const [skills, setSkills] = useState<SkillDTO[]>([]);
 
-  const refresh = () => api.listSkills().then(setSkills).catch((e) => toast.error(e.message));
+  const refresh = () => api.listSkills().then((x) => setSkills((x ?? []) as SkillDTO[])).catch((e) => toast.error(e.message));
   useEffect(() => {
     refresh();
   }, []);

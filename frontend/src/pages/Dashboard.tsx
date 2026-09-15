@@ -29,8 +29,8 @@ export default function Dashboard() {
   const [executions, setExecutions] = useState<Execution[]>([]);
 
   useEffect(() => {
-    api.listWorkflows().then(setWorkflows).catch(() => {});
-    api.listExecutions("", 8).then(setExecutions).catch(() => {});
+    api.listWorkflows().then((x) => setWorkflows(x ?? [])).catch(() => {});
+    api.listExecutions("", 8).then((x) => setExecutions(x ?? [])).catch(() => {});
     const unsub = subscribeRefresh(() => {
       api.listExecutions("", 8).then(setExecutions).catch(() => {});
     });
