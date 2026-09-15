@@ -280,6 +280,13 @@ func (e *Engine) RecoverPending() error {
 func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string, userInput map[string]any) {
 	e.running.Add(1)
 	defer e.running.Add(-1)
+
+	// 工作流级单轮执行超时
+	if ts := exec.Snapshot.Settings.TimeoutSeconds; ts > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(ts)*time.Second)
+		defer cancel()
+	}
 	// 工作流级权限覆盖:克隆全局策略后应用(不影响其他运行中的执行)
 	runPerms := e.Perms.Clone()
 	if len(exec.Snapshot.Permission) > 0 {
@@ -359,6 +366,10 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 
 	select {
 	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			e.failExecution(exec, fmt.Sprintf("工作流执行超时(%ds)", exec.Snapshot.Settings.TimeoutSeconds))
+			return
+		}
 		_ = e.transitionAndSave(exec, model.ExecutionCancelled)
 		e.Bus.Emit(event.New(event.WorkflowCancelled, exec.ID, exec.CurrentNodeID, nil))
 		return

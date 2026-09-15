@@ -47,6 +47,8 @@ type WorkflowSettings struct {
 	MaxIterations int `json:"max_iterations,omitempty" yaml:"max_iterations,omitempty"`
 	// OnLoopLimit 达到循环上限后的处理策略:wait_user(默认)或 fail。
 	OnLoopLimit string `json:"on_loop_limit,omitempty" yaml:"on_loop_limit,omitempty"`
+	// TimeoutSeconds 单轮执行超时(秒);0 = 不限。
+	TimeoutSeconds int `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
 }
 
 // Workflow 是用户可配置的编排定义。

@@ -69,8 +69,9 @@ func (d *Document) ToModel() *model.Workflow {
 		Variables:   d.Variables,
 		Permission:  d.Permission,
 		Settings: model.WorkflowSettings{
-			MaxIterations: d.Settings.MaxIterations,
-			OnLoopLimit:   d.Settings.OnLoopLimit,
+			MaxIterations:  d.Settings.MaxIterations,
+			OnLoopLimit:    d.Settings.OnLoopLimit,
+			TimeoutSeconds: d.Settings.TimeoutSeconds,
 		},
 		Nodes: make([]model.Node, 0, len(d.Nodes)),
 		Edges: make([]model.Edge, 0, len(d.Edges)),

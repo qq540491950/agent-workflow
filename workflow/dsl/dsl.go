@@ -26,6 +26,8 @@ type WorkflowMeta struct {
 type Settings struct {
 	MaxIterations int    `yaml:"max_iterations" json:"max_iterations,omitempty"`
 	OnLoopLimit   string `yaml:"on_loop_limit" json:"on_loop_limit,omitempty"`
+	// TimeoutSeconds 单轮执行超时(秒);0 = 不限。
+	TimeoutSeconds int `yaml:"timeout_seconds" json:"timeout_seconds,omitempty"`
 }
 
 // Node 是 DSL 中的节点定义。
