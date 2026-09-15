@@ -10,12 +10,12 @@ import (
 
 // 预定义事件类型。
 const (
-	WorkflowStarted   = "workflow.started"
-	WorkflowPaused    = "workflow.paused"
-	WorkflowResumed   = "workflow.resumed"
-	WorkflowCompleted = "workflow.completed"
-	WorkflowFailed    = "workflow.failed"
-	WorkflowCancelled = "workflow.cancelled"
+	WorkflowStarted     = "workflow.started"
+	WorkflowPaused      = "workflow.paused"
+	WorkflowResumed     = "workflow.resumed"
+	WorkflowCompleted   = "workflow.completed"
+	WorkflowFailed      = "workflow.failed"
+	WorkflowCancelled   = "workflow.cancelled"
 	WorkflowWaitingUser = "workflow.waiting_user"
 
 	NodeStarted   = "node.started"
@@ -23,8 +23,8 @@ const (
 	NodeFailed    = "node.failed"
 	NodeWaiting   = "node.waiting"
 
-	AgentStarted  = "agent.started"
-	AgentOutput   = "agent.output"
+	AgentStarted   = "agent.started"
+	AgentOutput    = "agent.output"
 	AgentCompleted = "agent.completed"
 
 	ReviewApproved = "review.approved"

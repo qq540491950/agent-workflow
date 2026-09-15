@@ -23,21 +23,21 @@ import (
 // 会话状态键(执行状态通过 ADK Session State 持久化)。
 const (
 	KeyTask        = "task"
-	KeyAbort       = "_abort"        // 非空 = 执行中断(失败/等待),后续节点跳过
-	KeyResumeNode  = "_resume_node"  // 恢复执行时从该节点开始
-	KeyUserInput   = "_user_input"   // 人工节点的用户响应
-	KeyLoopExited  = "_loop_exited"  // loop 因出口条件成立而退出
-	KeyLoopStuck   = "_loop_stuck"   // 检测到连续相同 Review,陷入停滞
-	KeyLoopCount   = "_loop_count"   // 当前循环轮数
-	KeyDecision    = "decision"      // 最近一次 Agent 决策
-	KeyStatus      = "status"        // 最近一次 Agent 状态
-	KeyOutput      = "output"        // 最近一次 Agent 输出
+	KeyAbort       = "_abort"       // 非空 = 执行中断(失败/等待),后续节点跳过
+	KeyResumeNode  = "_resume_node" // 恢复执行时从该节点开始
+	KeyUserInput   = "_user_input"  // 人工节点的用户响应
+	KeyLoopExited  = "_loop_exited" // loop 因出口条件成立而退出
+	KeyLoopStuck   = "_loop_stuck"  // 检测到连续相同 Review,陷入停滞
+	KeyLoopCount   = "_loop_count"  // 当前循环轮数
+	KeyDecision    = "decision"     // 最近一次 Agent 决策
+	KeyStatus      = "status"       // 最近一次 Agent 状态
+	KeyOutput      = "output"       // 最近一次 Agent 输出
 	KeyCurrentNode = "_current_node"
 )
 
 // StatusKey / ResultKey 生成节点级状态键。
-func StatusKey(nodeID string) string  { return "node:" + nodeID + ":status" }
-func ResultKey(nodeID string) string  { return "node:" + nodeID + ":result" }
+func StatusKey(nodeID string) string { return "node:" + nodeID + ":status" }
+func ResultKey(nodeID string) string { return "node:" + nodeID + ":result" }
 
 // NodeRunner 由 runtime 实现:真正执行一个节点的业务逻辑。
 // compiler 只负责编排,不感知 Agent/Skill/Git 的实现细节。
@@ -85,11 +85,11 @@ func (s *stateAccess) Set(key string, val any) error {
 
 // RunEnv 是一次执行运行的编译/执行环境。
 type RunEnv struct {
-	Exec      *model.Execution
-	WF        *model.Workflow
-	Runner    NodeRunner
-	Bus       *event.Bus
-	Vars      map[string]any
+	Exec          *model.Execution
+	WF            *model.Workflow
+	Runner        NodeRunner
+	Bus           *event.Bus
+	Vars          map[string]any
 	MaxIterations int
 	// Perms 运行期权限管理器(全局克隆 + 工作流覆盖);nil 时回退全局。
 	Perms RunPermissionChecker
@@ -481,8 +481,8 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 					st.Set(KeyResumeNode, decisionNode.ID)
 					st.Set(KeyAbort, "WAIT_USER")
 					env.Bus.Emit(event.New(event.HumanInputRequired, env.Exec.ID, decisionNode.ID, map[string]any{
-						"node": decisionNode.ID,
-						"prompt": fmt.Sprintf("工作流在节点 %s 循环 %d 轮后仍未通过,请人工处理", decisionNode.ID, p.Loop.MaxIterations),
+						"node":      decisionNode.ID,
+						"prompt":    fmt.Sprintf("工作流在节点 %s 循环 %d 轮后仍未通过,请人工处理", decisionNode.ID, p.Loop.MaxIterations),
 						"responses": []string{"approve", "reject", "continue", "instruction"},
 					}))
 					yield(escalateEvent(ctx, actions), nil)

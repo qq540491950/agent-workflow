@@ -32,8 +32,8 @@ type Script struct {
 
 // Options 是 MockAgent 的配置。
 type Options struct {
-	ID      string
-	Name    string
+	ID   string
+	Name string
 	// Scripts 按 mode 定义应答;未命中的 mode 使用 Default。
 	Scripts map[string]*Script
 	Default *Script

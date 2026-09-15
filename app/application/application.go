@@ -5,11 +5,11 @@ package application
 import (
 	"context"
 	crypto_rand "crypto/rand"
-	"os/exec"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -79,12 +79,12 @@ func NewApp(dataDir string) (*App, error) {
 	gitSvc := git.New(cwd)
 
 	app := &App{
-		Repo:          repo,
-		Bus:           bus,
-		Agents:        agents,
-		Skills:        skills,
-		Perms:         perms,
-		GitSvc:        gitSvc,
+		Repo:           repo,
+		Bus:            bus,
+		Agents:         agents,
+		Skills:         skills,
+		Perms:          perms,
+		GitSvc:         gitSvc,
 		DataDir:        dataDir,
 		LogLevel:       "info",
 		DisabledSkills: map[string]bool{},

@@ -5,13 +5,13 @@ package dsl
 
 // Document 是 DSL 文档的顶层结构。
 type Document struct {
-	Version    string             `yaml:"version" json:"version"`
-	Workflow   WorkflowMeta       `yaml:"workflow" json:"workflow"`
-	Variables  map[string]any     `yaml:"variables" json:"variables,omitempty"`
-	Nodes      []Node             `yaml:"nodes" json:"nodes"`
-	Edges      []Edge             `yaml:"edges" json:"edges,omitempty"`
-	Settings   Settings           `yaml:"settings" json:"settings,omitempty"`
-	Permission map[string]any     `yaml:"permissions" json:"permissions,omitempty"`
+	Version    string         `yaml:"version" json:"version"`
+	Workflow   WorkflowMeta   `yaml:"workflow" json:"workflow"`
+	Variables  map[string]any `yaml:"variables" json:"variables,omitempty"`
+	Nodes      []Node         `yaml:"nodes" json:"nodes"`
+	Edges      []Edge         `yaml:"edges" json:"edges,omitempty"`
+	Settings   Settings       `yaml:"settings" json:"settings,omitempty"`
+	Permission map[string]any `yaml:"permissions" json:"permissions,omitempty"`
 }
 
 // WorkflowMeta 对应 workflow: 段。
@@ -30,11 +30,11 @@ type Settings struct {
 
 // Node 是 DSL 中的节点定义。
 type Node struct {
-	ID   string         `yaml:"id" json:"id"`
-	Name string         `yaml:"name" json:"name"`
-	Type string         `yaml:"type" json:"type"`
-	X    *float64       `yaml:"x" json:"x,omitempty"`
-	Y    *float64       `yaml:"y" json:"y,omitempty"`
+	ID   string   `yaml:"id" json:"id"`
+	Name string   `yaml:"name" json:"name"`
+	Type string   `yaml:"type" json:"type"`
+	X    *float64 `yaml:"x" json:"x,omitempty"`
+	Y    *float64 `yaml:"y" json:"y,omitempty"`
 	// Rest 保留节点类型的全部配置字段,由 compiler 按 Node 类型消费。
 	Rest map[string]any `yaml:",inline" json:"-"`
 }

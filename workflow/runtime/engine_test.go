@@ -10,12 +10,12 @@ import (
 	"agentworkflow/agent/mock"
 	"agentworkflow/event"
 	"agentworkflow/git"
+	"agentworkflow/permission"
 	"agentworkflow/persistence"
 	"agentworkflow/skill"
 	"agentworkflow/skill/builtin"
 	"agentworkflow/workflow/dsl"
 	"agentworkflow/workflow/model"
-	"agentworkflow/permission"
 )
 
 const loopWorkflowYAML = `

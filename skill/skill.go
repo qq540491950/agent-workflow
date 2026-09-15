@@ -20,11 +20,11 @@ type SkillRequest struct {
 
 // SkillResponse 是 Skill 的结构化结果。
 type SkillResponse struct {
-	Status  string         `json:"status"` // SUCCESS | FAILED | WAIT_USER
-	Output  string         `json:"output,omitempty"`
-	Data    map[string]any `json:"data,omitempty"`
-	Error   string         `json:"error,omitempty"`
-	Decision string        `json:"decision,omitempty"`
+	Status   string         `json:"status"` // SUCCESS | FAILED | WAIT_USER
+	Output   string         `json:"output,omitempty"`
+	Data     map[string]any `json:"data,omitempty"`
+	Error    string         `json:"error,omitempty"`
+	Decision string         `json:"decision,omitempty"`
 }
 
 // Skill 是可注册的能力单元。

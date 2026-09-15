@@ -43,8 +43,8 @@ type LoopSpec struct {
 // Plan 是编译中间表示(IR)。
 type Plan struct {
 	Kind     PlanKind
-	NodeID   string   // KindSingle/KindRoute 的节点 ID
-	Children []*Plan  // KindSeq/KindPar 的子计划
+	NodeID   string  // KindSingle/KindRoute 的节点 ID
+	Children []*Plan // KindSeq/KindPar 的子计划
 	Branches []RouteBranch
 	Loop     *LoopSpec
 	// NodeID 序列(仅 KindSeq 用于调试展示)。

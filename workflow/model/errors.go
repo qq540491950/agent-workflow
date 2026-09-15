@@ -11,16 +11,16 @@ import (
 type ErrorKind string
 
 const (
-	KindValidationError ErrorKind = "ValidationError"
-	KindAgentError      ErrorKind = "AgentError"
-	KindProcessError    ErrorKind = "ProcessError"
-	KindTimeoutError    ErrorKind = "TimeoutError"
-	KindPermissionError ErrorKind = "PermissionError"
-	KindWorkflowError   ErrorKind = "WorkflowError"
-	KindStateError      ErrorKind = "StateError"
+	KindValidationError  ErrorKind = "ValidationError"
+	KindAgentError       ErrorKind = "AgentError"
+	KindProcessError     ErrorKind = "ProcessError"
+	KindTimeoutError     ErrorKind = "TimeoutError"
+	KindPermissionError  ErrorKind = "PermissionError"
+	KindWorkflowError    ErrorKind = "WorkflowError"
+	KindStateError       ErrorKind = "StateError"
 	KindPersistenceError ErrorKind = "PersistenceError"
-	KindGitError        ErrorKind = "GitError"
-	KindCancelledError  ErrorKind = "CancelledError"
+	KindGitError         ErrorKind = "GitError"
+	KindCancelledError   ErrorKind = "CancelledError"
 )
 
 // Error 是全项目的结构化错误。Code 用于程序化处理,Kind 用于分类。

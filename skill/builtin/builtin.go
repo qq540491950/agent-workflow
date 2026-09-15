@@ -68,7 +68,9 @@ func (s *RunTestSkill) ID() string { return "run-test" }
 func (s *RunTestSkill) Name() string { return "Run Test" }
 
 // Description 实现 skill.Skill。
-func (s *RunTestSkill) Description() string { return "运行测试(内置模拟实现,可通过 args.fail 注入失败)" }
+func (s *RunTestSkill) Description() string {
+	return "运行测试(内置模拟实现,可通过 args.fail 注入失败)"
+}
 
 // Execute 实现 skill.Skill。
 func (s *RunTestSkill) Execute(ctx context.Context, req skill.SkillRequest) (*skill.SkillResponse, error) {

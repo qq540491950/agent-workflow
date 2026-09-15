@@ -22,8 +22,8 @@ func (e ValidationError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e
 
 // Result 是一次校验的结果。
 type Result struct {
-	Valid   bool              `json:"valid"`
-	Errors  []ValidationError `json:"errors"`
+	Valid    bool              `json:"valid"`
+	Errors   []ValidationError `json:"errors"`
 	Warnings []ValidationError `json:"warnings"`
 }
 

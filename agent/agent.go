@@ -33,8 +33,8 @@ const (
 
 // AgentRequest 是发给 Agent 的一次执行请求。
 type AgentRequest struct {
-	Task         string
-	Mode         string
+	Task string
+	Mode string
 	// Model 允许节点级覆盖模型;空串表示使用 Agent 配置的默认模型。
 	// 模型仅通过本次调用的 CLI 参数/环境变量传递,不会修改任何本地配置。
 	Model        string

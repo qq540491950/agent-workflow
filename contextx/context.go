@@ -37,15 +37,15 @@ func (m *Manager) Build(mode string, ec *ExecutionContext, nodeID string) map[st
 		state = map[string]any{}
 	}
 	data := map[string]any{
-		"task":       state["task"],
-		"plan":       state["plan"],
-		"git_diff":   m.truncate(str(state["git_diff"])),
-		"review":     state["review"],
-		"test_result": state["test_result"],
-		"iteration":  state["iteration"],
-		"variables":  ec.Variables,
-		"node_id":    nodeID,
-		"workflow_id": ec.WorkflowID,
+		"task":         state["task"],
+		"plan":         state["plan"],
+		"git_diff":     m.truncate(str(state["git_diff"])),
+		"review":       state["review"],
+		"test_result":  state["test_result"],
+		"iteration":    state["iteration"],
+		"variables":    ec.Variables,
+		"node_id":      nodeID,
+		"workflow_id":  ec.WorkflowID,
 		"execution_id": ec.ExecutionID,
 	}
 

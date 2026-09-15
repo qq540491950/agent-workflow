@@ -10,10 +10,10 @@ import (
 	"net/http"
 	"strings"
 
+	"agentworkflow/agent"
 	"agentworkflow/app/application"
 	"agentworkflow/event"
 	"agentworkflow/logx"
-	"agentworkflow/agent"
 	"agentworkflow/permission"
 	"agentworkflow/workflow/model"
 )
@@ -386,13 +386,9 @@ func queryInt(r *http.Request, key string, def int) int {
 	return n
 }
 
-
 func parseWorkflow(m map[string]any) *model.Workflow {
 	raw, _ := json.Marshal(m)
 	var wf model.Workflow
 	_ = json.Unmarshal(raw, &wf)
 	return &wf
 }
-
-
-

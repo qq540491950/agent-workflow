@@ -14,11 +14,11 @@ import (
 type Action string
 
 const (
-	FSRead   Action = "fs:read"
-	FSWrite  Action = "fs:write"
-	GitRead  Action = "git:read"
+	FSRead    Action = "fs:read"
+	FSWrite   Action = "fs:write"
+	GitRead   Action = "git:read"
 	GitCommit Action = "git:commit"
-	GitPush  Action = "git:push"
+	GitPush   Action = "git:push"
 )
 
 // Policy 是单个 Agent 的权限集合。未显式授权的动作一律拒绝。

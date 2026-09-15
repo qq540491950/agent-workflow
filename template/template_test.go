@@ -16,9 +16,9 @@ Plan:
 
 Iteration: {{iteration}}
 `, map[string]any{
-		"task":       "实现登录",
-		"plan":       "1. 改代码 2. 测试",
-		"iteration":  2,
+		"task":      "实现登录",
+		"plan":      "1. 改代码 2. 测试",
+		"iteration": 2,
 	})
 	if strings.Contains(out, "{{task}}") {
 		t.Errorf("task not replaced: %q", out)
