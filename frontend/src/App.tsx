@@ -1,4 +1,6 @@
 import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { useEffect } from "react";
+import { initNotifications } from "@/lib/notify";
 import { Toaster } from "@/components/ui/sonner";
 import Layout from "@/components/layout";
 import Dashboard from "@/pages/Dashboard";
@@ -14,6 +16,9 @@ import Settings from "@/pages/Settings";
 import EventsAudit from "@/pages/EventsAudit";
 
 export default function App() {
+  useEffect(() => {
+    initNotifications();
+  }, []);
   return (
     <BrowserRouter>
       <Routes>

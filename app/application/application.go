@@ -176,7 +176,25 @@ func (a *App) applyAgentConfig(id string, cfg agent.AgentConfig) error {
 	}
 }
 
+// defaultMockBehavior 返回内置演示脚本(用户配置在其上合并覆盖)。
+func defaultMockBehavior(id string) map[string]any {
+	switch id {
+	case "mock-claude":
+		return map[string]any{
+			"plan":   map[string]any{"summary_template": "分析任务:{task};制定三步实施方案"},
+			"review": map[string]any{"decisions": []any{"REJECTED", "APPROVED"}, "summary_template": "Review 第 {call} 次:发现的问题已修复"},
+		}
+	case "mock-pi":
+		return map[string]any{
+			"execute": map[string]any{"summary_template": "已完成任务:{task}"},
+			"fix":     map[string]any{"summary_template": "已修复 Review 问题(第 {call} 轮)"},
+		}
+	}
+	return map[string]any{}
+}
+
 // buildMock 按行为配置构造 Mock Agent(演示用,决策序列可自定义)。
+// behavior 为 nil 表示使用内置默认脚本;非 nil 时按 mode 合并覆盖默认。
 func buildMock(id string, behavior map[string]any) agent.Agent {
 	name := id
 	switch id {
@@ -185,8 +203,14 @@ func buildMock(id string, behavior map[string]any) agent.Agent {
 	case "mock-pi":
 		name = "Mock Pi(演示)"
 	}
+	merged := defaultMockBehavior(id)
+	if behavior != nil {
+		for mode, raw := range behavior {
+			merged[mode] = raw
+		}
+	}
 	scripts := map[string]*mock.Script{}
-	for mode, raw := range behavior {
+	for mode, raw := range merged {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			continue
@@ -221,23 +245,9 @@ func (a *App) reloadAgents() {
 	piAgt := pi.New(pi.Config{Perms: a.Perms})
 	_ = a.Agents.Register(piAgt)
 
-	// Mock Agents(演示与测试:不依赖外部 CLI)
-	_ = a.Agents.Register(mock.New(mock.Options{
-		ID:   "mock-claude",
-		Name: "Mock Claude(演示)",
-		Scripts: map[string]*mock.Script{
-			"plan":   {SummaryTemplate: "分析任务:{task};制定三步实施方案"},
-			"review": {Decisions: []agent.AgentDecision{agent.DecisionRejected, agent.DecisionApproved}, SummaryTemplate: "Review 第 {call} 次:发现的问题已修复"},
-		},
-	}))
-	_ = a.Agents.Register(mock.New(mock.Options{
-		ID:   "mock-pi",
-		Name: "Mock Pi(演示)",
-		Scripts: map[string]*mock.Script{
-			"execute": {SummaryTemplate: "已完成任务:{task}"},
-			"fix":     {SummaryTemplate: "已修复 Review 问题(第 {call} 轮)"},
-		},
-	}))
+	// Mock Agents(演示与测试:不依赖外部 CLI,内置默认演示脚本)
+	_ = a.Agents.Register(buildMock("mock-claude", nil))
+	_ = a.Agents.Register(buildMock("mock-pi", nil))
 	// Mock Agent 权限:模拟真实角色的只读/读写能力
 	a.Perms.Set("mock-claude", permission.Policy{FilesystemRead: true, GitRead: true})
 	a.Perms.Set("mock-pi", permission.Policy{

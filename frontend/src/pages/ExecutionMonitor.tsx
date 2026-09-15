@@ -17,6 +17,16 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
+function durationStr(start?: string, end?: string): string {
+  if (!start) return "-";
+  const t0 = new Date(start).getTime();
+  const t1 = end ? new Date(end).getTime() : Date.now();
+  const ms = Math.max(0, t1 - t0);
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+}
+
 const nodeIcon: Record<string, React.ReactNode> = {
   SUCCESS: <CheckCircle2 className="h-4 w-4 text-green-500" />,
   FAILED: <XCircle className="h-4 w-4 text-red-500" />,
@@ -116,6 +126,11 @@ export default function ExecutionMonitor() {
               {exec.workflow_name}
             </Link>{" "}
             · v{exec.workflow_version} · {exec.task}
+            {exec.started_at && (
+              <span className="ml-2 font-mono text-[11px]">
+                · 耗时 {durationStr(exec.started_at, exec.finished_at)}
+              </span>
+            )}
           </p>
         </div>
         <div className="ml-auto flex gap-2">
