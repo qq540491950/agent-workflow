@@ -17,7 +17,12 @@ go build -o bin/agent-workflow-desktop . && ./bin/agent-workflow-desktop
 
 # 服务器模式(浏览器访问,REST+SSE)
 go build -tags server -o bin/agent-workflow-server . && ./bin/agent-workflow-server --server --addr 127.0.0.1:8080
+
+# 打包桌面 .app
+wails3 task package   # 产物 build/bin/agent-workflow.app
 ```
+
+启动参数:`--server`(HTTP 模式)· `--addr` · `--data`(数据目录)· `--git-dir`(Git 工作目录)· `--log`(级别)
 
 ## 功能亮点
 

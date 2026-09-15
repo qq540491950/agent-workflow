@@ -868,6 +868,13 @@ function WorkflowPropertyPanel({
           onChange={(e) => onChange({ description: e.target.value })}
         />
       </Row>
+      <div className="flex items-center justify-between rounded-md border px-3 py-2">
+        <span className="text-xs text-muted-foreground">启用工作流(禁用后不可运行)</span>
+        <Switch
+          checked={wf.enabled}
+          onCheckedChange={(v) => onChange({ enabled: v })}
+        />
+      </div>
       <Row label="Variables(JSON,可用 {{variable.xxx}} 引用)">
         <Textarea
           className="min-h-20 font-mono text-xs"
