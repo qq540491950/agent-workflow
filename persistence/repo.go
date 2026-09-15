@@ -3,6 +3,7 @@ package persistence
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -73,7 +74,14 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 // GetWorkflow 按 ID 读取 Workflow。
 func (d *DB) GetWorkflow(id string) (*model.Workflow, error) {
 	row := d.sql.QueryRow(`SELECT id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows WHERE id=?`, id)
-	return scanWorkflow(row)
+	wf, err := scanWorkflow(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, model.NewError(model.KindValidationError, "NOT_FOUND", fmt.Sprintf("工作流 %q 不存在", id))
+		}
+		return nil, wrap(err)
+	}
+	return wf, nil
 }
 
 // ListWorkflows 返回全部 Workflow。
@@ -189,6 +197,9 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 	var variables, iterations, nodeStates, snapshot, stateData string
 	if err := row.Scan(&e.ID, &e.WorkflowID, &e.WorkflowVersion, &e.WorkflowName, &e.State, &e.Task,
 		&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, model.NewError(model.KindValidationError, "NOT_FOUND", fmt.Sprintf("执行 %q 不存在", id))
+		}
 		return nil, wrap(err)
 	}
 	_ = json.Unmarshal([]byte(stateData), &e.StateData)
@@ -550,6 +561,17 @@ func wrap(err error) error {
 		return nil
 	}
 	return model.NewError(model.KindPersistenceError, "DB_ERROR", err.Error())
+}
+
+// wrapNotFound 将 sql.ErrNoRows 转为友好的结构化 NOT_FOUND 错误。
+func wrapNotFound(err error, what, id string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.NewError(model.KindValidationError, "NOT_FOUND", fmt.Sprintf("%s %q 不存在", what, id))
+	}
+	return wrap(err)
 }
 
 // ---- AgentConfig ----
