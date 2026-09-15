@@ -295,7 +295,16 @@ go build -tags server -o bin/agent-workflow-server .
   <div class="card"><h4>统计与归档</h4><p>Dashboard 每工作流成功率;执行页耗时显示;执行记录一键导出 JSON(含事件与制品)。</p></div>
   <div class="card"><h4>State 查看器</h4><p>执行监控页可查看运行时会话状态(plan / review / git_diff / decision…),便于调试模板与路由。</p></div>
   <div class="card"><h4>桌面通知</h4><p>执行完成 / 失败 / 等待输入时发送系统通知,点击直达执行详情。</p></div>
+  <div class="card"><h4>节点级禁用</h4><p>节点配置开关关闭后运行时置为 SKIPPED,画布半透明 ⊘ 标识,便于对照调试。</p></div>
+  <div class="card"><h4>记录管理</h4><p>执行页按状态过滤、删除记录(级联清理);执行记录一键导出 JSON 归档。</p></div>
 </div>
+
+<img class="screenshot" src="screenshots/18-monitor-disabled-export.png" alt="执行监控:禁用节点/耗时/导出" />
+<p class="shot-caption">▲ 执行监控:禁用的"执行修改"节点以 ⊘ 标记跳过,标题栏显示耗时,右上角一键导出记录</p>
+<img class="screenshot" src="screenshots/15-events-audit.png" alt="Events 审计流" />
+<p class="shot-caption">▲ Events 审计页:跨执行事件实时滚动,支持类型前缀过滤(如 review.)</p>
+<img class="screenshot" src="screenshots/12-git-panel.png" alt="Git 面板" />
+<p class="shot-caption">▲ Git 面板:状态/已暂存/已修改/未跟踪 + Diff 视图 + 提交历史 + 一键提交</p>
 
 <!-- ================= DSL ================= -->
 <h2 id="dsl"><span class="no">11</span>配置驱动 — Workflow DSL</h2>
