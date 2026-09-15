@@ -49,6 +49,13 @@ func NewServer(app *application.App) *Server {
 func (s *Server) Handler() http.Handler { return s.mux }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "version": "0.1.0", "mode": "server",
+			"adk": "google.golang.org/adk v1.7.0", "wails": "v3.0.0-beta.20",
+		})
+	})
 	s.mux.HandleFunc("GET /api/workflows", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		wfs, err := s.app.Workflows.List()
 		return writeJSON(w, wfs, err)
@@ -229,6 +236,13 @@ func (s *Server) routes() {
 		}
 		masked, err := s.app.AgentSvc.GetConfig(r.PathValue("id"))
 		return writeJSON(w, masked, err)
+	}))
+	s.mux.HandleFunc("POST /api/agents/{id}/reset", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		if err := s.app.AgentSvc.ResetConfig(r.PathValue("id")); err != nil {
+			return err
+		}
+		cfg, err := s.app.AgentSvc.GetConfig(r.PathValue("id"))
+		return writeJSON(w, cfg, err)
 	}))
 	s.mux.HandleFunc("POST /api/agents/{id}/test", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		out, err := s.app.AgentSvc.Test(r.Context(), r.PathValue("id"))

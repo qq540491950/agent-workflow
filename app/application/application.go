@@ -674,6 +674,12 @@ func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
 	return s.app.applyAgentConfig(id, cfg)
 }
 
+// ResetConfig 清空某 Agent 的运行配置,恢复适配器内置默认。
+func (s *AgentService) ResetConfig(id string) error {
+	cfg := agent.AgentConfig{}
+	return s.UpdateConfig(id, cfg)
+}
+
 // Test 用空任务测试 Agent 可用性(仅检查注册与配置)。
 func (s *AgentService) Test(ctx context.Context, id string) (string, error) {
 	a, err := s.app.Agents.Get(id)

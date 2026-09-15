@@ -39,6 +39,15 @@ export function List() {
 }
 
 /**
+ * ResetConfig 清空某 Agent 的运行配置,恢复适配器内置默认。
+ * @param {string} id
+ * @returns {$CancellablePromise<void>}
+ */
+export function ResetConfig(id) {
+    return $Call.ByID(747346307, id);
+}
+
+/**
  * SetPermission 更新某 Agent 的权限策略。
  * @param {string} id
  * @param {permission$0.Policy} policy

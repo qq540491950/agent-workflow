@@ -101,7 +101,11 @@ export default function Executions() {
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </TableCell>
-                <TableCell className="text-sm">{e.workflow_name}</TableCell>
+                <TableCell className="text-sm">
+                  <Link className="hover:underline" to={`/workflows/${e.workflow_id}/history`}>
+                    {e.workflow_name}
+                  </Link>
+                </TableCell>
                 <TableCell className="max-w-48 truncate text-sm text-muted-foreground">
                   {e.task}
                 </TableCell>
