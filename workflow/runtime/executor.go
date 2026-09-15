@@ -437,7 +437,7 @@ func (e *Engine) stateView(st compiler.StateAccess) map[string]any {
 	view := map[string]any{}
 	for _, key := range []string{
 		"task", "plan", "git_diff", "review", "test_result", "issues",
-		"iteration", "last_output", "relevant_files", "output",
+		"iteration", "last_output", "relevant_files", "output", "user_instruction",
 	} {
 		if v, ok := st.Get(key); ok {
 			view[key] = v

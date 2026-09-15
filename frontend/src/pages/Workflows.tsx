@@ -47,6 +47,7 @@ export default function Workflows() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [filter, setFilter] = useState("");
   const [runTarget, setRunTarget] = useState<Workflow | null>(null);
   const [task, setTask] = useState("");
   const [runVars, setRunVars] = useState("{}");
@@ -126,6 +127,14 @@ export default function Workflows() {
         </div>
       </div>
 
+      <div className="mb-3">
+        <Input
+          className="w-64"
+          placeholder="按名称 / ID / 描述过滤…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+      </div>
       <div className="rounded-lg border">
         <Table>
           <TableHeader>
@@ -147,7 +156,15 @@ export default function Workflows() {
                 </TableCell>
               </TableRow>
             )}
-            {workflows.map((w) => (
+            {workflows
+              .filter(
+                (w) =>
+                  !filter ||
+                  w.name.toLowerCase().includes(filter.toLowerCase()) ||
+                  w.id.toLowerCase().includes(filter.toLowerCase()) ||
+                  (w.description ?? "").toLowerCase().includes(filter.toLowerCase()),
+              )
+              .map((w) => (
               <TableRow key={w.id}>
                 <TableCell>
                   <Link

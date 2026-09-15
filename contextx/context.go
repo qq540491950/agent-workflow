@@ -54,8 +54,9 @@ func (m *Manager) Build(mode string, ec *ExecutionContext, nodeID string) map[st
 		// Review 只需要:任务、方案、diff、测试结果、上一次 Review、迭代数
 		data["relevant_files"] = state["relevant_files"]
 	case "execute", "fix":
-		// 执行类节点:任务、方案、上一次 Review 的问题
+		// 执行类节点:任务、方案、上一次 Review 的问题、人工补充指令
 		data["issues"] = state["issues"]
+		data["user_instruction"] = state["user_instruction"]
 	case "plan":
 		// Plan 只需要任务本身与变量
 		delete(data, "git_diff")
