@@ -16,6 +16,17 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 import * as $models from "./models.js";
 
 /**
+ * Update 更新设置:git_working_dir / log_level(日志级别即时生效)。
+ * ExportBackup 导出全部工作流与 Agent 配置(备份用;含明文敏感环境变量,请妥善保管)。
+ * @returns {$CancellablePromise<{ [_ in string]?: any }>}
+ */
+export function ExportBackup() {
+    return $Call.ByID(972086262).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType0($result);
+    }));
+}
+
+/**
  * @param {string} key
  * @param {any} out
  * @returns {$CancellablePromise<void>}
@@ -30,7 +41,19 @@ export function Get(key, out) {
  */
 export function Info() {
     return $Call.ByID(3803811458).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType1($result);
+        return $$createType2($result);
+    }));
+}
+
+/**
+ * RestoreBackup 恢复备份:已存在同 ID 工作流跳过(避免覆盖用户修改),
+ * Agent 配置覆盖写入。
+ * @param {{ [_ in string]?: any }} backup
+ * @returns {$CancellablePromise<{ [_ in string]?: any }>}
+ */
+export function RestoreBackup(backup) {
+    return $Call.ByID(283548462, backup).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType0($result);
     }));
 }
 
@@ -44,17 +67,17 @@ export function Set(key, value) {
 }
 
 /**
- * Update 更新设置:git_working_dir / log_level(日志级别即时生效)。
  * @param {string} gitWorkingDir
  * @param {string} logLevel
  * @returns {$CancellablePromise<$models.SettingsInfo | null>}
  */
 export function Update(gitWorkingDir, logLevel) {
     return $Call.ByID(1778497747, gitWorkingDir, logLevel).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType1($result);
+        return $$createType2($result);
     }));
 }
 
 // Private type creation functions
-const $$createType0 = $models.SettingsInfo.createFrom;
-const $$createType1 = $Create.Nullable($$createType0);
+const $$createType0 = $Create.Map($Create.Any, $Create.Any);
+const $$createType1 = $models.SettingsInfo.createFrom;
+const $$createType2 = $Create.Nullable($$createType1);

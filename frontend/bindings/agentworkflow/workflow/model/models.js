@@ -603,6 +603,14 @@ export class Workflow {
              */
             this["variables"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * Permission 工作流级权限覆盖(需求:DSL permissions 段)。
+             * @member
+             * @type {{ [_ in string]?: any } | undefined}
+             */
+            this["permission"] = undefined;
+        }
         if (!("nodes" in $$source)) {
             /**
              * @member
@@ -649,21 +657,25 @@ export class Workflow {
      */
     static createFrom($$source = {}) {
         const $$createField5_0 = $$createType0;
-        const $$createField6_0 = $$createType5;
-        const $$createField7_0 = $$createType7;
-        const $$createField8_0 = $$createType8;
+        const $$createField6_0 = $$createType0;
+        const $$createField7_0 = $$createType5;
+        const $$createField8_0 = $$createType7;
+        const $$createField9_0 = $$createType8;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("variables" in $$parsedSource) {
             $$parsedSource["variables"] = $$createField5_0($$parsedSource["variables"]);
         }
+        if ("permission" in $$parsedSource) {
+            $$parsedSource["permission"] = $$createField6_0($$parsedSource["permission"]);
+        }
         if ("nodes" in $$parsedSource) {
-            $$parsedSource["nodes"] = $$createField6_0($$parsedSource["nodes"]);
+            $$parsedSource["nodes"] = $$createField7_0($$parsedSource["nodes"]);
         }
         if ("edges" in $$parsedSource) {
-            $$parsedSource["edges"] = $$createField7_0($$parsedSource["edges"]);
+            $$parsedSource["edges"] = $$createField8_0($$parsedSource["edges"]);
         }
         if ("settings" in $$parsedSource) {
-            $$parsedSource["settings"] = $$createField8_0($$parsedSource["settings"]);
+            $$parsedSource["settings"] = $$createField9_0($$parsedSource["settings"]);
         }
         return new Workflow(/** @type {Partial<Workflow>} */($$parsedSource));
     }
@@ -693,6 +705,14 @@ export class WorkflowSettings {
              * @type {string | undefined}
              */
             this["on_loop_limit"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * TimeoutSeconds 单轮执行超时(秒);0 = 不限。
+             * @member
+             * @type {number | undefined}
+             */
+            this["timeout_seconds"] = undefined;
         }
 
         Object.assign(this, $$source);
