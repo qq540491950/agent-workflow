@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"agentworkflow/event"
@@ -377,8 +378,14 @@ func (d *DB) ListAllEvents(eventType string, limit int) ([]map[string]any, error
 	q := `SELECT seq,execution_id,node_id,type,data_json,created_at FROM events`
 	args := []any{}
 	if eventType != "" {
-		q += ` WHERE type=?`
-		args = append(args, eventType)
+		// 支持前缀过滤(如 "review." 匹配 review.approved/review.rejected)
+		if strings.HasSuffix(eventType, ".") {
+			q += ` WHERE type LIKE ?`
+			args = append(args, eventType+"%")
+		} else {
+			q += ` WHERE type=?`
+			args = append(args, eventType)
+		}
 	}
 	q += ` ORDER BY seq DESC`
 	if limit > 0 {

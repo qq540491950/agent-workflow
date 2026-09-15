@@ -83,6 +83,7 @@ export function WFNodeView({ data, selected }: { data: Record<string, unknown>; 
   const done = data.done === true;
   const failed = data.failed === true;
   const waiting = data.waiting === true;
+  const disabled = (data.cfg as Record<string, unknown> | undefined)?.enabled === false;
   return (
     <div
       className={cn(
@@ -92,6 +93,7 @@ export function WFNodeView({ data, selected }: { data: Record<string, unknown>; 
         running && "animate-pulse ring-2 ring-blue-400",
         failed && "ring-2 ring-red-400",
         waiting && "ring-2 ring-amber-400",
+        disabled && "opacity-50 grayscale",
       )}
     >
       <Handle type="target" position={Position.Top} className="!bg-muted-foreground" />
@@ -104,7 +106,7 @@ export function WFNodeView({ data, selected }: { data: Record<string, unknown>; 
           </div>
         </div>
         <div className="ml-auto text-xs">
-          {running ? "●" : failed ? "✕" : waiting ? "⏸" : done ? "✓" : ""}
+          {disabled ? "⊘" : running ? "●" : failed ? "✕" : waiting ? "⏸" : done ? "✓" : ""}
         </div>
       </div>
       <Handle type="source" position={Position.Bottom} className="!bg-muted-foreground" />
