@@ -460,6 +460,23 @@ function DesignerInner() {
                 setEdges((eds) => eds.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id));
                 setSelectedNodeId(null);
               }}
+              onDuplicate={() => {
+                const nid = `${selectedNode.data.wtype}-${idCounter.current++}`;
+                setNodes((nds) => [
+                  ...nds,
+                  {
+                    ...selectedNode,
+                    id: nid,
+                    position: {
+                      x: selectedNode.position.x + 40,
+                      y: selectedNode.position.y + 40,
+                    },
+                    selected: true,
+                    data: { ...selectedNode.data, wid: nid },
+                  },
+                ]);
+                setSelectedNodeId(nid);
+              }}
             />
           ) : selectedEdge ? (
             <EdgePropertyPanel
@@ -547,11 +564,13 @@ function NodePropertyPanel({
   agents,
   onChange,
   onDelete,
+  onDuplicate,
 }: {
   node: RFNode;
   agents: string[];
   onChange: (patch: { data?: Record<string, unknown> }) => void;
   onDelete: () => void;
+  onDuplicate: () => void;
 }) {
   const type = String(node.data.wtype);
   const cfg = (node.data.cfg as Record<string, unknown>) ?? {};
@@ -562,9 +581,14 @@ function NodePropertyPanel({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">节点配置</div>
-        <Button variant="ghost" size="sm" className="text-red-500" onClick={onDelete}>
-          删除节点
-        </Button>
+        <div className="space-x-1">
+          <Button variant="ghost" size="sm" onClick={onDuplicate}>
+            复制
+          </Button>
+          <Button variant="ghost" size="sm" className="text-red-500" onClick={onDelete}>
+            删除
+          </Button>
+        </div>
       </div>
       <Row label="名称">
         <Input
@@ -584,6 +608,14 @@ function NodePropertyPanel({
                 ))}
               </SelectContent>
             </Select>
+          </Row>
+          <Row label="Model(可选,覆盖 Agent 默认模型)">
+            <Input
+              className="font-mono text-xs"
+              placeholder="留空 = 使用 Agent 配置的默认模型"
+              value={String(cfg.model ?? "")}
+              onChange={(e) => setCfg("model", e.target.value)}
+            />
           </Row>
           <Row label="Mode">
             <Select value={String(cfg.mode ?? "")} onValueChange={(v) => setCfg("mode", v)}>
@@ -612,6 +644,37 @@ function NodePropertyPanel({
               onChange={(e) => setCfg("timeout_seconds", Number(e.target.value))}
             />
           </Row>
+          <div className="grid grid-cols-2 gap-2">
+            <Row label="重试次数">
+              <Input
+                type="number"
+                value={String((cfg.retry as Record<string, unknown>)?.max_attempts ?? 1)}
+                onChange={(e) =>
+                  setCfg("retry", {
+                    ...(cfg.retry as Record<string, unknown>),
+                    max_attempts: Number(e.target.value),
+                  })
+                }
+              />
+            </Row>
+            <Row label="退避策略">
+              <Select
+                value={String((cfg.retry as Record<string, unknown>)?.backoff ?? "fixed")}
+                onValueChange={(v) =>
+                  setCfg("retry", {
+                    ...(cfg.retry as Record<string, unknown>),
+                    backoff: v,
+                  })
+                }
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="fixed">fixed</SelectItem>
+                  <SelectItem value="exponential">exponential</SelectItem>
+                </SelectContent>
+              </Select>
+            </Row>
+          </div>
         </>
       )}
 
