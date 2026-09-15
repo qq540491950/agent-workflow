@@ -16,6 +16,17 @@ interface AuditEvent {
   created_at: string;
 }
 
+const categories = [
+  { prefix: "", label: "全部" },
+  { prefix: "workflow.", label: "Workflow" },
+  { prefix: "node.", label: "Node" },
+  { prefix: "agent.", label: "Agent" },
+  { prefix: "review.", label: "Review" },
+  { prefix: "human.", label: "Human" },
+  { prefix: "skill.", label: "Skill" },
+  { prefix: "git.", label: "Git" },
+];
+
 export default function EventsAudit() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [filter, setFilter] = useState("");
@@ -47,10 +58,27 @@ export default function EventsAudit() {
             跨执行审计日志(实时,按类型过滤)
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {categories.map((c) => (
+            <button
+              key={c.prefix}
+              onClick={() => {
+                setFilter(c.prefix);
+                setTimeout(refresh, 0);
+              }}
+              className={
+                "rounded-md border px-2.5 py-1.5 text-xs " +
+                (filter === c.prefix
+                  ? "border-accent bg-accent/10 text-foreground"
+                  : "text-muted-foreground hover:bg-accent/40")
+              }
+            >
+              {c.label}
+            </button>
+          ))}
           <Input
-            className="w-56 font-mono text-xs"
-            placeholder="类型过滤,如 review. 或 human."
+            className="w-48 font-mono text-xs"
+            placeholder="自定义前缀…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && refresh()}
