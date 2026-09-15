@@ -231,6 +231,14 @@
 - 桌面 .app 打包(productName/Identifier 修正)并启动验证:窗口创建、
   UI 渲染、**mode: desktop**(IPC 传输,0 次 HTTP /api 请求)。
 
+### 轮次 22:真实 Claude 适配器端到端(假 CLI)
+
+- 用假 `claude` 脚本置于 PATH,创建引用 `claude-code` 适配器 + 节点级
+  `config.model` 的工作流并运行:执行 COMPLETED、输出被结构化解析、
+  假 CLI 收到 `--model claude-sonnet-4-5`(节点级覆盖生效)。✅
+- 结论:"每 Agent 模型配置 → 持久化 → 适配器重建 → CLI 参数传递"全链路打通,
+  且全程未触碰用户本地配置文件。
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
