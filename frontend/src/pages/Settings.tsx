@@ -26,6 +26,7 @@ interface SettingsInfo {
 
 export default function Settings() {
   const [info, setInfo] = useState<SettingsInfo | null>(null);
+  const [ver, setVer] = useState<Record<string, string>>({});
   const [gitDir, setGitDir] = useState("");
   const [level, setLevel] = useState("info");
   const [saving, setSaving] = useState(false);
@@ -43,6 +44,7 @@ export default function Settings() {
 
   useEffect(() => {
     refresh();
+    api.version().then((v) => setVer(v ?? {})).catch(() => {});
   }, [refresh]);
 
   const save = async () => {

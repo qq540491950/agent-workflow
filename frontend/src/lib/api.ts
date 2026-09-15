@@ -341,6 +341,17 @@ export const api = {
     });
   },
 
+  async version(): Promise<Record<string, string>> {
+    if ((await detectMode()) === "web") {
+      try {
+        return await http("/api/version");
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  },
+
   // ---- Git ----
   async gitStatus(): Promise<{
     branch: string;

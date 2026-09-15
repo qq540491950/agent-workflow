@@ -56,6 +56,14 @@ func (s *Server) routes() {
 			"adk": "google.golang.org/adk v1.7.0", "wails": "v3.0.0-beta.20",
 		})
 	})
+	s.mux.HandleFunc("GET /api/version", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		return writeJSON(w, map[string]any{
+			"app":    "Agent Workflow Orchestrator",
+			"version": "0.1.0",
+			"adk":    "google.golang.org/adk v1.7.0",
+			"wails":  "v3.0.0-beta.20",
+		}, nil)
+	}))
 	s.mux.HandleFunc("GET /api/workflows", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		wfs, err := s.app.Workflows.List()
 		return writeJSON(w, wfs, err)
