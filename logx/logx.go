@@ -11,11 +11,15 @@ import (
 
 // 敏感键名模式(忽略大小写):key=value / key: value / "key": "value"。
 var sensitivePattern = regexp.MustCompile(
-	`(?i)(api[_-]?key|token|password|secret|authorization|credential)s?([:=]\s*"?|"?:\s*")([^",\s}&]+)`)
+	`(?i)(api[_-]?key|token|password|secret|authorization|credential)s?([:=]\s*"?(?:[Bb]earer\s+)?)?([^",\s}&]*)` +
+		`(?:([:=]\s*"?(?:[Bb]earer\s+)?)([^",\s}&]+))?`)
 
-// Mask 脱敏文本中的敏感键值对。
+var sensitivePattern2 = regexp.MustCompile(
+	`(?i)((?:api[_-]?key|token|password|secret|authorization|credential)s?"?\s*[:=]\s*"?(?:bearer\s+)?)([^",\s}&]+)`)
+
+// Mask 脱敏文本中的敏感键值对(含 Bearer 前缀形式)。
 func Mask(s string) string {
-	return sensitivePattern.ReplaceAllString(s, `${1}${2}***`)
+	return sensitivePattern2.ReplaceAllString(s, `${1}***`)
 }
 
 var logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{

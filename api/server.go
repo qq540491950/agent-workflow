@@ -112,7 +112,7 @@ func (s *Server) routes() {
 		return nil
 	}))
 	s.mux.HandleFunc("POST /api/workflows/import", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB 上限
 		if err != nil {
 			return badRequest(err.Error())
 		}
