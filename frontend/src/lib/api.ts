@@ -292,6 +292,9 @@ export const api = {
   },
 
   // ---- Settings ----
+  async isDesktopMode(): Promise<boolean> {
+    return (await detectMode()) === "desktop";
+  },
   async getSettings(): Promise<{
     data_dir: string;
     git_working_dir: string;
@@ -318,6 +321,11 @@ export const api = {
 
   backupURL(): string {
     return "/api/backup";
+  },
+  /** 桌面模式:通过 IPC 导出备份 JSON 文本 */
+  async exportBackupText(): Promise<string> {
+    const data = await (await wailsBindings()).st.ExportBackup();
+    return JSON.stringify(data, null, 2);
   },
   async restoreBackup(backup: Record<string, unknown>): Promise<{
     workflows_restored: number;
