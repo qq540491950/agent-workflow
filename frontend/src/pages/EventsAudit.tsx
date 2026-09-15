@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 import { api, subscribeEvents } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -31,18 +32,18 @@ export default function EventsAudit() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [filter, setFilter] = useState("");
 
-  const refresh = useCallback(async () => {
-    try {
-      const q = filter ? `?type=${encodeURIComponent(filter)}&limit=300` : "?limit=300";
-      setEvents((await api.allEvents(q)) ?? []);
-    } catch (e) {
-      // allEvents(q) 的 q 已含 ?,这里直接拼
-      toastErr(e);
-    }
-  }, [filter]);
-
-  const toastErr = (e: unknown) => {}; // 占位,见下
-  void toastErr;
+  const refresh = useCallback(
+    async (prefix?: string) => {
+      const f = prefix ?? filter;
+      try {
+        const q = f ? `?type=${encodeURIComponent(f)}&limit=300` : "?limit=300";
+        setEvents(((await api.allEvents(q)) ?? []) as AuditEvent[]);
+      } catch (e) {
+        toast.error((e as Error).message);
+      }
+    },
+    [filter],
+  );
 
   useEffect(() => {
     refresh();
@@ -64,7 +65,7 @@ export default function EventsAudit() {
               key={c.prefix}
               onClick={() => {
                 setFilter(c.prefix);
-                setTimeout(refresh, 0);
+                refresh(c.prefix);
               }}
               className={
                 "rounded-md border px-2.5 py-1.5 text-xs " +
@@ -83,7 +84,7 @@ export default function EventsAudit() {
             onChange={(e) => setFilter(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && refresh()}
           />
-          <Button variant="outline" size="sm" onClick={refresh}>
+          <Button variant="outline" size="sm" onClick={() => refresh()}>
             <RefreshCw className="mr-1 h-4 w-4" /> 刷新
           </Button>
         </div>
