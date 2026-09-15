@@ -12,11 +12,11 @@ func TestBuildMinimalContext(t *testing.T) {
 		ExecutionID: "exec-1",
 		Variables:   map[string]any{"max_iter": 3},
 		State: map[string]any{
-			"task":     "任务",
-			"plan":     "方案",
-			"git_diff": "diff --git a",
-			"review":   "发现问题",
-			"issues":   []string{"i1"},
+			"task":      "任务",
+			"plan":      "方案",
+			"git_diff":  "diff --git a",
+			"review":    "发现问题",
+			"issues":    []string{"i1"},
 			"iteration": 2,
 		},
 	}
