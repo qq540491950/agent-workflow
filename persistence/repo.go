@@ -148,6 +148,9 @@ func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 	var enabled int
 	if err := r.Scan(&wf.ID, &wf.Name, &wf.Description, &wf.Version, &enabled,
 		&variables, &nodes, &edges, &settings, &permData, &wf.CreatedAt, &wf.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, err // 由调用方转换为 NOT_FOUND
+		}
 		return nil, wrap(err)
 	}
 	wf.Enabled = enabled == 1
