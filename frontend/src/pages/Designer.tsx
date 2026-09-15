@@ -49,6 +49,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -622,6 +623,14 @@ function NodePropertyPanel({
           onChange={(e) => onChange({ data: { label: e.target.value } })}
         />
       </Row>
+
+      <div className="flex items-center justify-between rounded-md border px-3 py-2">
+        <span className="text-xs text-muted-foreground">启用节点(关闭则运行时跳过)</span>
+        <Switch
+          checked={cfg.enabled !== false}
+          onCheckedChange={(v) => setCfg("enabled", v)}
+        />
+      </div>
 
       {type === "agent" && (
         <>

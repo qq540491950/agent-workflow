@@ -466,6 +466,19 @@ func (s *WorkflowService) Validate(wf *model.Workflow) *validator.Result {
 	return s.app.Engine.Validate(wf)
 }
 
+// VersionDSL 返回指定版本的 DSL 文本(从版本快照导出)。
+func (s *WorkflowService) VersionDSL(id string, version int) (string, error) {
+	wf, err := s.app.Repo.GetWorkflowVersion(id, version)
+	if err != nil {
+		return "", err
+	}
+	out, err := dsl.FromModel(wf).EncodeYAML()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // ExportYAML 导出 DSL。
 func (s *WorkflowService) ExportYAML(id string) (string, error) {
 	wf, err := s.app.Repo.GetWorkflow(id)

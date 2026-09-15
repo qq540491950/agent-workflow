@@ -63,6 +63,12 @@ func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *mo
 
 // dispatchNode 按节点类型分发。
 func (e *Engine) dispatchNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
+	// 节点级禁用:config.enabled = false → 置为 SKIPPED,路由直通
+	if enabled, ok := node.Config["enabled"]; ok {
+		if b, ok := enabled.(bool); ok && !b {
+			return compiler.NodeOutcome{State: model.NodeSkipped, Summary: "节点已禁用"}
+		}
+	}
 	switch node.Type {
 	case model.NodeTypeAgent:
 		return e.runAgentNode(ctx, env, node, st)

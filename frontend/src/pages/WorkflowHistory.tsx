@@ -3,6 +3,14 @@ import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, subscribeEvents } from "@/lib/api";
 import type { Execution, Workflow } from "@/lib/types";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { StateBadge } from "@/components/state-badge";
 import {
   Table,
@@ -29,10 +37,13 @@ export default function WorkflowHistory() {
   const { id = "" } = useParams();
   const [wf, setWf] = useState<Workflow | null>(null);
   const [execs, setExecs] = useState<Execution[]>([]);
+  const [versions, setVersions] = useState<number[]>([]);
+  const [viewDSL, setViewDSL] = useState<{ version: number; text: string } | null>(null);
 
   const refresh = useCallback(() => {
     api.getWorkflow(id).then(setWf).catch(() => {});
-    api.listExecutions(id, 100).then(setExecs).catch((e) => toast.error(e.message));
+    api.listExecutions(id, 100).then((x) => setExecs(x ?? [])).catch((e) => toast.error(e.message));
+    api.workflowVersions(id).then((x) => setVersions(x ?? [])).catch(() => {});
   }, [id]);
 
   useEffect(() => {
@@ -41,6 +52,15 @@ export default function WorkflowHistory() {
       if (ev.type.startsWith("workflow.")) refresh();
     });
   }, [refresh]);
+
+  const viewVersion = async (v: number) => {
+    try {
+      const text = await api.versionDSL(id, v);
+      setViewDSL({ version: v, text });
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  };
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -53,6 +73,17 @@ export default function WorkflowHistory() {
           执行历史 · Execution 绑定具体 Workflow 版本
         </p>
       </div>
+      {versions.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">版本历史:</span>
+          {versions.map((v) => (
+            <Button key={v} size="sm" variant={v === wf?.version ? "default" : "outline"} onClick={() => viewVersion(v)}>
+              v{v}
+            </Button>
+          ))}
+        </div>
+      )}
+
       <div className="rounded-lg border">
         <Table>
           <TableHeader>
@@ -96,6 +127,15 @@ export default function WorkflowHistory() {
           </TableBody>
         </Table>
       </div>
+
+      <Dialog open={!!viewDSL} onOpenChange={(v) => !v && setViewDSL(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>版本 v{viewDSL?.version} 的 DSL 快照</DialogTitle>
+          </DialogHeader>
+          <Textarea readOnly className="min-h-80 font-mono text-xs" value={viewDSL?.text ?? ""} />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

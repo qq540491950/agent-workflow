@@ -84,6 +84,26 @@ func (s *Server) routes() {
 		}
 		return writeJSON(w, s.app.Workflows.Validate(parseWorkflow(wf)), nil)
 	}))
+	s.mux.HandleFunc("GET /api/workflows/{id}/versions", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		vers, err := s.app.Workflows.Versions(r.PathValue("id"))
+		return writeJSON(w, vers, err)
+	}))
+	s.mux.HandleFunc("GET /api/workflows/{id}/versions/{version}", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		v := 0
+		for _, c := range r.PathValue("version") {
+			if c < '0' || c > '9' {
+				return badRequest("版本号非法")
+			}
+			v = v*10 + int(c-'0')
+		}
+		out, err := s.app.Workflows.VersionDSL(r.PathValue("id"), v)
+		if err != nil {
+			return err
+		}
+		w.Header().Set("Content-Type", "application/yaml")
+		_, _ = w.Write([]byte(out))
+		return nil
+	}))
 	s.mux.HandleFunc("POST /api/workflows/import", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
