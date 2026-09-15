@@ -1,0 +1,59 @@
+# 人工审批演示:Plan → 人工审批(可提供补充指令)→ Execute → 完成
+# 用途:演示 HITL(等待输入 / Approve / Provide instruction)
+version: "1"
+
+workflow:
+  id: approval-demo
+  name: Approval Demo
+  description: "演示人工审批:方案制定后等待确认,指令会注入执行上下文"
+
+settings:
+  max_iterations: 3
+  on_loop_limit: wait_user
+
+nodes:
+  - id: plan
+    name: 制定方案
+    type: agent
+    agent: mock-claude
+    mode: plan
+    x: 80
+    y: 160
+
+  - id: approve
+    name: 人工审批
+    type: human
+    prompt: "方案已生成,请审批(可用 Provide instruction 提供补充指令)"
+    responses: ["approve", "reject", "continue"]
+    x: 340
+    y: 160
+
+  - id: execute
+    name: 按方案执行
+    type: agent
+    agent: mock-pi
+    mode: execute
+    x: 600
+    y: 160
+    prompt:
+      template: |
+        执行任务:{{task}}
+        方案:{{plan}}
+        人工补充指令:{{user_instruction}}
+
+  - id: done
+    name: 完成
+    type: skill
+    skill: log
+    args:
+      message: "审批流程完成"
+    x: 860
+    y: 160
+
+edges:
+  - from: plan
+    to: approve
+  - from: approve
+    to: execute
+  - from: execute
+    to: done
