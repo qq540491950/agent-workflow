@@ -12,7 +12,31 @@ import type {
   Workflow,
 } from "./types";
 
-const isWails = typeof window !== "undefined" && "_wails" in window;
+// 传输模式探测:调用一次真实绑定,500ms 内成功 → 桌面模式(IPC),
+// 否则回退 HTTP+SSE(Wails runtime 注入时机晚于模块加载,不能用存在性判断)。
+let modePromise: Promise<"desktop" | "web"> | null = null;
+
+export function detectMode(): Promise<"desktop" | "web"> {
+  if (!modePromise) {
+    modePromise = (async () => {
+      try {
+        const rt = await import("@wailsio/runtime");
+        const probe = rt.Call.ByID(1924388702); // WorkflowService.List
+        const winner = await Promise.race([
+          probe.then(
+            () => "desktop" as const,
+            () => "web" as const,
+          ),
+          new Promise<"web">((r) => setTimeout(() => r("web"), 500)),
+        ]);
+        return winner;
+      } catch {
+        return "web";
+      }
+    })();
+  }
+  return modePromise;
+}
 
 // Wails bindings 返回生成器类型(带 null),统一断言为本项目的领域类型。
 function nn<T>(v: unknown): T {
@@ -53,35 +77,34 @@ async function wailsBindings() {
 }
 
 export const api = {
-  mode: isWails ? ("desktop" as const) : ("web" as const),
-
+  
   // ---- Workflows ----
   async listWorkflows(): Promise<Workflow[]> {
-    if (isWails) return nn(await (await wailsBindings()).wf.List());
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).wf.List());
     return http("/api/workflows");
   },
   async getWorkflow(id: string): Promise<Workflow> {
-    if (isWails) return nn(await (await wailsBindings()).wf.Get(id));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).wf.Get(id));
     return http(`/api/workflows/${id}`);
   },
   async saveWorkflow(wf: Workflow): Promise<Workflow> {
-    if (isWails) return nn(await (await wailsBindings()).wf.Save(wf as unknown as never));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).wf.Save(wf as unknown as never));
     return http("/api/workflows", { method: "POST", body: JSON.stringify(wf) });
   },
   async deleteWorkflow(id: string): Promise<void> {
-    if (isWails) return (await wailsBindings()).wf.Delete(id);
+    if ((await detectMode()) === "desktop") return (await wailsBindings()).wf.Delete(id);
     return http(`/api/workflows/${id}`, { method: "DELETE" });
   },
   async duplicateWorkflow(id: string): Promise<Workflow> {
-    if (isWails) return nn(await (await wailsBindings()).wf.Duplicate(id));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).wf.Duplicate(id));
     return http(`/api/workflows/${id}/duplicate`, { method: "POST" });
   },
   async setEnabled(id: string, enabled: boolean): Promise<Workflow> {
-    if (isWails) return nn(await (await wailsBindings()).wf.SetEnabled(id, enabled));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).wf.SetEnabled(id, enabled));
     return http(`/api/workflows/${id}/enable?value=${enabled}`, { method: "POST" });
   },
   async validateWorkflow(wf: Workflow): Promise<ValidationResult> {
-    if (isWails) {
+    if ((await detectMode()) === "desktop") {
       return nn(
         await (await wailsBindings()).wf.Validate(wf as unknown as never),
       );
@@ -92,7 +115,7 @@ export const api = {
     });
   },
   async exportYAML(id: string): Promise<string> {
-    if (isWails) return (await wailsBindings()).wf.ExportYAML(id);
+    if ((await detectMode()) === "desktop") return (await wailsBindings()).wf.ExportYAML(id);
     const res = await fetch(`/api/workflows/${id}/export`);
     return res.text();
   },
@@ -103,7 +126,7 @@ export const api = {
     task: string,
     variables?: Record<string, unknown>,
   ): Promise<Execution> {
-    if (isWails)
+    if ((await detectMode()) === "desktop")
       return nn(
         await (await wailsBindings()).ex.Run(id, task, variables ?? {}),
       );
@@ -113,68 +136,68 @@ export const api = {
     });
   },
   async listExecutions(workflowID = "", limit = 50): Promise<Execution[]> {
-    if (isWails) return nn(await (await wailsBindings()).ex.List(workflowID, limit));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.List(workflowID, limit));
     const q = workflowID
       ? `?workflow_id=${encodeURIComponent(workflowID)}&limit=${limit}`
       : `?limit=${limit}`;
     return http(`/api/executions${q}`);
   },
   async getExecution(id: string): Promise<Execution> {
-    if (isWails) return nn(await (await wailsBindings()).ex.Get(id));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.Get(id));
     return http(`/api/executions/${id}`);
   },
   async executionNodes(id: string): Promise<ExecutionNode[]> {
-    if (isWails) return nn(await (await wailsBindings()).ex.Nodes(id));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.Nodes(id));
     return http(`/api/executions/${id}/nodes`);
   },
   async executionEvents(id: string): Promise<Record<string, unknown>[]> {
-    if (isWails) return nn(await (await wailsBindings()).ex.Events(id));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.Events(id));
     return http(`/api/executions/${id}/events`);
   },
   async executionArtifacts(id: string): Promise<Artifact[]> {
-    if (isWails) return nn(await (await wailsBindings()).ex.Artifacts(id));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.Artifacts(id));
     return http(`/api/executions/${id}/artifacts`);
   },
   async provideInput(
     id: string,
     response: Record<string, unknown>,
   ): Promise<Execution> {
-    if (isWails) return nn(await (await wailsBindings()).ex.ProvideInput(id, response));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.ProvideInput(id, response));
     return http(`/api/executions/${id}/input`, {
       method: "POST",
       body: JSON.stringify(response),
     });
   },
   async cancelExecution(id: string): Promise<void> {
-    if (isWails) return (await wailsBindings()).ex.Cancel(id);
+    if ((await detectMode()) === "desktop") return (await wailsBindings()).ex.Cancel(id);
     return http(`/api/executions/${id}/cancel`, { method: "POST" });
   },
 
   // ---- Agents / Skills ----
   async listAgents(): Promise<AgentInfo[]> {
-    if (isWails) return nn(await (await wailsBindings()).ag.List());
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ag.List());
     return http("/api/agents");
   },
   async testAgent(id: string): Promise<string> {
-    if (isWails) return (await wailsBindings()).ag.Test(id);
+    if ((await detectMode()) === "desktop") return (await wailsBindings()).ag.Test(id);
     const r = await http<{ output: string }>(`/api/agents/${id}/test`, {
       method: "POST",
     });
     return r.output;
   },
   async setAgentPermission(id: string, p: PermissionPolicy): Promise<void> {
-    if (isWails) return (await wailsBindings()).ag.SetPermission(id, p);
+    if ((await detectMode()) === "desktop") return (await wailsBindings()).ag.SetPermission(id, p);
     return http(`/api/agents/${id}/permission`, {
       method: "POST",
       body: JSON.stringify(p),
     });
   },
   async listSkills(): Promise<SkillDTO[]> {
-    if (isWails) return (await wailsBindings()).sk.List();
+    if ((await detectMode()) === "desktop") return (await wailsBindings()).sk.List();
     return http("/api/skills");
   },
   async testSkill(id: string): Promise<string> {
-    if (isWails) return (await wailsBindings()).sk.Test(id);
+    if ((await detectMode()) === "desktop") return (await wailsBindings()).sk.Test(id);
     const r = await http<{ output: string }>(`/api/skills/${id}/test`, {
       method: "POST",
     });
@@ -188,18 +211,18 @@ export const api = {
     staged: string[];
     untracked: string[];
   }> {
-    if (isWails) return nn(await (await wailsBindings()).gt.Status());
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).gt.Status());
     return http("/api/git/status");
   },
   async gitDiff(staged = false): Promise<string> {
-    if (isWails) return (await wailsBindings()).gt.Diff(staged);
+    if ((await detectMode()) === "desktop") return (await wailsBindings()).gt.Diff(staged);
     const r = await http<{ diff: string }>(`/api/git/diff?staged=${staged}`);
     return r.diff;
   },
   async gitLog(limit = 10): Promise<
     { hash: string; author: string; date: string; subject: string }[]
   > {
-    if (isWails) return nn(await (await wailsBindings()).gt.Log(limit));
+    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).gt.Log(limit));
     return http(`/api/git/log?limit=${limit}`);
   },
 };
@@ -220,10 +243,10 @@ function dispatch(ev: UIEvent) {
   handlers.forEach((h) => h(ev));
 }
 
-function ensureEventStream() {
+async function ensureEventStream() {
   if (started || typeof window === "undefined") return;
   started = true;
-  if (isWails) {
+  if ((await detectMode()) === "desktop") {
     import("@wailsio/runtime").then((runtime) => {
       runtime.Events.On("ui:event", (data: unknown) => {
         dispatch(data as UIEvent);

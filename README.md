@@ -1,59 +1,36 @@
-# Welcome to Your New Wails3 Project!
+# Agent Workflow Orchestrator
 
-Congratulations on generating your Wails3 application! This README will guide you through the next steps to get your project up and running.
+可配置、可视化、可扩展的多 Agent 工作流编排桌面应用。
 
-## Getting Started
+- **运行时**:ADK Go v1.7.0(Workflow Runtime)+ Wails 3(桌面壳)+ SQLite(持久化)
+- **前端**:React + TypeScript + Vite + shadcn/ui + React Flow + Tailwind CSS 4
+- **文档**:[网页版使用说明(带截图)](docs/index.html) · [测试报告(8 轮,含视觉测试)](docs/TESTING.md)
 
-1. Navigate to your project directory in the terminal.
+## 快速开始
 
-2. To run your application in development mode, use the following command:
+```bash
+# 前端
+cd frontend && npm install && npm run build && cd ..
 
-   ```
-   wails3 dev
-   ```
+# 桌面模式
+go build -o bin/agent-workflow-desktop . && ./bin/agent-workflow-desktop
 
-   This will start your application and enable hot-reloading for both frontend and backend changes.
+# 服务器模式(浏览器访问,REST+SSE)
+go build -tags server -o bin/agent-workflow-server . && ./bin/agent-workflow-server --server --addr 127.0.0.1:8080
+```
 
-3. To build your application for production, use:
+## 架构原则
 
-   ```
-   wails3 build
-   ```
+- UI → Application API → Workflow DSL(Parser/Validator)→ Compiler → ADK Runtime
+- Agent 之间禁止互相调用,全部调度经 Workflow Runtime
+- Agent 结构化输出(decision 字段)驱动路由,禁止字符串猜测
+- 静态结构用 ADK Graph(Sequential/Parallel),运行时决策用动态代理,循环受 max_iterations 保护
+- Claude Code 默认只读(权限策略 + CLI 参数双重强制);权限模型统一管理
+- 执行实时持久化 SQLite,支持重启恢复与版本绑定
 
-   This will create a production-ready executable in the `build` directory.
+## 测试
 
-## Exploring Wails3 Features
-
-Now that you have your project set up, it's time to explore the features that Wails3 offers:
-
-1. **Check out the examples**: The best way to learn is by example. Visit the `examples` directory in the `v3/examples` directory to see various sample applications.
-
-2. **Run an example**: To run any of the examples, navigate to the example's directory and use:
-
-   ```
-   go run .
-   ```
-
-   Note: Some examples may be under development during the alpha phase.
-
-3. **Explore the documentation**: Visit the [Wails3 documentation](https://v3.wails.io/) for in-depth guides and API references.
-
-4. **Join the community**: Have questions or want to share your progress? Join the [Wails Discord](https://discord.gg/JDdSxwjhGf) or visit the [Wails discussions on GitHub](https://github.com/wailsapp/wails/discussions).
-
-## Project Structure
-
-Take a moment to familiarize yourself with your project structure:
-
-- `frontend/`: Contains your frontend code (HTML, CSS, JavaScript/TypeScript)
-- `main.go`: The entry point of your Go backend
-- `app.go`: Define your application structure and methods here
-- `wails.json`: Configuration file for your Wails project
-
-## Next Steps
-
-1. Modify the frontend in the `frontend/` directory to create your desired UI.
-2. Add backend functionality in `main.go`.
-3. Use `wails3 dev` to see your changes in real-time.
-4. When ready, build your application with `wails3 build`.
-
-Happy coding with Wails3! If you encounter any issues or have questions, don't hesitate to consult the documentation or reach out to the Wails community.
+```bash
+go vet ./workflow/... ./agent/... ./skill/... ./persistence/... ./event/... ./template/... ./permission/... ./git/... ./contextx/... ./api/... ./app/... .
+go test ./workflow/... ./agent/... ./skill/... ./persistence/... ./event/... ./template/... ./permission/... ./git/... ./contextx/...
+```

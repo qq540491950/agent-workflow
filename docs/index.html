@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Agent Workflow Orchestrator — 使用说明</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2431; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --green: #3fb950;
+    --amber: #d29922; --red: #f85149; --violet: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.7;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 80px; }
+  header.hero {
+    padding: 56px 0 32px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #101828 0%, var(--bg) 100%);
+  }
+  h1 { font-size: 34px; margin: 0 0 8px; letter-spacing: .5px; }
+  h1 .thin { color: var(--accent); }
+  .subtitle { color: var(--muted); font-size: 16px; margin: 0; }
+  .badges { margin-top: 18px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge {
+    font-size: 12px; padding: 4px 12px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--muted);
+  }
+  .badge b { color: var(--text); font-weight: 600; }
+  nav.toc {
+    position: sticky; top: 0; z-index: 10; background: rgba(13,17,23,.94);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+    padding: 10px 0; margin-bottom: 8px;
+  }
+  nav.toc a {
+    color: var(--muted); text-decoration: none; font-size: 13px;
+    margin-right: 18px; padding: 4px 2px;
+  }
+  nav.toc a:hover { color: var(--accent); }
+  h2 {
+    font-size: 24px; margin: 56px 0 8px; padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  h2 .no { color: var(--accent); margin-right: 8px; font-family: ui-monospace, monospace; }
+  h3 { font-size: 17px; margin: 28px 0 6px; color: var(--violet); }
+  p { margin: 8px 0; }
+  .screenshot {
+    display: block; width: 100%; border: 1px solid var(--border);
+    border-radius: 10px; margin: 14px 0 6px; box-shadow: 0 8px 30px rgba(0,0,0,.45);
+  }
+  .shot-caption { color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px;
+  }
+  .card h4 { margin: 0 0 6px; font-size: 15px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  code, pre {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+  code { background: var(--panel2); padding: 2px 7px; border-radius: 5px; }
+  pre {
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px; overflow-x: auto; line-height: 1.6;
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 9px 13px; text-align: left; }
+  th { background: var(--panel); color: var(--text); }
+  td { color: var(--muted); }
+  td:first-child { color: var(--text); }
+  .k { color: var(--green); font-weight: 600; }
+  .warn { color: var(--amber); font-weight: 600; }
+  .steps { counter-reset: step; margin: 12px 0; padding: 0; list-style: none; }
+  .steps li {
+    counter-increment: step; position: relative; padding: 6px 0 6px 44px;
+  }
+  .steps li::before {
+    content: counter(step); position: absolute; left: 0; top: 8px;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--accent); color: #0d1117; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+  }
+  .flow {
+    background: var(--panel2); border: 1px dashed var(--border); border-radius: 10px;
+    padding: 14px 18px; font-family: ui-monospace, monospace; font-size: 13px;
+    color: var(--muted); overflow-x: auto; white-space: pre; line-height: 1.8;
+  }
+  .flow b { color: var(--accent); font-weight: 600; }
+  .flow em { color: var(--green); font-style: normal; }
+  footer { margin-top: 70px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Agent Workflow <span class="thin">Orchestrator</span></h1>
+    <p class="subtitle">可配置 · 可视化 · 可扩展的多 Agent 工作流编排桌面应用 — 网页版使用说明</p>
+    <div class="badges">
+      <span class="badge">后端 <b>Go + Wails 3</b></span>
+      <span class="badge">运行时 <b>ADK Go v1.7.0</b></span>
+      <span class="badge">持久化 <b>SQLite</b></span>
+      <span class="badge">前端 <b>React + TS + shadcn/ui + React Flow</b></span>
+      <span class="badge">测试 <b>8 轮(含 7 轮视觉测试)</b></span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#intro">简介</a>
+    <a href="#install">启动</a>
+    <a href="#dashboard">Dashboard</a>
+    <a href="#workflow-list">工作流管理</a>
+    <a href="#designer">Designer</a>
+    <a href="#run">运行与监控</a>
+    <a href="#hitl">人工交互</a>
+    <a href="#dsl">DSL</a>
+    <a href="#architecture">架构</a>
+    <a href="#testing">测试</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<!-- ================= 简介 ================= -->
+<h2 id="intro"><span class="no">01</span>这是什么</h2>
+<p>Agent Workflow Orchestrator 让你通过<b>可视化画布</b>编排多个外部 Agent(Claude Code、Pi Agent、Codex…或内置 Mock),
+  由 <b>ADK Workflow Runtime</b> 自动协调执行顺序、条件路由、循环修复、并行分支与人工审批。</p>
+
+<div class="flow"><b>用户输入任务</b>
+   ↓
+Plan(Claude Code / Mock)→ Execute(Pi Agent / Mock)→ Review
+   ├─ <em>APPROVED</em> → Submit → 结束
+   └─ <em>REJECTED</em> → Fix → Review(循环,受 max_iterations 保护)
+                                         └─ 循环上限 → <em>WAIT_USER</em>(人工处理)</div>
+
+<p>核心原则:Agent 之间<b>不能互相调用</b>,所有调度必须经过 Workflow Runtime;
+  稳定结构编译为 ADK 顺序/并行代理,运行时决策(条件路由、循环)由 ADK 动态代理完成;
+  Claude Code 通过权限策略 + CLI 参数双重机制<b>默认禁止修改文件与提交</b>。</p>
+
+<!-- ================= 启动 ================= -->
+<h2 id="install"><span class="no">02</span>构建与启动</h2>
+<pre><code># 1. 构建前端
+cd frontend && npm install && npm run build && cd ..
+
+# 2a. 桌面模式(Wails GUI)
+go build -o bin/agent-workflow-desktop .
+./bin/agent-workflow-desktop
+
+# 2b. 服务器模式(无 GUI,浏览器访问 — 视觉测试即使用此模式)
+go build -tags server -o bin/agent-workflow-server .
+./bin/agent-workflow-server --server --addr 127.0.0.1:8080
+# 然后浏览器打开 http://127.0.0.1:8080</code></pre>
+<p>数据目录默认在用户配置目录(<code>~/Library/Application Support/agent-workflow</code>),
+  可用 <code>--data</code> 指定;首次启动自动导入 <code>workflows/examples/</code> 中的两个示例工作流,
+  并注册 Agent(claude-code、pi-agent、mock-claude、mock-pi)与内置 Skill。
+  前端自动探测传输方式:桌面内嵌走 Wails IPC,浏览器走 HTTP + SSE,页面代码完全一致。</p>
+
+<!-- ================= Dashboard ================= -->
+<h2 id="dashboard"><span class="no">03</span>Dashboard — 总览</h2>
+<img class="screenshot" src="screenshots/10-dashboard-with-runs.png" alt="Dashboard" />
+<p class="shot-caption">▲ Dashboard:工作流数量 / Running / Waiting User / Completed / Failed 实时统计,最近执行列表</p>
+<p>侧栏 <b>Executions</b> 项上的绿色数字表示正在运行或等待人工输入的执行数,由实时事件驱动刷新(非轮询)。</p>
+
+<!-- ================= 工作流管理 ================= -->
+<h2 id="workflow-list"><span class="no">04</span>工作流管理</h2>
+<img class="screenshot" src="screenshots/02-workflows.png" alt="Workflows" />
+<p class="shot-caption">▲ Workflows 列表:创建 / 编辑 / 复制 / 删除 / 启用禁用 / 运行 / 导出 YAML / 执行历史</p>
+<div class="grid2">
+  <div class="card"><h4>新建工作流</h4><p>点击右上角「新建工作流」,输入名称后自动进入 Designer 画布。</p></div>
+  <div class="card"><h4>启用 / 禁用</h4><p>开关关闭后工作流不可运行(后端强制校验)。</p></div>
+  <div class="card"><h4>导出 YAML</h4><p>把当前版本导出为配置文件,可编辑后再导入,配置即代码。</p></div>
+  <div class="card"><h4>执行历史</h4><p>查看该工作流的全部 Execution,每条执行绑定具体工作流版本。</p></div>
+</div>
+
+<!-- ================= Designer ================= -->
+<h2 id="designer"><span class="no">05</span>Designer — 可视化编排(核心)</h2>
+<img class="screenshot" src="screenshots/03-designer.png" alt="Designer" />
+<p class="shot-caption">▲ Coding Task 示例:5 节点 + 条件边(APPROVED→提交,REJECTED→修复循环)</p>
+
+<h3>画布布局</h3>
+<ul>
+  <li><b>左侧节点面板</b>:Agent / Skill / Condition / Parallel / Merge / Human / Script / Git / Sub Workflow,
+    共 9 种类型,<b>拖拽</b>到画布即创建节点。节点类型是注册制的,后端扩展新类型无需改动核心引擎。</li>
+  <li><b>中部画布</b>(React Flow):拖动移动、连线、缩放、小地图、框选;按 Delete/Backspace 删除选中的节点或连线。</li>
+  <li><b>右侧属性面板</b>:选中节点 / 连线 / 空白处分别显示节点配置、条件表达式、工作流设置。</li>
+  <li><b>顶栏</b>:改名、<b>校验</b>、<b>保存</b>(每次保存版本 +1)、<b>运行</b>。</li>
+</ul>
+
+<h3>节点配置要点</h3>
+<table>
+  <tr><th>节点类型</th><th>关键配置</th></tr>
+  <tr><td>Agent</td><td>Agent ID、Mode(plan/execute/review/fix…)、Prompt 模板(支持 {{task}} {{plan}} {{git_diff}} 等变量)、工作目录、超时</td></tr>
+  <tr><td>Skill</td><td>Skill ID(submit / run-test / log…)、Arguments(JSON)</td></tr>
+  <tr><td>Condition</td><td>表达式,如 <code>decision == "APPROVED"</code>;可用变量 decision / status / output / iteration / variables.*</td></tr>
+  <tr><td>Human</td><td>提示语 + 可选响应(approve / reject / continue / instruction)</td></tr>
+  <tr><td>Parallel / Merge</td><td>多分支并行执行,在汇合节点合并后继续</td></tr>
+  <tr><td>Git</td><td>status / diff / log / branch / checkout / commit(受权限策略控制)</td></tr>
+  <tr><td>Script</td><td>本地 shell 命令(120s 超时)</td></tr>
+  <tr><td>Sub Workflow</td><td>引用另一个工作流,阻塞执行</td></tr>
+</table>
+
+<h3>条件与循环</h3>
+<p>同一节点拉出多条带条件的边即构成<b>路由</b>;若某条分支最终又回到决策节点,
+  保存时编译器自动识别为<b>循环</b>,由 ADK LoopAgent 执行并以 <code>settings.max_iterations</code> 保护。
+  连续两轮 Review 结果相同(停滞)也会触发保护。达到上限后按设置进入
+  <span class="warn">等待人工处理(wait_user)</span> 或直接失败(fail),绝不无限执行。</p>
+
+<h3>校验</h3>
+<p>保存与运行前都会校验。点击「校验」查看结构化错误(<code>code + node + message</code>),
+  点击错误条目会自动选中画布上对应的节点定位问题。校验规则涵盖:孤立节点、无效边、不存在的 Agent/Skill、
+  多个起点、无起始节点、不可达节点、循环无终止条件、无结束路径、非法表达式、非法 git 操作等。</p>
+
+<!-- ================= 运行与监控 ================= -->
+<h2 id="run"><span class="no">06</span>运行与执行监控</h2>
+<img class="screenshot" src="screenshots/05-execution-monitor.png" alt="Execution Monitor" />
+<p class="shot-caption">▲ 执行监控:节点状态(代码评审 ×2 表示循环执行了两轮)+ 27 条实时事件日志</p>
+
+<ol class="steps">
+  <li>顶栏「运行」→ 填写任务描述(会作为 <code>{{task}}</code> 注入 Prompt)→「启动执行」。</li>
+  <li>自动跳转到执行监控页。左侧节点状态实时刷新(PENDING/RUNNING/SUCCESS/FAILED/WAITING,循环重复执行显示 ×N)。</li>
+  <li>右侧「实时日志」按时间线滚动显示全部事件:workflow.started → node.started → review.rejected → … → workflow.completed。</li>
+  <li>「节点输出」查看每个节点的结构化输出;「Artifacts」查看执行产物(git diff 等)。</li>
+  <li>执行记录实时写入 SQLite,重启应用后在 Executions 页仍可查询(<b>崩溃可恢复</b>:RUNNING 状态的执行会被标记中断,等待用户的执行可继续恢复)。</li>
+</ol>
+<img class="screenshot" src="screenshots/04-executions.png" alt="Executions" />
+<p class="shot-caption">▲ Executions 列表:全部执行记录(ID / 工作流 / 任务 / 状态 / 当前节点 / 起止时间)</p>
+
+<h2 id="hitl"><span class="no">07</span>Human-in-the-Loop 人工交互</h2>
+<img class="screenshot" src="screenshots/06-hitl.png" alt="HITL" />
+<p class="shot-caption">▲ Human 节点或循环保护触发时:执行暂停,出现人工输入面板</p>
+<p>当执行到 <b>Human 节点</b>,或循环达到上限(默认策略 wait_user)时,执行进入
+  <span class="warn">WAITING_USER</span> 状态并暂停(基于 ADK 会话状态与 Escalate 机制,非轮询)。
+  面板提供四个操作:</p>
+<ul>
+  <li><b>Approve</b> — 视为决策通过,从出口分支继续;</li>
+  <li><b>Reject</b> — 结束执行并标记失败;</li>
+  <li><b>Continue</b> — 清除决策再执行一轮(修复 + 复审);</li>
+  <li><b>Provide instruction</b> — 输入补充指令后继续,指令会注入后续上下文。</li>
+</ul>
+<p>提交后通过 SSE / Wails 事件实时刷新,执行从暂停点恢复(已完成的节点自动跳过)。
+  下图为 Approve 后并行评审流完整跑通的最终状态:</p>
+<img class="screenshot" src="screenshots/07-parallel-completed.png" alt="并行评审完成" />
+<p class="shot-caption">▲ Parallel Review 全部 SUCCESS:安全评审 / 代码评审 / 测试 三分支并行后汇合</p>
+
+<!-- ================= Agents / Skills ================= -->
+<h2 id="agents"><span class="no">08</span>Agent 与 Skill 管理</h2>
+<img class="screenshot" src="screenshots/08-agents.png" alt="Agents" />
+<p class="shot-caption">▲ Agents:统一注册表 + 权限策略矩阵(策略由 Permission Manager 强制执行)</p>
+<p>默认权限策略体现职责分离:<b>Claude Code</b> 只读(禁写文件、禁 commit/push,适配器还会附加 CLI 级
+  <code>--disallowedTools</code> 双重保险);<b>Pi Agent</b> 可写文件、可 commit、禁止 push。
+  开关实时生效并持久化。Agent 通过统一接口注册,新增 Codex 等只需实现接口并注册,工作流引擎零改动。</p>
+<img class="screenshot" src="screenshots/09-skills.png" alt="Skills" />
+<p class="shot-caption">▲ Skills:内置 submit / run-test / log,可一键 Test;Runtime 不感知 Skill 内部实现</p>
+
+<!-- ================= DSL ================= -->
+<h2 id="dsl"><span class="no">09</span>配置驱动 — Workflow DSL</h2>
+<p>画布只是 DSL 的可视化外衣。以下是与上面画布等价的 YAML(可在 Workflows 页导出):</p>
+<pre><code>version: "1"
+
+workflow:
+  id: coding-task
+  name: Coding Task
+
+settings:
+  max_iterations: 5
+  on_loop_limit: wait_user
+
+nodes:
+  - id: plan
+    name: 制定方案
+    type: agent
+    agent: mock-claude
+    mode: plan
+    prompt:
+      template: |
+        你负责为以下任务制定技术方案(只分析,不修改代码):
+        {{task}}
+  - id: execute
+    type: agent
+    agent: mock-pi
+    mode: execute
+  - id: review
+    type: agent
+    agent: mock-claude
+    mode: review
+  - id: fix
+    type: agent
+    agent: mock-pi
+    mode: fix
+  - id: submit
+    type: skill
+    skill: submit
+
+edges:
+  - from: plan      to: execute
+  - from: execute   to: review
+  - from: review
+    condition: decision == "APPROVED"
+    to: submit
+  - from: review
+    condition: decision == "REJECTED"
+    to: fix
+  - from: fix       to: review</code></pre>
+<p>Agent 之间不直接调用;Agent 输出必须是<b>结构化 JSON</b>(status / decision / summary),
+  路由依据 <code>decision</code> 字段判断,禁止字符串猜测。</p>
+
+<!-- ================= 架构 ================= -->
+<h2 id="architecture"><span class="no">10</span>架构与目录</h2>
+<div class="flow">UI (React + React Flow)
+   ↓  Wails IPC / HTTP+SSE(同一套前端代码,自动探测)
+Application API(Workflow / Execution / Agent / Skill / Git / Settings Service)
+   ↓
+Workflow DSL → Parser → Validator → Compiler(Plan IR)
+   ↓                                   ↓
+ADK Runner + Sequential/Parallel/Loop Agents + 动态路由代理
+   ↓
+Agent Registry ── claude-code / pi-agent / mock(统一 Agent 接口)
+Skill Registry ── submit / run-test / log(统一 Skill 接口)
+Git Service · Context Manager · Permission Manager · Template Engine
+   ↓
+SQLite(workflows / versions / executions / nodes / events / artifacts)</div>
+<pre><code>├── workflow/    model · dsl · validator · compiler · runtime
+├── agent/       接口 + registry + claude/ + pi/ + mock/
+├── skill/       接口 + registry + builtin/
+├── git/  contextx/  permission/  template/  event/  persistence/  logx/
+├── app/application/   应用服务层(Wails 与 HTTP 共用)
+├── api/         HTTP Server 模式(REST + SSE)
+├── frontend/    React + TS + Vite + shadcn/ui + React Flow
+├── workflows/examples/   示例工作流
+└── docs/        使用说明(本页)与测试报告</code></pre>
+
+<!-- ================= 测试 ================= -->
+<h2 id="testing"><span class="no">11</span>测试验证</h2>
+<p>本项目共执行 <b>8 轮测试</b>(≥5 轮要求),其中 7 轮为浏览器视觉测试:
+  后端全量单测/集成测试 → Dashboard → 列表/SPA 路由 → Designer → UI 运行+监控 → HITL+并行 → Agents/Skills → 双模式传输回归。
+  过程中发现并修复 5 个 Bug,每次修复独立提交 git。
+  详细记录见仓库 <code>docs/TESTING.md</code>;本页全部截图即视觉测试实证。</p>
+<table>
+  <tr><th>轮次</th><th>类型</th><th>结果</th><th>修复</th></tr>
+  <tr><td>1</td><td>go test / vet / build 全量</td><td class="k">通过</td><td>—</td></tr>
+  <tr><td>2</td><td>视觉:Dashboard</td><td class="k">通过</td><td>空列表 null 崩溃</td></tr>
+  <tr><td>3</td><td>视觉:列表 / SPA 路由</td><td class="k">通过</td><td>SPA 404</td></tr>
+  <tr><td>4</td><td>视觉:Designer</td><td class="k">通过</td><td>ReactFlowProvider</td></tr>
+  <tr><td>5</td><td>视觉:UI 运行 + 监控</td><td class="k">通过</td><td>—</td></tr>
+  <tr><td>6</td><td>视觉:HITL + 并行</td><td class="k">通过</td><td>—</td></tr>
+  <tr><td>7</td><td>视觉:Agents / Skills</td><td class="k">通过</td><td>—</td></tr>
+  <tr><td>8</td><td>回归:桌面/浏览器双模式</td><td class="k">通过</td><td>传输误判 + /wails/ 路径</td></tr>
+</table>
+
+<footer>
+  Agent Workflow Orchestrator · 需求实现:<a style="color:var(--accent)" href="https://github.com/google/adk-go">ADK Go v1.7.0</a> ·
+  Wails 3 · SQLite · React Flow · 测试报告见 docs/TESTING.md
+</footer>
+
+</div>
+</body>
+</html>

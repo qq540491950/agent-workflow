@@ -9,7 +9,7 @@ import {
   Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { api, subscribeEvents } from "@/lib/api";
+import { api, detectMode, subscribeEvents } from "@/lib/api";
 import type { Execution } from "@/lib/types";
 
 const nav = [
@@ -23,6 +23,10 @@ const nav = [
 export default function Layout() {
   const location = useLocation();
   const [running, setRunning] = useState(0);
+  const [mode, setMode] = useState("…");
+  useEffect(() => {
+    detectMode().then((m) => setMode(m));
+  }, []);
 
   // 侧栏显示正在运行的执行数(实时事件驱动)
   useEffect(() => {
@@ -93,7 +97,7 @@ export default function Layout() {
           ))}
         </nav>
         <div className="border-t px-4 py-3 text-[10px] text-muted-foreground">
-          <div>mode: {api.mode}</div>
+          <div>mode: {mode}</div>
           <div>ADK Go runtime · Wails 3</div>
         </div>
       </aside>

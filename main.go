@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"agentworkflow/api"
 	app "agentworkflow/app/application"
@@ -70,8 +71,10 @@ func runServer(app *app.App, addr string) {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler.Handler())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// SPA fallback:无扩展名的路径返回 index.html,由前端路由接管
-		if r.URL.Path != "/" && filepath.Ext(r.URL.Path) == "" {
+		// SPA fallback:仅对前端路由(无扩展名、非 API/Wails 路径)返回 index.html
+		p := r.URL.Path
+		if p != "/" && filepath.Ext(p) == "" &&
+			!strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/wails/") {
 			if indexHTML, readErr := fs.ReadFile(dist, "index.html"); readErr == nil {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = w.Write(indexHTML)
