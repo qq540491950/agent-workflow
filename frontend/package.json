@@ -4,10 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build:dev": "tsc && vite build --minify false --mode development",
-    "build": "tsc && vite build --mode production",
-    "preview": "vite preview"
+    "dev": "node --env-file=.env node_modules/vite/bin/vite.js",
+    "build:dev": "tsc && node --env-file=.env node_modules/vite/bin/vite.js build --minify false --mode development",
+    "build": "tsc && node --env-file=.env node_modules/vite/bin/vite.js build --mode production",
+    "preview": "node --env-file=.env node_modules/vite/bin/vite.js preview"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.1.1",

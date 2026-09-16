@@ -2,7 +2,6 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import wails from "@wailsio/runtime/plugins/vite";
 import tailwindcss from "@tailwindcss/vite";
-import path from "node:path";
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -16,8 +15,8 @@ export default defineConfig({
     alias: {
       // 显式声明 @bindings 别名:不依赖 @wailsio/runtime 插件的隐式解析
       // (beta 版插件在 Windows 上无法把 @bindings/*.js 解析到生成的 .ts 文件)
-      "@bindings": path.resolve(__dirname, "./bindings"),
-      "@": path.resolve(__dirname, "./src"),
+      "@bindings": import.meta.dirname + "/bindings",
+      "@": import.meta.dirname + "/src",
     },
   },
 });
