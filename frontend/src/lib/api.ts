@@ -44,6 +44,12 @@ function nn<T>(v: unknown): T {
   return (v ?? null) as T;
 }
 
+// 后端列表接口在 IPC/SPA fallback 异常路径下可能返回 null 或对象(被解析为 HTML 兜底页)而不是数组,
+// 统一在这里转成空数组,避免上游 .map 崩溃。
+export function asArray<T>(v: unknown): T[] {
+  return Array.isArray(v) ? (v as T[]) : [];
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -276,6 +282,9 @@ export const api = {
   async stats(): Promise<
     { workflow_id: string; name: string; total: number; completed: number; failed: number; waiting: number; running: number }[]
   > {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).ex.Stats());
+    }
     return http("/api/stats");
   },
   async copyYAML(id: string): Promise<string> {

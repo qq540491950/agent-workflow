@@ -8,7 +8,7 @@ import {
   GitBranch,
   ArrowRight,
 } from "lucide-react";
-import { api, subscribeEvents } from "@/lib/api";
+import { api, asArray, subscribeEvents } from "@/lib/api";
 import type { Execution, Workflow } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -40,12 +40,12 @@ export default function Dashboard() {
   const [executions, setExecutions] = useState<Execution[]>([]);
 
   useEffect(() => {
-    api.listWorkflows().then((x) => setWorkflows(x ?? [])).catch(() => {});
-    api.listExecutions("", 8).then((x) => setExecutions(x ?? [])).catch(() => {});
-    api.stats().then((x) => setStats(x ?? [])).catch(() => {});
+    api.listWorkflows().then((x) => setWorkflows(asArray<Workflow>(x))).catch(() => {});
+    api.listExecutions("", 8).then((x) => setExecutions(asArray<Execution>(x))).catch(() => {});
+    api.stats().then((x) => setStats(asArray<WfStats>(x))).catch(() => {});
     const unsub = subscribeRefresh(() => {
-      api.listExecutions("", 8).then((x) => setExecutions(x ?? [])).catch(() => {});
-      api.stats().then((x) => setStats(x ?? [])).catch(() => {});
+      api.listExecutions("", 8).then((x) => setExecutions(asArray<Execution>(x))).catch(() => {});
+      api.stats().then((x) => setStats(asArray<WfStats>(x))).catch(() => {});
     });
     return unsub;
   }, []);
