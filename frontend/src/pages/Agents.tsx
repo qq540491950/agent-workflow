@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Settings2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, asArray } from "@/lib/api";
 import type { AgentConfig, AgentInfo } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
@@ -31,7 +31,7 @@ export default function Agents() {
   const [cfg, setCfg] = useState<AgentConfig | null>(null);
   const [savingCfg, setSavingCfg] = useState(false);
 
-  const refresh = () => api.listAgents().then((x) => setAgents(x ?? [])).catch((e) => toast.error(e.message));
+  const refresh = () => api.listAgents().then((x) => setAgents(asArray<AgentInfo>(x))).catch((e) => toast.error(e.message));
   useEffect(() => {
     refresh();
   }, []);

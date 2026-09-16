@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, asArray } from "@/lib/api";
 import type { SkillDTO } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -17,7 +17,7 @@ import {
 export default function Skills() {
   const [skills, setSkills] = useState<SkillDTO[]>([]);
 
-  const refresh = () => api.listSkills().then((x) => setSkills((x ?? []) as SkillDTO[])).catch((e) => toast.error(e.message));
+  const refresh = () => api.listSkills().then((x) => setSkills(asArray<SkillDTO>(x))).catch((e) => toast.error(e.message));
   useEffect(() => {
     refresh();
   }, []);

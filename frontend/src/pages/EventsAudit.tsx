@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import { api, subscribeEvents } from "@/lib/api";
+import { api, asArray, subscribeEvents } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -37,7 +37,7 @@ export default function EventsAudit() {
       const f = prefix ?? filter;
       try {
         const q = f ? `?type=${encodeURIComponent(f)}&limit=300` : "?limit=300";
-        setEvents(((await api.allEvents(q)) ?? []) as AuditEvent[]);
+        setEvents(asArray<AuditEvent>(await api.allEvents(q)));
       } catch (e) {
         toast.error((e as Error).message);
       }

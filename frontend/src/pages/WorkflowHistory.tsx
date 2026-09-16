@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { api, subscribeEvents } from "@/lib/api";
+import { api, asArray, subscribeEvents } from "@/lib/api";
 import type { Execution, Workflow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,8 +42,8 @@ export default function WorkflowHistory() {
 
   const refresh = useCallback(() => {
     api.getWorkflow(id).then(setWf).catch(() => {});
-    api.listExecutions(id, 100).then((x) => setExecs(x ?? [])).catch((e) => toast.error(e.message));
-    api.workflowVersions(id).then((x) => setVersions(x ?? [])).catch(() => {});
+    api.listExecutions(id, 100).then((x) => setExecs(asArray<Execution>(x))).catch((e) => toast.error(e.message));
+    api.workflowVersions(id).then((x) => setVersions(asArray<number>(x))).catch(() => {});
   }, [id]);
 
   useEffect(() => {

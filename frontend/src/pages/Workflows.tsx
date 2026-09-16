@@ -12,7 +12,7 @@ import {
   Power,
   FileUp,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, asArray } from "@/lib/api";
 import type { Workflow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -56,12 +56,12 @@ export default function Workflows() {
   const [statsMap, setStatsMap] = useState<Record<string, { running: number; total: number }>>({});
 
   const refresh = useCallback(() => {
-    api.listWorkflows().then((x) => setWorkflows((x ?? []) as never)).catch((e) => toast.error(e.message));
+    api.listWorkflows().then((x) => setWorkflows(asArray<Workflow>(x))).catch((e) => toast.error(e.message));
     api
       .stats()
       .then((arr) => {
         const m: Record<string, { running: number; total: number }> = {};
-        (arr ?? []).forEach((s) => (m[s.workflow_id] = { running: s.running, total: s.total }));
+        asArray<never>(arr).forEach((s: { workflow_id: string; running: number; total: number }) => (m[s.workflow_id] = { running: s.running, total: s.total }));
         setStatsMap(m);
       })
       .catch(() => {});

@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api, subscribeEvents } from "@/lib/api";
+import { api, asArray, subscribeEvents } from "@/lib/api";
 import type { Execution } from "@/lib/types";
 import { StateBadge } from "@/components/state-badge";
 import {
@@ -22,7 +22,7 @@ export default function Executions() {
   const [stateFilter, setStateFilter] = useState<string>("");
 
   const refresh = useCallback(() => {
-    api.listExecutions("", 100).then((x) => setExecs((x ?? []) as never)).catch((e) => toast.error(e.message));
+    api.listExecutions("", 100).then((x) => setExecs(asArray<Execution>(x))).catch((e) => toast.error(e.message));
   }, []);
 
   useEffect(() => {

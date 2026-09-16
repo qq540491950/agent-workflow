@@ -300,6 +300,15 @@ export const api = {
       created_at: string;
     }[]
   > {
+    if ((await detectMode()) === "desktop") {
+      const params = new URLSearchParams(q.startsWith("?") ? q : `?${q}`);
+      return nn(
+        await (await wailsBindings()).ex.AllEvents(
+          params.get("type") ?? "",
+          Number(params.get("limit")) || 200,
+        ),
+      );
+    }
     return http(`/api/events/all${q}`);
   },
 
@@ -344,6 +353,9 @@ export const api = {
     workflows_skipped: number;
     agent_configs_restored: number;
   }> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).st.RestoreBackup(backup as unknown as never));
+    }
     return http("/api/backup/restore", {
       method: "POST",
       body: JSON.stringify(backup),
