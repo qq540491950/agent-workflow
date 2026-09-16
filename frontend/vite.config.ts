@@ -14,6 +14,9 @@ export default defineConfig({
   plugins: [react(), wails("./bindings"), tailwindcss()],
   resolve: {
     alias: {
+      // 显式声明 @bindings 别名:不依赖 @wailsio/runtime 插件的隐式解析
+      // (beta 版插件在 Windows 上无法把 @bindings/*.js 解析到生成的 .ts 文件)
+      "@bindings": path.resolve(__dirname, "./bindings"),
       "@": path.resolve(__dirname, "./src"),
     },
   },
