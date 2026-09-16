@@ -9,3 +9,7 @@ build/bin/
 dist/
 wails3.lock
 bin/agent-workflow-server-smoke
+
+/agentworkflow
+/agentworkflow-server
+.task/
