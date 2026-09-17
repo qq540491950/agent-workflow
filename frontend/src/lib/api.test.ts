@@ -204,3 +204,23 @@ describe("version(双模式)", () => {
     await expect(api.version()).resolves.toEqual({});
   });
 });
+
+// 绑定 ID 漂移守卫:bindings 再生成可能改变 List 的数字 ID,
+// 探测常量若不同步,detectMode 在桌面模式会静默回退 web。
+describe("PROBE_BINDING_ID 与生成代码同步", () => {
+  it("等于 workflowservice.ts 中 List 的 ByID", async () => {
+    const { readFileSync } = await import("node:fs");
+    const bindingSrc = readFileSync(
+      new URL("../../bindings/agentworkflow/app/application/workflowservice.ts", import.meta.url),
+      "utf8",
+    );
+    const generated = bindingSrc.match(
+      /export function List\(\)[\s\S]*?\$Call\.ByID\((\d+)\)/,
+    );
+    expect(generated).toBeTruthy();
+    const apiSrc = readFileSync(new URL("./api.ts", import.meta.url), "utf8");
+    const probe = apiSrc.match(/PROBE_BINDING_ID = (\d+)/);
+    expect(probe).toBeTruthy();
+    expect(probe![1]).toBe(generated![1]);
+  });
+});
