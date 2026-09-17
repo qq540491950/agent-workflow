@@ -168,6 +168,8 @@ func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 // ---- Execution ----
 
 // SaveExecution 插入或更新执行状态(实时保存)。
+// 单条原子 upsert:不可变字段(workflow 绑定/task/变量/created_at)只在
+// 插入时写入,更新时不覆盖。
 func (d *DB) SaveExecution(e *model.Execution) error {
 	variables, _ := json.Marshal(orEmpty(e.Variables))
 	iterations := anyMapInt(e.Iterations)
@@ -177,19 +179,18 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 	if e.Snapshot != nil {
 		snapshot, _ = json.Marshal(e.Snapshot)
 	}
-	var existing int
-	_ = d.sql.QueryRow(`SELECT COUNT(1) FROM executions WHERE id=?`, e.ID).Scan(&existing)
-	if existing == 0 {
-		_, err := d.sql.Exec(`INSERT INTO executions
-			(id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			e.ID, e.WorkflowID, e.WorkflowVersion, e.WorkflowName, string(e.State), e.Task,
-			string(variables), e.CurrentNodeID, string(iterations), e.CreatedAt,
-			e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), string(stateData))
-		return wrap(err)
-	}
-	_, err := d.sql.Exec(`UPDATE executions SET state=?,current_node_id=?,iterations_json=?,started_at=?,finished_at=?,error=?,node_states_json=?,snapshot_json=?,state_json=? WHERE id=?`,
-		string(e.State), e.CurrentNodeID, string(iterations), e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), string(stateData), e.ID)
+	_, err := d.sql.Exec(`INSERT INTO executions
+		(id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			state=excluded.state, current_node_id=excluded.current_node_id,
+			iterations_json=excluded.iterations_json, started_at=excluded.started_at,
+			finished_at=excluded.finished_at, error=excluded.error,
+			node_states_json=excluded.node_states_json, snapshot_json=excluded.snapshot_json,
+			state_json=excluded.state_json`,
+		e.ID, e.WorkflowID, e.WorkflowVersion, e.WorkflowName, string(e.State), e.Task,
+		string(variables), e.CurrentNodeID, string(iterations), e.CreatedAt,
+		e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), string(stateData))
 	return wrap(err)
 }
 
@@ -278,20 +279,19 @@ func (d *DB) ListRunningExecutions() ([]*model.Execution, error) {
 	return out, nil
 }
 
-// SaveExecutionNode 插入或更新节点执行明细。
+// SaveExecutionNode 插入或更新节点执行明细(原子 upsert;
+// execution_id/node_id/node_type/node_name 只在插入时写入)。
 func (d *DB) SaveExecutionNode(n *model.ExecutionNode) error {
-	var existing int
-	_ = d.sql.QueryRow(`SELECT COUNT(1) FROM execution_nodes WHERE id=?`, n.ID).Scan(&existing)
-	if existing == 0 {
-		_, err := d.sql.Exec(`INSERT INTO execution_nodes
-			(id,execution_id,node_id,node_type,node_name,state,attempt,output,result_json,error,started_at,finished_at,duration_ms)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			n.ID, n.ExecutionID, n.NodeID, string(n.NodeType), n.NodeName, string(n.State), n.Attempt,
-			n.Output, n.ResultJSON, n.Error, n.StartedAt, n.FinishedAt, n.DurationMS)
-		return wrap(err)
-	}
-	_, err := d.sql.Exec(`UPDATE execution_nodes SET state=?,attempt=?,output=?,result_json=?,error=?,started_at=?,finished_at=?,duration_ms=? WHERE id=?`,
-		string(n.State), n.Attempt, n.Output, n.ResultJSON, n.Error, n.StartedAt, n.FinishedAt, n.DurationMS, n.ID)
+	_, err := d.sql.Exec(`INSERT INTO execution_nodes
+		(id,execution_id,node_id,node_type,node_name,state,attempt,output,result_json,error,started_at,finished_at,duration_ms)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			state=excluded.state, attempt=excluded.attempt, output=excluded.output,
+			result_json=excluded.result_json, error=excluded.error,
+			started_at=excluded.started_at, finished_at=excluded.finished_at,
+			duration_ms=excluded.duration_ms`,
+		n.ID, n.ExecutionID, n.NodeID, string(n.NodeType), n.NodeName, string(n.State), n.Attempt,
+		n.Output, n.ResultJSON, n.Error, n.StartedAt, n.FinishedAt, n.DurationMS)
 	return wrap(err)
 }
 
