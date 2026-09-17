@@ -117,8 +117,19 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 		err.Detail = string(raw)
 		return nil, err
 	}
-	// 重置可重置的 Agent(如 Mock),使每次运行决策序列从头开始
+	// 重置本次工作流引用的可重置 Agent(如 Mock),使决策序列从头开始。
+	// 只重置被引用的:嵌套工作流启动不得干扰并发运行的其他执行
+	// (如父工作流的 Mock 决策序列被中途清零)。
+	refs := map[string]bool{}
+	for i := range wf.Nodes {
+		if id, ok := wf.Nodes[i].Config["agent"].(string); ok {
+			refs[id] = true
+		}
+	}
 	for _, a := range e.Agents.List() {
+		if !refs[a.ID()] {
+			continue
+		}
 		if r, ok := a.(interface{ ResetMock() }); ok {
 			r.ResetMock()
 		}
