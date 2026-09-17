@@ -166,6 +166,9 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 	e.cancels[exec.ID] = cancel
 	e.mu.Unlock()
 
+	// 返回派发前的快照:goroutine 会并发改写 exec,调用方(如 REST 响应
+	// 的 JSON 序列化)不得与它共享可变结构
+	snapshot := cloneExec(exec)
 	go func() {
 		defer func() {
 			e.mu.Lock()
@@ -174,7 +177,7 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 		}()
 		e.execute(runCtx, exec, "", nil)
 	}()
-	return exec, nil
+	return snapshot, nil
 }
 
 // Resume 恢复一个 WAITING_USER/PAUSED 的执行(人工输入后)。
@@ -209,6 +212,7 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 	e.mu.Lock()
 	e.cancels[exec.ID] = cancel
 	e.mu.Unlock()
+	snapshot := cloneExec(exec)
 	go func() {
 		defer func() {
 			e.mu.Lock()
@@ -217,7 +221,7 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 		}()
 		e.execute(runCtx, exec, "resume", userResponse)
 	}()
-	return exec, nil
+	return snapshot, nil
 }
 
 // Cancel 取消执行(运行中的通过 context 取消;等待用户的直接标记取消)。
@@ -294,6 +298,7 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	e.mu.Lock()
 	e.cancels[exec.ID] = cancel
 	e.mu.Unlock()
+	snapshot := cloneExec(exec)
 	go func() {
 		defer func() {
 			e.mu.Lock()
@@ -302,7 +307,7 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 		}()
 		e.execute(runCtx, exec, "resume", nil)
 	}()
-	return exec, nil
+	return snapshot, nil
 }
 
 // RecoverPending 在应用启动时调用:把上次崩溃遗留的 RUNNING 执行标记为
@@ -537,6 +542,15 @@ func loopLimit(wf *model.Workflow) int {
 		return wf.Settings.MaxIterations
 	}
 	return compiler.DefaultMaxIterations
+}
+
+// cloneExec 返回 Execution 的深拷贝(执行 goroutine 与调用方之间
+// 不共享可变结构;JSON 往返的代价可接受,仅发生在每次派发时一次)。
+func cloneExec(e *model.Execution) *model.Execution {
+	raw, _ := json.Marshal(e)
+	var out model.Execution
+	_ = json.Unmarshal(raw, &out)
+	return &out
 }
 
 func cloneWorkflow(wf *model.Workflow) *model.Workflow {
