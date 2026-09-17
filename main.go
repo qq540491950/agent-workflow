@@ -124,7 +124,9 @@ func runDesktop(app *app.App) {
 	// 前缀,导出/备份等下载链接与服务器模式同源可用
 	apiHandler := api.NewServer(app)
 
-	wailsApp := wails.New(wails.Options{
+	// 先声明后赋值:SingleInstance 回调需要引用 wailsApp 聚焦窗口
+	var wailsApp *wails.App
+	wailsApp = wails.New(wails.Options{
 		Name:        "Agent Workflow Orchestrator",
 		Description: "可配置、可视化、可扩展的多 Agent 工作流编排",
 		Services: []wails.Service{
@@ -143,6 +145,17 @@ func runDesktop(app *app.App) {
 				logx.Warn("仍有执行未收尾,已强制退出", "count", left)
 			}
 		},
+		// 单实例:数据目录只有一个 SQLite,双开会并发写库;
+		// 二次启动改为聚焦已有窗口
+		SingleInstance: &wails.SingleInstanceOptions{
+			UniqueID: "com.agent-workflow.orchestrator",
+			OnSecondInstanceLaunch: func(data wails.SecondInstanceData) {
+				if win, ok := wailsApp.Window.GetByName("main"); ok {
+					win.Show()
+					win.Focus()
+				}
+			},
+		},
 		Assets: wails.AssetOptions{
 			Handler: wails.AssetFileServerFS(assets),
 		},
@@ -158,6 +171,7 @@ func runDesktop(app *app.App) {
 	})
 
 	wailsApp.Window.NewWithOptions(wails.WebviewWindowOptions{
+		Name:   "main",
 		Title:  "Agent Workflow Orchestrator",
 		Width:  1440,
 		Height: 900,

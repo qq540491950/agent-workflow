@@ -13,3 +13,8 @@ bin/agent-workflow-server-smoke
 /agentworkflow
 /agentworkflow-server
 .task/
+
+# 根目录误装的 npm 产物(前端依赖只在 frontend/ 管理)
+/node_modules/
+/package.json
+/package-lock.json
