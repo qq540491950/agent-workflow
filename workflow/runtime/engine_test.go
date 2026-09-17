@@ -2,8 +2,8 @@ package runtime
 
 import (
 	"context"
-	"runtime"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
