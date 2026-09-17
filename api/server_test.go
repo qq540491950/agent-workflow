@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	app "agentworkflow/app/application"
 )
@@ -216,4 +217,77 @@ func TestGitRoutes(t *testing.T) {
 	if code != http.StatusOK || len(raw) < 2 {
 		t.Errorf("git log → %d %.40s", code, raw)
 	}
+}
+
+// 回归:HTTP 恢复(HITL input)必须在请求返回后继续执行。
+// 若有人把 r.Context() 直接传进 Engine.Resume,请求结束会取消
+// 整个恢复执行 —— 本测试锁定"脱离请求生命周期"的行为。
+func TestResumeInputSurvivesRequestEnd(t *testing.T) {
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+	s := NewServer(a)
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	_, _, _ = doReq(t, s, http.MethodPost, "/api/workflows/import", `
+version: "1"
+workflow:
+  id: hitl-http
+  name: HITL HTTP
+nodes:
+  - id: gate
+    type: human
+    prompt: "确认?"
+    responses: ["approve"]
+  - id: done
+    type: skill
+    skill: log
+    args:
+      message: done
+edges:
+  - from: gate
+    to: done
+`)
+
+	_, execResp, _ := doReq(t, s, http.MethodPost, "/api/workflows/hitl-http/run", `{"task":"t"}`)
+	execID, _ := execResp["id"].(string)
+	if execID == "" {
+		t.Fatal("run 未返回执行 ID")
+	}
+
+	// 等待进入 WAITING_USER
+	deadline := time.Now().Add(10 * time.Second)
+	state := ""
+	for time.Now().Before(deadline) {
+		_, body, _ := doReq(t, s, http.MethodGet, "/api/executions/"+execID, "")
+		state, _ = body["state"].(string)
+		if state == "WAITING_USER" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if state != "WAITING_USER" {
+		t.Fatalf("state = %s, want WAITING_USER", state)
+	}
+
+	// HTTP 恢复:请求立即返回
+	code, _, _ := doReq(t, s, http.MethodPost, "/api/executions/"+execID+"/input", `{"response":"approve"}`)
+	if code != http.StatusOK {
+		t.Fatalf("input → %d", code)
+	}
+
+	// 请求已结束后,执行必须继续到 COMPLETED
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, body, _ := doReq(t, s, http.MethodGet, "/api/executions/"+execID, "")
+		state, _ = body["state"].(string)
+		if state == "COMPLETED" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("请求结束后执行未完成,最终 state=%s", state)
 }
