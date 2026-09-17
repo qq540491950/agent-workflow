@@ -359,11 +359,24 @@
   (jsdom + testing-library)+ StateBadge 8 项。✅
 - **#26 Dashboard 状态卡片口径**:从最近 8 条执行计数,长时场景下
   RUNNING 被新记录挤出窗口后错误归零;改 stats 全量聚合。✅
+- **#27 取消父执行不级联**:取消阻塞在子工作流上的父执行时,父 goroutine
+  在轮询里最长阻塞 10 分钟且子执行继续跑;等待循环感知 ctx 并级联取消
+  子执行。✅
+- **#28 执行 goroutine 与 API 响应的数据竞争**:/run、/input、/retry 把
+  存活 Execution 指针交给 writeJSON 序列化,与并发改写竞争(新写的
+  HTTP 恢复存活测试在 -race 下首次抓到);Start/Resume/RetryNode 改为
+  返回派发前快照。✅
 - version() 双模式统一走 /api(桌面关于卡片显示 ADK/Wails 版本);
   EventsAudit 实时刷新 200ms 防抖;contextx 死代码 IterationOf 清理。✅
 - 测试扩充:goroutine 泄漏回归(20 次执行后协程回落)、嵌套工作流
-  集成(父→子真实链路 + 缺失子失败)、matchBranch/EvalCondition 变体、
-  git 路由契约(临时仓库)。✅
+  集成(父→子真实链路 + 缺失子失败 + 取消级联)、崩溃恢复回归
+  (共享 SQLite 双引擎:RUNNING→FAILED 可重试 / WAITING_USER 可恢复)、
+  HTTP 层 HITL 恢复存活(锁定 ctx 脱离语义)、matchBranch/EvalCondition
+  变体、git 路由契约(临时仓库)、绑定 ID 漂移守卫、并行分支内嵌
+  条件路由组合。✅
+- run:server 任务补 --server 标志(此前无参启动进入桌面分支);
+  Designer 设置面板补 timeout_seconds 输入;HITL 按钮 busy 态防重复;
+  Layout/EventsAudit 实时刷新防抖;Wails 内部日志接入 logx。✅
 - **进程级浸泡**:35 次真实执行(30 串行 + 5 并发)全部 COMPLETED、
   无残留未终态,RSS 19.5MB → 24.5MB(正常区间)。✅
 
