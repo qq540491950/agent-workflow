@@ -176,13 +176,18 @@ function DesignerInner() {
   }, []);
   const saveRef = useRef<(() => void) | null>(null);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   useEffect(() => {
     if (!id) return;
     api.getWorkflow(id).then((w) => {
       setWf(w);
       hydrate(w);
       setTimeout(() => fitView({ padding: 0.15 }), 60);
-    }).catch((e) => toast.error(e.message));
+    }).catch((e) => {
+      setLoadError(e.message);
+      toast.error(e.message);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -392,6 +397,14 @@ function DesignerInner() {
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedEdge = edges.find((e) => e.id === selectedEdgeId);
 
+  if (loadError) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
+        <p>工作流加载失败:{loadError}</p>
+        <Button variant="outline" size="sm" onClick={() => nav("/workflows")}>返回工作流列表</Button>
+      </div>
+    );
+  }
   if (!wf) {
     return <div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>;
   }
