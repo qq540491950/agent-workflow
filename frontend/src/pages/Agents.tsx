@@ -39,7 +39,11 @@ export default function Agents() {
   const toggle = async (a: AgentInfo, key: keyof AgentInfo["permissions"]) => {
     const p = { ...a.permissions, [key]: !a.permissions[key] };
     if (key === "git_commit" && !p.git_commit) p.git_push = false;
-    await api.setAgentPermission(a.id, p);
+    try {
+      await api.setAgentPermission(a.id, p);
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
     refresh();
   };
 
