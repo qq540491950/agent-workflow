@@ -368,14 +368,12 @@ export const api = {
   },
 
   async version(): Promise<Record<string, string>> {
-    if ((await detectMode()) === "web") {
-      try {
-        return await http("/api/version");
-      } catch {
-        return {};
-      }
+    // 桌面模式下 /api 已通过 AssetHandler 挂载到 AssetServer,两种模式同源可用
+    try {
+      return await http("/api/version");
+    } catch {
+      return {};
     }
-    return {};
   },
 
   // ---- Git ----

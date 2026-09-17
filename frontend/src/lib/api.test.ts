@@ -179,3 +179,28 @@ describe("subscribeEvents(web 模式)", () => {
     expect(got).toEqual(["node.started"]);
   });
 });
+
+describe("version(双模式)", () => {
+  it("桌面模式同样走 /api/version(/api 已挂载)", async () => {
+    callByID.mockResolvedValue([]); // desktop
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify({ app: "x", version: "1", adk: "adk v1" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    const v = await api.version();
+    expect(v.adk).toContain("adk");
+    expect(fetchMock).toHaveBeenCalledWith("/api/version", expect.anything());
+  });
+
+  it("端点不可用时回退空对象", async () => {
+    callByID.mockRejectedValue(new Error("no ipc")); // web
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => "" }),
+    );
+    const { api } = await freshApi();
+    await expect(api.version()).resolves.toEqual({});
+  });
+});
