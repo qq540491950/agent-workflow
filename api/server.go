@@ -50,19 +50,15 @@ func (s *Server) Handler() http.Handler { return s.mux }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+		info := VersionInfo()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok", "version": "0.1.0", "mode": "server",
-			"adk": "google.golang.org/adk v1.7.0", "wails": "v3.0.0-beta.20",
+			"status": "ok", "version": info["version"], "mode": "server",
+			"adk": info["adk"], "wails": info["wails"],
 		})
 	})
 	s.mux.HandleFunc("GET /api/version", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		return writeJSON(w, map[string]any{
-			"app":     "Agent Workflow Orchestrator",
-			"version": "0.1.0",
-			"adk":     "google.golang.org/adk v1.7.0",
-			"wails":   "v3.0.0-beta.20",
-		}, nil)
+		return writeJSON(w, VersionInfo(), nil)
 	}))
 	s.mux.HandleFunc("GET /api/workflows", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		wfs, err := s.app.Workflows.List()

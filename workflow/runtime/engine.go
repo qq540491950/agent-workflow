@@ -496,7 +496,7 @@ func loopLimit(wf *model.Workflow) int {
 	if wf != nil && wf.Settings.MaxIterations > 0 {
 		return wf.Settings.MaxIterations
 	}
-	return 5
+	return compiler.DefaultMaxIterations
 }
 
 func cloneWorkflow(wf *model.Workflow) *model.Workflow {

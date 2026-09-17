@@ -13,6 +13,11 @@ import type {
   Workflow,
 } from "./types";
 
+// WorkflowService.List 的绑定 ID(wails3 generate 生成,
+// 见 frontend/bindings/agentworkflow/app/application/workflowservice.ts);
+// 仅用于模式探测,与生成代码保持同步。
+const PROBE_BINDING_ID = 1924388702;
+
 // 传输模式探测:调用一次真实绑定,500ms 内成功 → 桌面模式(IPC),
 // 否则回退 HTTP+SSE(Wails runtime 注入时机晚于模块加载,不能用存在性判断)。
 let modePromise: Promise<"desktop" | "web"> | null = null;
@@ -22,7 +27,7 @@ export function detectMode(): Promise<"desktop" | "web"> {
     modePromise = (async () => {
       try {
         const rt = await import("@wailsio/runtime");
-        const probe = rt.Call.ByID(1924388702); // WorkflowService.List
+        const probe = rt.Call.ByID(PROBE_BINDING_ID);
         const winner = await Promise.race([
           probe.then(
             () => "desktop" as const,

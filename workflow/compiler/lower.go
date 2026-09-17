@@ -21,6 +21,9 @@ import (
 	"agentworkflow/workflow/model"
 )
 
+// DefaultMaxIterations 是循环保护默认上限(engine 的 loopLimit 兜底同源)。
+const DefaultMaxIterations = 5
+
 // 会话状态键(执行状态通过 ADK Session State 持久化)。
 const (
 	KeyTask        = "task"
@@ -381,7 +384,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 		}
 		maxIter := p.Loop.MaxIterations
 		if maxIter <= 0 {
-			maxIter = 5
+			maxIter = DefaultMaxIterations
 		}
 		// resetter 在每轮循环开始时清除循环体内节点的完成标记,
 		// 使 fix/review 等节点能够真实地重新执行。
