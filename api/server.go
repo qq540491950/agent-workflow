@@ -371,14 +371,22 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer unsub()
 
 	// 客户端断开或超时退出
-	select {
-	case <-r.Context().Done():
-	case <-s.shutdown(r):
-	}
+	<-r.Context().Done()
 }
 
-func (s *Server) shutdown(r *http.Request) <-chan struct{} {
-	return r.Context().Done()
+// AssetHandler 返回可挂载到 Wails AssetServer 指定 Route 前缀的处理器。
+// 桌面模式下注册 `wails.NewServiceWithOptions(h, ServiceOptions{Route: "/api"})`
+// 后,导出/备份等 /api 下载链接走同源 HTTP,不再落入 SPA fallback。
+// 独立类型只暴露 ServeHTTP(Wails 绑定引擎按名跳过),避免 Server 的
+// 其他导出方法被注册为 IPC 绑定。
+type AssetHandler struct{ Srv *Server }
+
+func (h *AssetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Wails 命中 Route 时已剥掉前缀,补回以匹配内部 /api/* 路由
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		r.URL.Path = "/api" + r.URL.Path
+	}
+	h.Srv.Handler().ServeHTTP(w, r)
 }
 
 // ---- helpers ----

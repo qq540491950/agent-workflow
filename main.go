@@ -120,6 +120,10 @@ func runServer(app *app.App, addr string) {
 
 // runDesktop Wails 桌面模式。
 func runDesktop(app *app.App) {
+	// REST API 处理器:桌面模式下经 AssetHandler 挂载到 AssetServer 的 /api
+	// 前缀,导出/备份等下载链接与服务器模式同源可用
+	apiHandler := api.NewServer(app)
+
 	wailsApp := wails.New(wails.Options{
 		Name:        "Agent Workflow Orchestrator",
 		Description: "可配置、可视化、可扩展的多 Agent 工作流编排",
@@ -130,6 +134,14 @@ func runDesktop(app *app.App) {
 			wails.NewService(app.SkillSvc),
 			wails.NewService(app.GitAPI),
 			wails.NewService(app.Settings),
+			wails.NewServiceWithOptions(&api.AssetHandler{Srv: apiHandler},
+				wails.ServiceOptions{Route: "/api"}),
+		},
+		// 退出前给运行中的执行一次收尾机会(状态落库),与服务器模式对齐
+		OnShutdown: func() {
+			if left := app.Engine.WaitIdle(5 * time.Second); left > 0 {
+				logx.Warn("仍有执行未收尾,已强制退出", "count", left)
+			}
 		},
 		Assets: wails.AssetOptions{
 			Handler: wails.AssetFileServerFS(assets),
