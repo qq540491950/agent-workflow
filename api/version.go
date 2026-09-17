@@ -31,6 +31,11 @@ func VersionInfo() map[string]string {
 				cachedVersion["wails"] = d.Version
 			}
 		}
+		for _, kv := range bi.Settings {
+			if kv.Key == "vcs.revision" && len(kv.Value) >= 7 {
+				cachedVersion["commit"] = kv.Value[:7]
+			}
+		}
 	})
 	out := make(map[string]string, len(cachedVersion))
 	for k, v := range cachedVersion {
