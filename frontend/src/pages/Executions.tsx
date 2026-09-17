@@ -94,8 +94,13 @@ export default function Executions() {
                     onClick={async (ev) => {
                       ev.stopPropagation();
                       if (!confirm(`删除执行记录 ${e.id}?`)) return;
-                      await api.deleteExecution(e.id);
-                      refresh();
+                      try {
+                        await api.deleteExecution(e.id);
+                        toast.success("已删除");
+                        refresh();
+                      } catch (err) {
+                        toast.error((err as Error).message);
+                      }
                     }}
                   >
                     <Trash2 className="h-4 w-4" />
