@@ -9,12 +9,14 @@ import (
 	"context"
 	"embed"
 	"flag"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"agentworkflow/logx"
 
 	wails "github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 )
 
 //go:embed all:frontend/dist
@@ -126,6 +129,7 @@ func runDesktop(app *app.App) {
 
 	// 先声明后赋值:SingleInstance 回调需要引用 wailsApp 聚焦窗口
 	var wailsApp *wails.App
+	notifSvc := notifications.New()
 	wailsApp = wails.New(wails.Options{
 		Name:        "Agent Workflow Orchestrator",
 		Description: "可配置、可视化、可扩展的多 Agent 工作流编排",
@@ -138,6 +142,7 @@ func runDesktop(app *app.App) {
 			wails.NewService(app.Settings),
 			wails.NewServiceWithOptions(&api.AssetHandler{Srv: apiHandler},
 				wails.ServiceOptions{Route: "/api"}),
+			wails.NewService(notifSvc),
 		},
 		// 退出前给运行中的执行一次收尾机会(状态落库),与服务器模式对齐
 		OnShutdown: func() {
@@ -169,6 +174,7 @@ func runDesktop(app *app.App) {
 	_ = app.Subscribe(func(ev event.UIEvent) {
 		wailsApp.Event.Emit("ui:event", ev)
 	})
+	bridgeNotifications(app, notifSvc, wailsApp)
 
 	wailsApp.Window.NewWithOptions(wails.WebviewWindowOptions{
 		Name:   "main",
@@ -188,4 +194,66 @@ func runDesktop(app *app.App) {
 		logx.Error("应用退出异常", "error", err)
 		os.Exit(1)
 	}
+}
+
+// bridgeNotifications 将执行生命周期事件桥接为系统原生通知。
+// WKWebView 对 Web Notification 的权限支持不可靠,桌面通知由 Go 侧
+// 发出(前端在桌面模式跳过 Web 通知,避免双重提醒)。
+func bridgeNotifications(app *app.App, ns *notifications.NotificationService, wailsApp *wails.App) {
+	var state int32 // 原子:0 未请求授权,1 已授权,-1 不可用
+	_ = app.Subscribe(func(ev event.UIEvent) {
+		var title, body string
+		switch ev.Type {
+		case event.WorkflowCompleted:
+			title = "工作流已完成"
+		case event.WorkflowFailed:
+			title = "工作流失败"
+			body = fmt.Sprint(ev.Data["error"])
+		case event.HumanInputRequired:
+			title = "工作流等待你的输入"
+			body = fmt.Sprint(ev.Data["prompt"])
+		default:
+			return
+		}
+		if r := []rune(body); len(r) > 120 {
+			body = string(r[:120]) + "…"
+		}
+
+		switch atomic.LoadInt32(&state) {
+		case 0:
+			granted, err := ns.RequestNotificationAuthorization()
+			if err != nil || !granted {
+				atomic.StoreInt32(&state, -1)
+				logx.Debug("通知授权不可用,本次会话不再尝试", "granted", granted, "error", fmt.Sprint(err))
+				return
+			}
+			atomic.StoreInt32(&state, 1)
+		case -1:
+			return
+		}
+		err := ns.SendNotification(notifications.NotificationOptions{
+			ID:       ev.ExecutionID + ":" + ev.Type,
+			Title:    title,
+			Body:     body,
+			ThreadID: ev.ExecutionID,
+			Data:     map[string]interface{}{"execution_id": ev.ExecutionID},
+		})
+		if err != nil {
+			logx.Debug("发送通知失败", "error", err.Error())
+		}
+	})
+
+	// 点击通知:聚焦窗口并让前端跳转到对应执行
+	ns.OnNotificationResponse(func(result notifications.NotificationResult) {
+		if result.Error != nil {
+			return
+		}
+		if win, ok := wailsApp.Window.GetByName("main"); ok {
+			win.Show()
+			win.Focus()
+		}
+		if id, ok := result.Response.UserInfo["execution_id"].(string); ok && id != "" {
+			wailsApp.Event.Emit("ui:open-execution", id)
+		}
+	})
 }

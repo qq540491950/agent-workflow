@@ -1,11 +1,30 @@
-// 执行完成/等待输入的桌面通知(浏览器 Notification API;桌面模式同样可用)。
-import { subscribeEvents } from "@/lib/api";
+// 执行完成/等待输入的桌面通知。
+// 桌面模式:原生通知由 Go 侧 bridgeNotifications 发出(WKWebView 的
+// Web Notification 权限模型不可靠),这里只监听通知点击跳转;
+// 浏览器模式:走 Web Notification API。
+import { api, subscribeEvents } from "@/lib/api";
 
 let enabled = false;
 
-export function initNotifications() {
-  if (enabled || typeof window === "undefined" || !("Notification" in window)) return;
+function navigateToExecution(id: string) {
+  window.focus();
+  // 通过 popstate 触发 React Router 的客户端导航(避免整页刷新)
+  history.pushState({}, "", `/executions/${id}`);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+export async function initNotifications() {
+  if (enabled || typeof window === "undefined") return;
   enabled = true;
+  if (await api.isDesktopMode()) {
+    const rt = await import("@wailsio/runtime");
+    rt.Events.On("ui:open-execution", (data: unknown) => {
+      const id = Array.isArray(data) ? String(data[0]) : String(data ?? "");
+      if (id) navigateToExecution(id);
+    });
+    return;
+  }
+  if (!("Notification" in window)) return;
   if (Notification.permission === "default") {
     // 在用户首次交互后再请求权限,避免打扰
     const ask = () => {
@@ -37,10 +56,7 @@ export function initNotifications() {
     try {
       const n = new Notification(title, { body, tag: ev.execution_id + ev.type });
       n.onclick = () => {
-        window.focus();
-        // 通过 popstate 触发 React Router 的客户端导航(避免整页刷新)
-        history.pushState({}, "", `/executions/${ev.execution_id}`);
-        window.dispatchEvent(new PopStateEvent("popstate"));
+        navigateToExecution(ev.execution_id);
         n.close();
       };
     } catch {
