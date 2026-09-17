@@ -114,9 +114,13 @@ export default function Settings() {
             <CardTitle className="text-base">关于</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1 font-mono text-xs text-muted-foreground">
-            <div>app: Agent Workflow Orchestrator v0.1.0</div>
+            <div>
+              app: {ver.app ?? "Agent Workflow Orchestrator"}
+              {ver.version ? ` v${ver.version}` : ""}
+            </div>
             {ver.adk && <div>adk: {ver.adk}</div>}
             {ver.wails && <div>wails: {ver.wails}</div>}
+            {ver.commit && <div>commit: {ver.commit}</div>}
           </CardContent>
         </Card>
 
