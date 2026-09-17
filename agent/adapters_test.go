@@ -40,10 +40,11 @@ func TestClaudeAdapterParsing(t *testing.T) {
 // TestClaudeAdapterForbiddenWrite 验证 Claude 适配器拒绝写操作:
 // 即便策略配置错误,CLI 参数也强制 --disallowedTools 包含 Write/Edit。
 func TestClaudeAdapterForbiddenWrite(t *testing.T) {
-	// 通过参数捕获脚本验证 CLI 收到的参数
+	// 通过参数捕获脚本验证 CLI 收到的参数(写入本次测试的临时目录,避免并发冲突)
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fake-claude-args")
-	script := "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > /tmp/fake-claude-args.txt\nprintf '{\"result\":\"{}\",\"is_error\":false}'\n"
+	argsFile := filepath.Join(dir, "captured-args.txt")
+	script := "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > \"" + argsFile + "\"\nprintf '{\"result\":\"{}\",\"is_error\":false}'\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -51,14 +52,13 @@ func TestClaudeAdapterForbiddenWrite(t *testing.T) {
 	if _, err := a.Execute(context.Background(), agent.AgentRequest{Task: "t", Mode: "plan"}); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	raw, err := os.ReadFile("/tmp/fake-claude-args.txt")
+	raw, err := os.ReadFile(argsFile)
 	if err != nil {
-		t.Skip("args file unavailable")
+		t.Fatalf("args file unavailable: %v", err)
 	}
 	if !strings.Contains(string(raw), "Write,Edit") {
 		t.Errorf("disallowedTools missing write tools: %s", raw)
 	}
-	os.Remove("/tmp/fake-claude-args.txt")
 }
 
 // TestPiAdapterStructuredOutput 验证 Pi 适配器的结构化输出解析。
