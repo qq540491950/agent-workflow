@@ -296,7 +296,7 @@ go build -tags server -o bin/agent-workflow-server .
   <div class="card"><h4>Events 审计流</h4><p>跨执行的全部事件实时滚动,支持按类型过滤,可跳转到对应执行。</p></div>
   <div class="card"><h4>统计与归档</h4><p>Dashboard 每工作流成功率;执行页耗时显示;执行记录一键导出 JSON(含事件与制品)。</p></div>
   <div class="card"><h4>State 查看器</h4><p>执行监控页可查看运行时会话状态(plan / review / git_diff / decision…),便于调试模板与路由。</p></div>
-  <div class="card"><h4>桌面通知</h4><p>执行完成 / 失败 / 等待输入时发送系统通知,点击直达执行详情。</p></div>
+  <div class="card"><h4>系统原生通知</h4><p>执行完成 / 失败 / 等待输入时由 Go 侧发送系统级通知,点击直达执行详情;单实例防双开,二次启动自动聚焦已有窗口。</p></div>
   <div class="card"><h4>节点级禁用</h4><p>节点配置开关关闭后运行时置为 SKIPPED,画布半透明 ⊘ 标识,便于对照调试。</p></div>
   <div class="card"><h4>记录管理</h4><p>执行页按状态过滤、删除记录(级联清理);执行记录一键导出 JSON 归档。</p></div>
   <div class="card"><h4>工作流级超时</h4><p><code>settings.timeout_seconds</code> 防止单轮执行挂死,超时转 FAILED 并给出明确错误。</p></div>
@@ -395,7 +395,8 @@ SQLite(workflows / versions / executions / nodes / events / artifacts)</div>
   第二阶段 8 轮:模型配置 → 节点覆盖/重试 → YAML 导入 → Git 面板 → 设置/审计 → 自动布局 → 失败重试/跳过 → 细节完善与真实重启恢复。
   过程中发现并修复 6 个 Bug,每次修复独立提交 git。
   可重复执行的冒烟脚本:<code>scripts/smoke.sh</code>(健康检查 / 示例种子 /
-  正常闭环 / 循环保护 / HITL 恢复 / 记录导出 / 事件流,7 项断言)。
+  正常闭环 / 循环保护 / HITL 恢复 / 记录导出 / 事件流 / 负路径语义,8 项断言)
+  与 <code>scripts/smoke_sse.sh</code>(SSE 实时流端到端,3 项断言)。
   详细记录见仓库 <code>docs/TESTING.md</code>;本页全部截图即视觉测试实证。</p>
 <table>
   <tr><th>轮次</th><th>类型</th><th>结果</th><th>修复</th></tr>
