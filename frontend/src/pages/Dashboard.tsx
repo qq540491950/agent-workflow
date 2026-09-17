@@ -50,12 +50,12 @@ export default function Dashboard() {
     return unsub;
   }, []);
 
-  const running = executions.filter((e) => e.state === "RUNNING").length;
-  const waiting = executions.filter((e) => e.state === "WAITING_USER").length;
-  const completed = executions.filter((e) => e.state === "COMPLETED").length;
-  const failed = executions.filter(
-    (e) => e.state === "FAILED" || e.state === "CANCELLED",
-  ).length;
+  // 状态卡片取全量聚合(stats 端点):仅按最近 8 条统计会漏掉
+  // 更早创建的长时执行(如唯一一个 RUNNING 被新记录挤出窗口)
+  const running = stats.reduce((n, s) => n + s.running, 0);
+  const waiting = stats.reduce((n, s) => n + s.waiting, 0);
+  const completed = stats.reduce((n, s) => n + s.completed, 0);
+  const failed = stats.reduce((n, s) => n + s.failed, 0);
 
   return (
     <div className="h-full overflow-auto p-6">
