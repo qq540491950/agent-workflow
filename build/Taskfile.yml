@@ -271,7 +271,9 @@ tasks:
         vars:
           DEV: "true"
     cmds:
-      - '"./{{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}"'
+      # 必须显式传 --server:否则二进制进入桌面分支(tags server 下会
+      # 变成 Wails 内置 HTTP 服务,而非本文档化的 REST+SSE 服务)
+      - '"./{{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}" --server --addr "127.0.0.1:8080"'
 
   build:docker:
     summary: Builds a Docker image for server mode deployment
