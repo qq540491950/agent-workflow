@@ -1,6 +1,7 @@
 package dsl
 
 import (
+	"strings"
 	"testing"
 
 	"agentworkflow/workflow/model"
@@ -183,5 +184,35 @@ func TestModelGraph(t *testing.T) {
 	}
 	if _, err := wf.FindNode("zzz"); err == nil {
 		t.Error("expected error for missing node")
+	}
+}
+
+// 回归:FromModel 导出曾丢失 settings.timeout_seconds —— 导出的 YAML
+// 再导入会静默失去工作流级超时保护;版本快照 DSL 同样受影响。
+func TestFromModelPreservesTimeoutSeconds(t *testing.T) {
+	wf := &model.Workflow{
+		ID:       "t",
+		Name:     "T",
+		Settings: model.WorkflowSettings{MaxIterations: 7, OnLoopLimit: "fail", TimeoutSeconds: 120},
+		Nodes: []model.Node{
+			{ID: "a", Name: "a", Type: model.NodeTypeAgent, Config: map[string]any{"agent": "mock", "mode": "plan"}},
+		},
+	}
+	doc := FromModel(wf)
+	raw, err := doc.EncodeYAML()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !strings.Contains(string(raw), "timeout_seconds: 120") {
+		t.Fatalf("导出 YAML 丢失 timeout_seconds:\n%s", raw)
+	}
+	// 往返:导出 → 重新解析 → 模型
+	back, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := back.ToModel()
+	if got.Settings.TimeoutSeconds != 120 || got.Settings.MaxIterations != 7 || got.Settings.OnLoopLimit != "fail" {
+		t.Errorf("settings round trip = %+v", got.Settings)
 	}
 }
