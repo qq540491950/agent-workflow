@@ -50,16 +50,22 @@ export default function Layout() {
         .catch(() => {});
     };
     refresh();
+    // 防抖:node.* 等高频事件不应逐条触发执行列表拉取
+    let timer: number | undefined;
     const unsub = subscribeEvents((ev) => {
       if (
         ev.type.startsWith("workflow.") ||
         ev.type.startsWith("node.") ||
         ev.type === "human.input_required"
       ) {
-        refresh();
+        if (timer) window.clearTimeout(timer);
+        timer = window.setTimeout(refresh, 200);
       }
     });
-    return unsub;
+    return () => {
+      unsub();
+      if (timer) window.clearTimeout(timer);
+    };
   }, [location.pathname]);
 
   return (
