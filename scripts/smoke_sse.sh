@@ -22,6 +22,7 @@ sleep 1
 head -2 "$OUT" | grep -q ": connected" || { echo "FAIL: missing : connected comment"; kill $CURL_PID 2>/dev/null; exit 1; }
 echo "OK: : connected 立即下发"
 
+# keepalive:空闲连接 16s 内应收到 ": keepalive" 注释行
 # 触发工作流(真实执行产生事件)
 curl -sf -X POST "$BASE/api/workflows/coding-task/run" -H 'Content-Type: application/json' -d '{"task":"sse-e2e"}' >/dev/null
 
@@ -30,7 +31,21 @@ for i in $(seq 1 40); do
   if grep -q "workflow.started" "$OUT" 2>/dev/null; then
     echo "OK: workflow.started 事件经 SSE 送达"
     grep -m1 "node.started" "$OUT" >/dev/null && echo "OK: node.started 事件送达"
-    kill $CURL_PID 2>/dev/null
+    kill $CURL_PID 2>/dev/null; wait $CURL_PID 2>/dev/null
+
+    # keepalive 检查:独立空闲连接,17s 内应收到 ": keepalive"
+    KA_OUT=$(mktemp /tmp/awo-sse-ka-XXXXXX)
+    curl -sN --max-time 17 "$BASE/api/events" > "$KA_OUT" 2>/dev/null &
+    KA_CURL=$!
+    KA_DEADLINE=$((SECONDS + 17))
+    KA_OK=0
+    while [ $SECONDS -lt $KA_DEADLINE ]; do
+      grep -q ": keepalive" "$KA_OUT" 2>/dev/null && { KA_OK=1; break; }
+      sleep 1
+    done
+    kill $KA_CURL 2>/dev/null; wait $KA_CURL 2>/dev/null
+    [ "$KA_OK" = "1" ] || { echo "FAIL: 17s 内未见 keepalive"; exit 1; }
+    echo "OK: keepalive 注释行送达"
     echo "✅ SSE E2E PASS"
     exit 0
   fi
