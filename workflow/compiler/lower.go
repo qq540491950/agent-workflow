@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"sync"
 
 	"github.com/expr-lang/expr"
 	"google.golang.org/adk/agent"
@@ -93,6 +94,27 @@ type RunEnv struct {
 	MaxIterations int
 	// Perms 运行期权限管理器(全局克隆 + 工作流覆盖);nil 时回退全局。
 	Perms RunPermissionChecker
+
+	// execMu 保护 Exec 的节点级写入:parallel 分支由 ADK 并发执行,
+	// 直接写 Exec.CurrentNodeID / Exec.NodeStates 是数据竞争。
+	execMu sync.Mutex
+}
+
+// SetCurrentNode 并发安全地更新当前节点。
+func (e *RunEnv) SetCurrentNode(nodeID string) {
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
+	e.Exec.CurrentNodeID = nodeID
+}
+
+// SetNodeState 并发安全地记录节点状态。
+func (e *RunEnv) SetNodeState(nodeID, state string) {
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
+	if e.Exec.NodeStates == nil {
+		e.Exec.NodeStates = map[string]string{}
+	}
+	e.Exec.NodeStates[nodeID] = state
 }
 
 // RunPermissionChecker 由 runtime 注入的策略检查接口。
@@ -241,8 +263,8 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 
 				st.Set(StatusKey(node.ID), string(model.NodeRunning))
 				st.Set(KeyCurrentNode, node.ID)
-				env.Exec.CurrentNodeID = node.ID
-				env.Exec.NodeStates[node.ID] = string(model.NodeRunning)
+				env.SetCurrentNode(node.ID)
+				env.SetNodeState(node.ID, string(model.NodeRunning))
 				env.Bus.Emit(event.New(event.NodeStarted, env.Exec.ID, node.ID, map[string]any{
 					"node": node.ID, "name": node.Name, "type": string(node.Type),
 				}))
@@ -260,7 +282,7 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 				if raw, err := json.Marshal(outcome); err == nil {
 					st.Set(ResultKey(node.ID), string(raw))
 				}
-				env.Exec.NodeStates[node.ID] = string(outcome.State)
+				env.SetNodeState(node.ID, string(outcome.State))
 
 				switch outcome.State {
 				case model.NodeSuccess:
@@ -269,7 +291,6 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 					}
 					st.Set(KeyStatus, "success")
 					st.Set(KeyOutput, outcome.Output)
-					env.Exec.NodeStates[node.ID] = string(model.NodeSuccess)
 					data := map[string]any{"node": node.ID, "summary": outcome.Summary}
 					if outcome.Decision != "" {
 						data["decision"] = outcome.Decision

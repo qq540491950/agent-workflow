@@ -317,3 +317,116 @@ nodes:
 		t.Fatal("expected validation error for missing agent")
 	}
 }
+
+// TestParallelBranchesRace 验证 parallel → merge 并行分支(回归:
+// 分支并发写 Exec.CurrentNodeID / Exec.NodeStates 曾是无锁数据竞争,
+// 需在 -race 下运行本测试)。
+func TestParallelBranchesRace(t *testing.T) {
+	repoPath := filepath.Join(t.TempDir(), "test.db")
+	repo, err := persistence.Open(repoPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { repo.Close() })
+
+	bus := event.NewBus()
+	bus.KeepHistory = true
+
+	// 三个分支共用同一 Mock 实例,延迟制造时间重叠,放大并发窗口
+	shared := mock.New(mock.Options{
+		ID:   "mock-shared",
+		Name: "Mock Shared",
+		Scripts: map[string]*mock.Script{
+			"plan":    {DelayMS: 40, SummaryTemplate: "安全 OK"},
+			"review":  {DelayMS: 40, SummaryTemplate: "代码 OK"},
+			"execute": {DelayMS: 40, SummaryTemplate: "测试 OK"},
+		},
+	})
+	agents := coreagent.NewRegistry()
+	if err := agents.Register(shared); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	skills := skill.NewRegistry()
+	for _, s := range builtin.All() {
+		if err := skills.Register(s); err != nil {
+			t.Fatalf("register skill: %v", err)
+		}
+	}
+	eng := NewEngine(agents, skills, permission.NewManager(), bus,
+		git.New(t.TempDir()), repo)
+	eng.Perms.Set("mock-shared", permission.Policy{FilesystemRead: true, FilesystemWrite: true})
+
+	yml := `
+version: "1"
+workflow:
+  id: par-race
+  name: Parallel Race
+nodes:
+  - id: fanout
+    name: 并行分发
+    type: parallel
+  - id: sec
+    name: 安全评审
+    type: agent
+    agent: mock-shared
+    mode: plan
+  - id: code
+    name: 代码评审
+    type: agent
+    agent: mock-shared
+    mode: review
+  - id: test
+    name: 测试
+    type: agent
+    agent: mock-shared
+    mode: execute
+  - id: merge
+    name: 汇合
+    type: merge
+  - id: done
+    name: 结束
+    type: skill
+    skill: log
+    args:
+      message: done
+edges:
+  - from: fanout
+    to: sec
+  - from: fanout
+    to: code
+  - from: fanout
+    to: test
+  - from: sec
+    to: merge
+  - from: code
+    to: merge
+  - from: test
+    to: merge
+  - from: merge
+    to: done
+`
+	doc, err := dsl.Parse([]byte(yml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wf := doc.ToModel()
+	if res := eng.Validate(wf); !res.Valid {
+		t.Fatalf("workflow invalid: %+v", res.Errors)
+	}
+
+	exec, err := eng.Start(context.Background(), wf, "并行回归", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	exec = waitForState(t, eng, exec.ID, model.ExecutionCompleted)
+
+	// 三个分支全部成功,汇合后完成
+	for _, id := range []string{"sec", "code", "test", "merge", "done"} {
+		if got := exec.NodeStates[id]; got != string(model.NodeSuccess) {
+			t.Errorf("node %s state = %s, want success", id, got)
+		}
+	}
+	if got := shared.Calls("plan") + shared.Calls("review") + shared.Calls("execute"); got != 3 {
+		t.Errorf("branch calls = %d, want 3", got)
+	}
+}
