@@ -1,0 +1,157 @@
+package api
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	app "agentworkflow/app/application"
+)
+
+func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+	return NewServer(a)
+}
+
+func doReq(t *testing.T, s *Server, method, path, body string) (int, map[string]any, []byte) {
+	t.Helper()
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	raw := w.Body.Bytes()
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	return w.Code, m, raw
+}
+
+// 资源缺失必须 404 + 结构化 code(此前一律 400,仅 body 里带 NOT_FOUND 字样)。
+// 注:DELETE 是幂等语义,删除已不存在的资源返回 200(对 UI 更友好,
+// 避免"已在别处删除"场景误报错),不在此列。
+func TestNotFoundSemantics(t *testing.T) {
+	s := newTestServer(t)
+
+	cases := []struct{ method, path, body string }{
+		{http.MethodGet, "/api/workflows/ghost", ""},
+		{http.MethodPost, "/api/workflows/ghost/duplicate", ""},
+		{http.MethodGet, "/api/executions/ghost", ""},
+		{http.MethodPost, "/api/executions/ghost/retry", "{}"},
+		{http.MethodPost, "/api/executions/ghost/input", "{}"},
+		{http.MethodPost, "/api/workflows/ghost/run", `{"task":"t"}`},
+	}
+	for _, c := range cases {
+		code, body, _ := doReq(t, s, c.method, c.path, c.body)
+		if code != http.StatusNotFound {
+			t.Errorf("%s %s → %d, want 404 (body=%v)", c.method, c.path, code, body)
+		}
+		if body["code"] != "NOT_FOUND" {
+			t.Errorf("%s %s → code=%v, want NOT_FOUND", c.method, c.path, body["code"])
+		}
+	}
+
+	// 幂等删除:不存在的资源同样返回 200
+	for _, path := range []string{"/api/workflows/ghost", "/api/executions/ghost"} {
+		code, _, _ := doReq(t, s, http.MethodDelete, path, "")
+		if code != http.StatusOK {
+			t.Errorf("DELETE %s → %d, want 200(幂等)", path, code)
+		}
+	}
+}
+
+// 校验错误 400 + WORKFLOW_INVALID 结构化码。
+func TestValidationSemantics(t *testing.T) {
+	s := newTestServer(t)
+	bad := `{"id":"wf-bad","name":"Bad","nodes":[{"id":"a","type":"agent","agent":"no-such","config":{}}],"edges":[]}`
+	code, body, _ := doReq(t, s, http.MethodPost, "/api/workflows", bad)
+	if code != http.StatusBadRequest {
+		t.Fatalf("invalid workflow → %d, want 400", code)
+	}
+	if body["code"] != "WORKFLOW_INVALID" {
+		t.Errorf("code = %v, want WORKFLOW_INVALID", body["code"])
+	}
+}
+
+// 列表契约:必须返回 JSON 数组(前端 asArray 防御的源头契约)。
+func TestListContractsReturnArrays(t *testing.T) {
+	s := newTestServer(t)
+	for _, path := range []string{"/api/workflows", "/api/executions", "/api/stats", "/api/agents", "/api/skills"} {
+		_, _, raw := doReq(t, s, http.MethodGet, path, "")
+		if len(raw) == 0 || raw[0] != '[' {
+			t.Errorf("GET %s → 非 JSON 数组: %.40s", path, raw)
+		}
+	}
+}
+
+// Agent 配置:GET 返回掩码值,PUT *** 合并,PUT 空串删除。
+func TestAgentConfigEndpointMasking(t *testing.T) {
+	s := newTestServer(t)
+
+	code, _, _ := doReq(t, s, http.MethodPut, "/api/agents/claude-code/config",
+		`{"model":"m1","env":{"TOK":"sk-live"}}`)
+	if code != http.StatusOK {
+		t.Fatalf("PUT config → %d", code)
+	}
+
+	_, body, _ := doReq(t, s, http.MethodGet, "/api/agents/claude-code/config", "")
+	env, _ := body["env"].(map[string]any)
+	if env["TOK"] != "***" {
+		t.Errorf("GET config env.TOK = %v, want 掩码", env["TOK"])
+	}
+
+	// *** 保留原值 + 空串删除
+	code, _, _ = doReq(t, s, http.MethodPut, "/api/agents/claude-code/config",
+		`{"model":"m2","env":{"TOK":"***","NEW":"n1"}}`)
+	if code != http.StatusOK {
+		t.Fatalf("PUT config 2 → %d", code)
+	}
+	_, body, _ = doReq(t, s, http.MethodGet, "/api/agents/claude-code/config", "")
+	env, _ = body["env"].(map[string]any)
+	if env["TOK"] != "***" || env["NEW"] != "***" || body["model"] != "m2" {
+		t.Errorf("config after merge = %v", body)
+	}
+}
+
+// Skill 启停端点真实生效。
+func TestSkillEnableEndpoint(t *testing.T) {
+	s := newTestServer(t)
+	code, _, _ := doReq(t, s, http.MethodPost, "/api/skills/log/enable", `{"enabled":false}`)
+	if code != http.StatusOK {
+		t.Fatalf("disable → %d", code)
+	}
+	_, _, raw := doReq(t, s, http.MethodGet, "/api/skills", "")
+	var arr []map[string]any
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatalf("skills not an array: %v (%.40s)", err, raw)
+	}
+	for _, m := range arr {
+		if m["id"] == "log" {
+			if m["enabled"] != false {
+				t.Errorf("log skill = %v, want disabled", m)
+			}
+		}
+	}
+}
+
+// 健康与版本端点。
+func TestHealthAndVersion(t *testing.T) {
+	s := newTestServer(t)
+	code, body, _ := doReq(t, s, http.MethodGet, "/api/health", "")
+	if code != http.StatusOK || body["status"] != "ok" {
+		t.Errorf("health = %d %v", code, body)
+	}
+	code, body, _ = doReq(t, s, http.MethodGet, "/api/version", "")
+	if code != http.StatusOK || body["version"] == "" {
+		t.Errorf("version = %d %v", code, body)
+	}
+}

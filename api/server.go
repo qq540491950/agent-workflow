@@ -5,6 +5,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -339,8 +340,23 @@ func (s *Server) wrap(h func(http.ResponseWriter, *http.Request) error) http.Han
 		w.Header().Set("Content-Type", "application/json")
 		if err := h(w, r); err != nil {
 			logx.Warn("http error", "path", r.URL.Path, "error", err)
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			// 结构化错误映射为语义化 HTTP 状态码(资源缺失 404、权限 403,
+			// 其余含校验错误 400);body 保留 error 文本并附带 code/kind
+			status := http.StatusBadRequest
+			body := map[string]any{"error": err.Error()}
+			var se *model.Error
+			if errors.As(err, &se) {
+				body["code"] = se.Code
+				body["kind"] = string(se.Kind)
+				switch {
+				case se.Code == "NOT_FOUND":
+					status = http.StatusNotFound
+				case se.Kind == model.KindPermissionError:
+					status = http.StatusForbidden
+				}
+			}
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(body)
 		}
 	}
 }
