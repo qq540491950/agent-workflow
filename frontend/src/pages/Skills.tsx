@@ -57,7 +57,11 @@ export default function Skills() {
                   <Switch
                     checked={s.enabled}
                     onCheckedChange={async (v) => {
-                      await api.setSkillEnabled(s.id, v);
+                      try {
+                        await api.setSkillEnabled(s.id, v);
+                      } catch (e) {
+                        toast.error((e as Error).message);
+                      }
                       refresh();
                     }}
                   />
