@@ -5,6 +5,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -153,5 +156,64 @@ func TestHealthAndVersion(t *testing.T) {
 	code, body, _ = doReq(t, s, http.MethodGet, "/api/version", "")
 	if code != http.StatusOK || body["version"] == "" {
 		t.Errorf("version = %d %v", code, body)
+	}
+}
+
+// Git 路由:真实临时仓库上的 status/diff/log/commit 契约。
+func TestGitRoutes(t *testing.T) {
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+
+	// 初始化临时仓库并指定为工作目录
+	repoDir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "f.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.GitSvc.WorkingDir = repoDir
+
+	s := NewServer(a)
+
+	// status:未提交文件出现在 untracked
+	code, body, _ := doReq(t, s, http.MethodGet, "/api/git/status", "")
+	if code != http.StatusOK {
+		t.Fatalf("git status → %d", code)
+	}
+	untracked, _ := body["untracked"].([]any)
+	found := false
+	for _, u := range untracked {
+		if u == "f.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("untracked = %v, want f.txt", untracked)
+	}
+
+	// commit:空 message 拒绝
+	code, _, _ = doReq(t, s, http.MethodPost, "/api/git/commit", `{"message":"  "}`)
+	if code != http.StatusBadRequest {
+		t.Errorf("empty commit → %d, want 400", code)
+	}
+
+	// commit:成功
+	code, body, _ = doReq(t, s, http.MethodPost, "/api/git/commit", `{"message":"test commit"}`)
+	if code != http.StatusOK {
+		t.Fatalf("commit → %d (%v)", code, body)
+	}
+
+	// log:至少一条
+	code, _, raw := doReq(t, s, http.MethodGet, "/api/git/log?limit=5", "")
+	if code != http.StatusOK || len(raw) < 2 {
+		t.Errorf("git log → %d %.40s", code, raw)
 	}
 }
