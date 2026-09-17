@@ -305,6 +305,8 @@ func boolOf(v any) bool {
 }
 
 // runSubworkflow 同步执行嵌套工作流。
+// 等待循环感知父执行的取消:父被取消时级联取消子执行并立即返回,
+// 而不是让父 goroutine 在轮询里阻塞最长 10 分钟。
 func (a *App) runSubworkflow(ctx context.Context, workflowID, task string, input map[string]any) (map[string]any, error) {
 	wf, err := a.Repo.GetWorkflow(workflowID)
 	if err != nil {
@@ -316,6 +318,13 @@ func (a *App) runSubworkflow(ctx context.Context, workflowID, task string, input
 	}
 	// 等待完成(子工作流为阻塞执行)
 	for i := 0; i < 6000; i++ { // 最多 10 分钟
+		select {
+		case <-ctx.Done():
+			// 父执行已取消:级联取消子执行
+			_ = a.Engine.Cancel(context.Background(), exec.ID)
+			return nil, model.NewError(model.KindCancelledError, "SUBWORKFLOW_CANCELLED", "父执行取消,子工作流已中止")
+		case <-time.After(100 * time.Millisecond):
+		}
 		e, err := a.Repo.GetExecution(exec.ID)
 		if err == nil {
 			switch e.State {
@@ -325,12 +334,9 @@ func (a *App) runSubworkflow(ctx context.Context, workflowID, task string, input
 				return nil, fmt.Errorf("子工作流失败: %s", e.Error)
 			}
 		}
-		sleepMs(100)
 	}
 	return nil, fmt.Errorf("子工作流超时")
 }
-
-func sleepMs(ms int) { time.Sleep(time.Duration(ms) * time.Millisecond) }
 
 func randHex(n int) string {
 	b := make([]byte, n)

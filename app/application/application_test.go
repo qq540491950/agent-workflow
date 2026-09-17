@@ -420,3 +420,68 @@ edges: []
 	}
 	t.Fatal("父执行未按预期失败")
 }
+
+// 回归:取消父执行时,阻塞在子工作流上的父 goroutine 曾不感知取消
+// (轮询最长阻塞 10 分钟)且子执行继续运行;现应级联取消并快速返回。
+func TestSubworkflowCancelPropagation(t *testing.T) {
+	a := newTestApp(t)
+	// 子工作流:以人工节点开头(必然 WAITING_USER 长挂)
+	if _, err := a.Workflows.ImportYAML(`
+version: "1"
+workflow:
+  id: slow-child
+  name: Slow Child
+nodes:
+  - id: gate
+    type: human
+    prompt: "等待中"
+    responses: ["approve"]
+edges: []
+`); err != nil {
+		t.Fatalf("import child: %v", err)
+	}
+	if _, err := a.Workflows.ImportYAML(`
+version: "1"
+workflow:
+  id: cancel-parent
+  name: Cancel Parent
+nodes:
+  - id: sub
+    type: subworkflow
+    workflow_id: slow-child
+edges: []
+`); err != nil {
+		t.Fatalf("import parent: %v", err)
+	}
+	parent, _ := a.Workflows.Get("cancel-parent")
+	exec, err := a.Engine.Start(context.Background(), parent, "t", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// 等子执行 WAITING_USER(说明父已阻塞在子工作流上)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		kids, _ := a.Repo.ListExecutions("slow-child", 10)
+		if len(kids) > 0 && kids[0].State == model.ExecutionWaitingUser {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 取消父执行
+	if err := a.Engine.Cancel(context.Background(), exec.ID); err != nil {
+		t.Fatalf("cancel parent: %v", err)
+	}
+
+	// 子执行应被级联取消
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		kids, _ := a.Repo.ListExecutions("slow-child", 10)
+		if len(kids) > 0 && kids[0].State == model.ExecutionCancelled {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("子工作流未被级联取消")
+}
