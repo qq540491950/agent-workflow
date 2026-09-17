@@ -36,6 +36,8 @@ export function Info(): $CancellablePromise<$models.SettingsInfo | null> {
 /**
  * RestoreBackup 恢复备份:已存在同 ID 工作流跳过(避免覆盖用户修改),
  * Agent 配置覆盖写入。
+ * 输入统一经 JSON 归一:API/前端路径是 []any + map[string]any,
+ * 进程内路径(ExportBackup 直出)是 []model.Workflow + map[string]json.RawMessage。
  */
 export function RestoreBackup(backup: { [_ in string]?: any } | null): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(283548462, backup);
