@@ -7,6 +7,7 @@ package pi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -113,6 +114,10 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	cmd.Stderr = &stderr
 
 	out, err := cmd.Output()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
+		return parseOutput(out), nil
+	}
 	if err != nil {
 		switch {
 		case cctx.Err() == context.DeadlineExceeded:

@@ -5,6 +5,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -214,6 +215,10 @@ func (s *Service) exec(ctx context.Context, dir string, args []string) (string, 
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
+	// 进程已成功退出、仅孤儿子进程延迟关管道时,输出已完整捕获,不算失败
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
 	if err != nil {
 		gitErr := model.NewError(model.KindGitError, "GIT_COMMAND_FAILED",
 			fmt.Sprintf("git %s 失败: %s", strings.Join(args, " "), strings.TrimSpace(string(out))))

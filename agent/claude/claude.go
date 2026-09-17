@@ -10,6 +10,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -124,6 +125,10 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
+		return a.parseOutput(out)
+	}
 	if err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			return nil, model.NewError(model.KindTimeoutError, "CLAUDE_TIMEOUT",

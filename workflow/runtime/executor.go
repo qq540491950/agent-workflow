@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -329,6 +330,14 @@ func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *m
 		outcome.State = model.NodeFailed
 		outcome.Error = resp.Error
 	}
+	if resp.Status == "WAIT_USER" {
+		// Skill 接口承诺 WAIT_USER:暂停等待用户输入(与人工节点一致)
+		outcome.State = model.NodeWaiting
+		if outcome.Data == nil {
+			outcome.Data = map[string]any{}
+		}
+		outcome.Data["responses"] = []string{"approve", "reject", "continue", "instruction"}
+	}
 	if resp.Decision != "" {
 		outcome.Decision = resp.Decision
 	}
@@ -386,10 +395,18 @@ func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.N
 	cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, shell, "-c", command)
+	// 脚本派生的后台子进程可能持有输出管道:进程组击杀 + WaitDelay
+	// 兜底,保证调用方及时返回(与 Agent 适配器同一策略)
+	coreagent.ConfigureProcess(cmd)
+	cmd.WaitDelay = 5 * time.Second
 	if e.Git.WorkingDir != "" {
 		cmd.Dir = e.Git.WorkingDir
 	}
 	out, err := cmd.CombinedOutput()
+	// 进程已成功退出、仅孤儿子进程延迟关管道时,输出已完整捕获,不算失败
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
 	if err != nil {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error(), Output: string(out)}
 	}
@@ -545,5 +562,3 @@ func (e *Engine) perms(env *compiler.RunEnv) RunPerms {
 type RunPerms interface {
 	Check(agentID string, a permission.Action) error
 }
-
-var _ = strings.TrimSpace
