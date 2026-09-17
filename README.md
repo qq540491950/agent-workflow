@@ -59,7 +59,7 @@ go test ./workflow/... ./agent/... ./skill/... ./persistence/... ./event/... ./t
 # 前端:构建 + vitest
 cd frontend && npm run build && npx vitest run
 
-# 端到端冒烟(服务器模式:REST+SSE+HITL+导出,7 项断言)
+# 端到端冒烟(服务器模式:REST+SSE+HITL+导出+负路径语义,8 项断言)
 ./scripts/smoke.sh
 # SSE 实时流端到端(连接即达 + 执行事件经流送达)
 ./scripts/smoke_sse.sh

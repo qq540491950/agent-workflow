@@ -63,4 +63,14 @@ curl -sf "$BASE/api/executions/$exec2/export" | python3 -c 'import json,sys; d=j
 ev=$(curl -sf "$BASE/api/events/all?limit=10" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 [ "$ev" -ge 10 ] || fail "events = $ev"
 
-echo "✅ SMOKE OK(7 项全部通过)"
+# 8. 负路径语义:缺失资源 404+NOT_FOUND;终态恢复 400+INVALID_RESUME;幂等 DELETE
+code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/workflows/ghost")
+[ "$code" = "404" ] || fail "ghost workflow → $code, want 404"
+curl -s "$BASE/api/workflows/ghost" | grep -q '"code":"NOT_FOUND"' || fail "ghost workflow 缺 NOT_FOUND code"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/executions/$exec2/input" -H 'Content-Type: application/json' -d '{"response":"approve"}')
+[ "$code" = "400" ] || fail "恢复已完成执行 → $code, want 400"
+curl -s -X POST "$BASE/api/executions/$exec2/input" -H 'Content-Type: application/json' -d '{"response":"approve"}' | grep -q 'INVALID_RESUME' || fail "缺 INVALID_RESUME"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$BASE/api/executions/ghost")
+[ "$code" = "200" ] || fail "幂等 DELETE → $code, want 200"
+
+echo "✅ SMOKE OK(8 项全部通过)"
