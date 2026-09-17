@@ -208,7 +208,11 @@ export default function ExecutionMonitor() {
               size="sm"
               className="text-red-500"
               onClick={async () => {
-                await api.cancelExecution(exec.id);
+                try {
+                  await api.cancelExecution(exec.id);
+                } catch (e) {
+                  toast.error((e as Error).message);
+                }
                 refresh();
               }}
             >
@@ -226,9 +230,13 @@ export default function ExecutionMonitor() {
               size="sm"
               variant="outline"
               onClick={async () => {
-                await api.retryExecution(exec.id, false);
-                toast.success("重试失败节点");
-                setTimeout(refresh, 300);
+                try {
+                  await api.retryExecution(exec.id, false);
+                  toast.success("重试失败节点");
+                  setTimeout(refresh, 300);
+                } catch (e) {
+                  toast.error((e as Error).message);
+                }
               }}
             >
               重试失败节点
@@ -237,9 +245,13 @@ export default function ExecutionMonitor() {
               size="sm"
               variant="ghost"
               onClick={async () => {
-                await api.retryExecution(exec.id, true);
-                toast.success("已跳过失败节点");
-                setTimeout(refresh, 300);
+                try {
+                  await api.retryExecution(exec.id, true);
+                  toast.success("已跳过失败节点");
+                  setTimeout(refresh, 300);
+                } catch (e) {
+                  toast.error((e as Error).message);
+                }
               }}
             >
               跳过并继续
