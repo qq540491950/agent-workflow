@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,4 +145,61 @@ edges: []
 	if state := exec.NodeStates["bg"]; state != string(model.NodeSuccess) {
 		t.Errorf("bg state = %s, want success", state)
 	}
+}
+
+// 回归:并发 Resume(双击批准)曾产生两份 goroutine 同时重放同一执行;
+// 数据库级 CAS 保证恰好一个调用方成功。
+func TestConcurrentResumeSingleWinner(t *testing.T) {
+	eng := newMinimalEngine(t, &waitingSkill{})
+	doc, err := dsl.Parse([]byte(`
+version: "1"
+workflow:
+  id: race-resume
+  name: Race Resume
+nodes:
+  - id: confirm
+    type: skill
+    skill: wait-user
+  - id: done
+    type: skill
+    skill: log
+    args:
+      message: done
+edges:
+  - from: confirm
+    to: done
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wf := doc.ToModel()
+	if res := eng.Validate(wf); !res.Valid {
+		t.Fatalf("invalid: %+v", res.Errors)
+	}
+	exec, err := eng.Start(context.Background(), wf, "t", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	exec = waitForState(t, eng, exec.ID, model.ExecutionWaitingUser)
+
+	// 并发发起两路 Resume
+	var mu sync.Mutex
+	wins := 0
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := eng.Resume(context.Background(), exec.ID, map[string]any{"response": "approve"}); err == nil {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("并发 Resume 成功数 = %d, want 1", wins)
+	}
+	waitForState(t, eng, exec.ID, model.ExecutionCompleted)
 }

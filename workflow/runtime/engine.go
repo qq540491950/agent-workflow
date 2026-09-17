@@ -176,6 +176,17 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 		return nil, model.NewError(model.KindStateError, "INVALID_RESUME",
 			fmt.Sprintf("执行 %s 状态为 %s,不能恢复", executionID, exec.State))
 	}
+	// 数据库级 CAS:并发 Resume(如双击批准)只允许一个调用方成功,
+	// 否则同一执行会被两份 goroutine 同时重放
+	ok, err := e.Repo.CasExecutionState(executionID,
+		[]model.ExecutionState{model.ExecutionWaitingUser, model.ExecutionPaused}, model.ExecutionRunning)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, model.NewError(model.KindStateError, "INVALID_RESUME",
+			fmt.Sprintf("执行 %s 正在被恢复或状态已变化", executionID))
+	}
 	e.Bus.Emit(event.New(event.HumanInputReceived, exec.ID, exec.CurrentNodeID, userResponse))
 	if err := e.transition(exec, model.ExecutionRunning); err != nil {
 		return nil, err
@@ -232,6 +243,16 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	nodeID := exec.CurrentNodeID
 	if nodeID == "" {
 		return nil, model.NewError(model.KindStateError, "NO_FAILED_NODE", "无法定位失败节点")
+	}
+	// 数据库级 CAS:并发重试只允许一个调用方成功
+	ok, err := e.Repo.CasExecutionState(executionID,
+		[]model.ExecutionState{model.ExecutionFailed}, model.ExecutionRunning)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, model.NewError(model.KindStateError, "INVALID_RETRY",
+			fmt.Sprintf("执行 %s 正在被重试或状态已变化", executionID))
 	}
 	if skip {
 		exec.StateData[compiler.StatusKey(nodeID)] = string(model.NodeSkipped)

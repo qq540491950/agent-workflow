@@ -463,6 +463,29 @@ func (d *DB) ListDisabledSkills() (map[string]bool, error) {
 	return out, rows.Err()
 }
 
+// CasExecutionState 原子比较并交换执行状态。
+// 当前状态属于 fromStates 时置为 to 并返回 true;否则返回 false。
+// 守卫并发 Resume/Retry:双击"批准"等场景只允许一个调用方成功。
+func (d *DB) CasExecutionState(id string, fromStates []model.ExecutionState, toState model.ExecutionState) (bool, error) {
+	if len(fromStates) == 0 {
+		return false, wrap(fmt.Errorf("persistence: CasExecutionState requires from states"))
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(fromStates)), ",")
+	args := []any{string(toState), id}
+	for _, s := range fromStates {
+		args = append(args, string(s))
+	}
+	res, err := d.sql.Exec(`UPDATE executions SET state=? WHERE id=? AND state IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return false, wrap(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, wrap(err)
+	}
+	return n > 0, nil
+}
+
 // DeleteExecution 级联删除执行及其节点/事件/制品。
 func (d *DB) DeleteExecution(id string) error {
 	tx, err := d.sql.Begin()
