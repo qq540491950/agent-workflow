@@ -89,14 +89,6 @@ func (m *Manager) SaveNodeOutput(mode string, nodeID string, result map[string]a
 	}
 }
 
-// iterationOf 读取当前迭代数。
-func IterationOf(state map[string]any, nodeID string) int {
-	if v, ok := state["iteration"].(int); ok {
-		return v
-	}
-	return 0
-}
-
 func str(v any) string {
 	if s, ok := v.(string); ok {
 		return s
