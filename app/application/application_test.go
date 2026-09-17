@@ -1,9 +1,11 @@
 package application
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"agentworkflow/agent"
 	"agentworkflow/workflow/model"
@@ -298,4 +300,123 @@ func TestSkillEnableDisable(t *testing.T) {
 	if a.Engine.IsSkillDisabled("log") {
 		t.Error("启用未生效")
 	}
+}
+
+// 嵌套工作流集成测试:父工作流的 subworkflow 节点同步等待子工作流完成。
+func TestSubworkflowEndToEnd(t *testing.T) {
+	a := newTestApp(t)
+	// 子工作流:mock plan → log
+	if _, err := a.Workflows.ImportYAML(`
+version: "1"
+workflow:
+  id: child-wf
+  name: Child
+nodes:
+  - id: plan
+    type: agent
+    agent: mock-claude
+    mode: plan
+  - id: log
+    type: skill
+    skill: log
+    args:
+      message: child done
+edges:
+  - from: plan
+    to: log
+`); err != nil {
+		t.Fatalf("import child: %v", err)
+	}
+	// 父工作流:subworkflow → log
+	if _, err := a.Workflows.ImportYAML(`
+version: "1"
+workflow:
+  id: parent-wf
+  name: Parent
+nodes:
+  - id: sub
+    type: subworkflow
+    workflow_id: child-wf
+  - id: after
+    type: skill
+    skill: log
+    args:
+      message: parent done
+edges:
+  - from: sub
+    to: after
+`); err != nil {
+		t.Fatalf("import parent: %v", err)
+	}
+
+	parent, err := a.Workflows.Get("parent-wf")
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	exec, err := a.Engine.Start(context.Background(), parent, "嵌套测试", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// 等待父执行完成(子工作流为阻塞执行)
+	deadline := time.Now().Add(15 * time.Second)
+	var final *model.Execution
+	for time.Now().Before(deadline) {
+		e, err := a.Repo.GetExecution(exec.ID)
+		if err == nil && (e.State == model.ExecutionCompleted || e.State == model.ExecutionFailed) {
+			final = e
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if final == nil {
+		t.Fatal("父执行未在期限内结束")
+	}
+	if final.State != model.ExecutionCompleted {
+		t.Fatalf("父执行状态 = %s (error=%s)", final.State, final.Error)
+	}
+
+	// 子执行已落库且完成
+	children, err := a.Repo.ListExecutions("child-wf", 10)
+	if err != nil || len(children) != 1 {
+		t.Fatalf("子执行记录 = %d, %v; want 1", len(children), err)
+	}
+	if children[0].State != model.ExecutionCompleted {
+		t.Errorf("子执行状态 = %s, want COMPLETED", children[0].State)
+	}
+}
+
+// 引用不存在的子工作流:父执行必须明确失败(而非静默成功)。
+func TestSubworkflowMissingChild(t *testing.T) {
+	a := newTestApp(t)
+	if _, err := a.Workflows.ImportYAML(`
+version: "1"
+workflow:
+  id: orphan-parent
+  name: Orphan Parent
+nodes:
+  - id: sub
+    type: subworkflow
+    workflow_id: no-such-child
+edges: []
+`); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	parent, _ := a.Workflows.Get("orphan-parent")
+	exec, err := a.Engine.Start(context.Background(), parent, "t", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		e, err := a.Repo.GetExecution(exec.ID)
+		if err == nil && e.State == model.ExecutionFailed {
+			if !strings.Contains(e.Error, "不存在") {
+				t.Errorf("error = %q, want 提示子工作流不存在", e.Error)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("父执行未按预期失败")
 }
