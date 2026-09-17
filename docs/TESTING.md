@@ -338,6 +338,11 @@
   所有 UIEvent 永久累积;关闭(事件已实时落库,回放走 API)。✅
 - **#22 logx SetLevel 数据竞争**:运行中替换全局 logger 与并发写日志竞争;
   atomic.Pointer + 并发回归测试。✅
+- **#23 并发 Resume/Retry 双重放**:读-检查-保存非原子,双击批准会并发
+  产生两份 goroutine 重放同一执行;persistence.CasExecutionState 数据库级
+  CAS,并发时恰好一路成功。回归:TestConcurrentResumeSingleWinner。✅
+- **#24 Start 全量重置 Mock**:嵌套工作流启动会把并发运行中的父工作流
+  Mock 决策序列中途清零;按 wf.Nodes 引用过滤,只重置被引用的 Agent。✅
 
 ### 加固与改进
 
@@ -350,6 +355,8 @@
 - 移除未使用依赖 zustand;@wailsio/runtime 精确对齐 Go beta.20。✅
 - 桌面 .app 真机验证:全新数据目录启动,3 个示例工作流经嵌入 FS 种子成功
   (#15 的真机复核)。✅
+- SaveExecution/SaveExecutionNode 原子 upsert;前端组件测试基础设施
+  (jsdom + testing-library)+ StateBadge 8 项。✅
 
 ### 回归汇总(轮次 25 收尾)
 
