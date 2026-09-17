@@ -53,3 +53,7 @@ func Debug(msg string, args ...any) { get().Debug(Mask(msg), args...) }
 func Info(msg string, args ...any)  { get().Info(Mask(msg), args...) }
 func Warn(msg string, args ...any)  { get().Warn(Mask(msg), args...) }
 func Error(msg string, args ...any) { get().Error(Mask(msg), args...) }
+
+// Logger 返回当前 slog.Logger(供 Wails Options.Logger 集成,
+// 使框架内部日志同样经过脱敏与级别控制)。
+func Logger() *slog.Logger { return get() }

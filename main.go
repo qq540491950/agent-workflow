@@ -136,6 +136,8 @@ func runDesktop(app *app.App) {
 	wailsApp = wails.New(wails.Options{
 		Name:        "Agent Workflow Orchestrator",
 		Description: "可配置、可视化、可扩展的多 Agent 工作流编排",
+		// Wails 内部日志走 logx(脱敏 + 级别跟随设置页)
+		Logger: logx.Logger(),
 		Services: []wails.Service{
 			wails.NewService(app.Workflows),
 			wails.NewService(app.Executions),
