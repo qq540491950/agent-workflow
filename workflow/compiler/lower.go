@@ -139,9 +139,9 @@ func (l *lowerer) lower(p *Plan, name string) (agent.Agent, error) {
 	case KindSingle:
 		node, err := l.findNode(p.NodeID)
 		if err != nil {
-			return l.noopAgent(name), nil // 汇合占位节点
+			return l.noopAgent(name) // 汇合占位节点
 		}
-		return l.nodeAgent(node, ""), nil
+		return l.nodeAgent(node, "")
 	case KindSeq:
 		var subs []agent.Agent
 		for i, c := range p.Children {
@@ -169,7 +169,7 @@ func (l *lowerer) lower(p *Plan, name string) (agent.Agent, error) {
 	case KindRoute:
 		return l.routeAgent(p, name)
 	default:
-		return l.noopAgent(name), nil
+		return l.noopAgent(name)
 	}
 }
 
@@ -183,15 +183,14 @@ func (l *lowerer) findNode(id string) (*model.Node, error) {
 }
 
 // noopAgent 什么都不做(汇合占位)。
-func (l *lowerer) noopAgent(name string) agent.Agent {
-	a, _ := agent.New(agent.Config{
+func (l *lowerer) noopAgent(name string) (agent.Agent, error) {
+	return agent.New(agent.Config{
 		Name:        name,
 		Description: "noop",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {}
 		},
 	})
-	return a
 }
 
 // eventYield 构造携带 StateDelta 的事件。
@@ -210,9 +209,9 @@ func escalateEvent(ctx agent.InvocationContext, actions *session.EventActions) *
 
 // nodeAgent 为单个节点创建 ADK 自定义 Agent。
 // Run 内置:中断守卫 / 恢复跳过(已完成节点直接跳过) / 状态机 / 事件发射。
-func (l *lowerer) nodeAgent(node *model.Node, suffix string) agent.Agent {
+func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error) {
 	env := l.env
-	a, err := agent.New(agent.Config{
+	return agent.New(agent.Config{
 		Name:        l.uniqueName("node:" + node.ID + suffix),
 		Description: node.Name,
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -314,11 +313,6 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) agent.Agent {
 			}
 		},
 	})
-	if err != nil {
-		// agent.New 仅在名字为空/子代理重复时失败,这里名字恒非空
-		panic(err)
-	}
-	return a
 }
 
 // routeAgent 编译决策路由:先执行决策节点,再按条件选择出口;
@@ -331,7 +325,10 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 	}
 
 	var subs []agent.Agent
-	firstNode := l.nodeAgent(decisionNode, "")
+	firstNode, err := l.nodeAgent(decisionNode, "")
+	if err != nil {
+		return nil, err
+	}
 	subs = append(subs, firstNode)
 
 	var exitAgents []agent.Agent
@@ -353,8 +350,14 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 		if err != nil {
 			return nil, err
 		}
-		revisit := l.nodeAgent(decisionNode, "#revisit") // 新实例,避免同一 Agent 双父
-		guard := l.loopGuard(p, name)
+		revisit, err := l.nodeAgent(decisionNode, "#revisit") // 新实例,避免同一 Agent 双父
+		if err != nil {
+			return nil, err
+		}
+		guard, err := l.loopGuard(p, name)
+		if err != nil {
+			return nil, err
+		}
 		maxIter := p.Loop.MaxIterations
 		if maxIter <= 0 {
 			maxIter = 5
@@ -362,7 +365,10 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 		// resetter 在每轮循环开始时清除循环体内节点的完成标记,
 		// 使 fix/review 等节点能够真实地重新执行。
 		loopNodeIDs = p.Loop.Body.Flatten()
-		resetter := l.loopResetter(loopNodeIDs, p.Loop.RevisitNodeID, name)
+		resetter, err := l.loopResetter(loopNodeIDs, p.Loop.RevisitNodeID, name)
+		if err != nil {
+			return nil, err
+		}
 		loopAgent, err = loopagent.New(loopagent.Config{
 			AgentConfig: agent.Config{
 				Name:        name + ".loop",
@@ -512,8 +518,8 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 
 // loopResetter 在每轮循环开始时清除循环体节点的完成状态,
 // 让它们能被真实地重新执行(而不是被"已完成跳过"逻辑略过)。
-func (l *lowerer) loopResetter(bodyNodeIDs []string, revisitNodeID, name string) agent.Agent {
-	a, _ := agent.New(agent.Config{
+func (l *lowerer) loopResetter(bodyNodeIDs []string, revisitNodeID, name string) (agent.Agent, error) {
+	return agent.New(agent.Config{
 		Name:        l.uniqueName(name + ".reset"),
 		Description: "循环迭代重置",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -529,10 +535,12 @@ func (l *lowerer) loopResetter(bodyNodeIDs []string, revisitNodeID, name string)
 					st.Set(ResultKey(id), "")
 				}
 				st.Set(KeyDecision, "")
-				// 轮数计数
+				// 轮数计数(值可能经 JSON 往返变成 float64)
 				if n, ok := st.Get(KeyLoopCount); ok {
-					if i, ok := n.(int); ok {
+					if i, ok := IntOfOk(n); ok {
 						st.Set(KeyLoopCount, i+1)
+					} else {
+						st.Set(KeyLoopCount, 1)
 					}
 				} else {
 					st.Set(KeyLoopCount, 1)
@@ -541,12 +549,11 @@ func (l *lowerer) loopResetter(bodyNodeIDs []string, revisitNodeID, name string)
 			}
 		},
 	})
-	return a
 }
 
 // loopGuard 是循环体内的守卫:出口条件成立 → Escalate 退出循环;
 // 检测到连续相同 Review(停滞)→ Escalate 并标记 stuck。
-func (l *lowerer) loopGuard(p *Plan, name string) agent.Agent {
+func (l *lowerer) loopGuard(p *Plan, name string) (agent.Agent, error) {
 	env := l.env
 	var exitConds []string
 	for _, b := range p.Branches {
@@ -556,7 +563,7 @@ func (l *lowerer) loopGuard(p *Plan, name string) agent.Agent {
 	}
 	revisitID := p.Loop.RevisitNodeID
 
-	a, _ := agent.New(agent.Config{
+	return agent.New(agent.Config{
 		Name:        name + ".guard",
 		Description: "循环守卫",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -604,7 +611,6 @@ func (l *lowerer) loopGuard(p *Plan, name string) agent.Agent {
 			}
 		},
 	})
-	return a
 }
 
 func readHistory(st StateAccess, key string) []string {
@@ -695,12 +701,23 @@ func stringOf(st StateAccess, key string) string {
 }
 
 func intOf(st StateAccess, key string) int {
-	if v, ok := st.Get(key); ok {
-		if i, ok := v.(int); ok {
-			return i
-		}
+	v, _ := st.Get(key)
+	i, _ := IntOfOk(v)
+	return i
+}
+
+// IntOfOk 把状态值转换为 int。恢复执行时状态经 JSON 持久化往返,
+// int 会变成 float64,读取必须双类型兼容(executor.go 的 attempt 同理)。
+func IntOfOk(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case float64:
+		return int(n), true
+	case int64:
+		return int(n), true
 	}
-	return 0
+	return 0, false
 }
 
 func isAgentLike(n *model.Node) bool {

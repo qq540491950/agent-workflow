@@ -24,6 +24,7 @@ import (
 	"agentworkflow/contextx"
 	"agentworkflow/event"
 	"agentworkflow/git"
+	"agentworkflow/logx"
 	"agentworkflow/permission"
 	"agentworkflow/persistence"
 	"agentworkflow/skill"
@@ -356,14 +357,24 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 			lastErr = err
 			break
 		}
-		_ = ev
+		if ev != nil {
+			// Escalate 意味着循环退出/失败中断/HITL 暂停,是关键语义信号,
+			// 记录下来便于诊断"正常结束"与"被守卫中断"的区别。
+			if ev.Actions.Escalate {
+				logx.Warn("adk escalate", "execution", exec.ID, "author", ev.Author)
+			} else if ev.IsFinalResponse() {
+				logx.Debug("adk final response", "execution", exec.ID, "author", ev.Author)
+			}
+		}
 		if ctx.Err() != nil {
 			break
 		}
 	}
 
-	// 读取最终状态,同步回 Execution 并持久化(供恢复与 UI 查询)
-	resp, err := sessSvc.Get(ctx, &session.GetRequest{AppName: "agent-workflow", UserID: userID, SessionID: sessionID})
+	// 读取最终状态,同步回 Execution 并持久化(供恢复与 UI 查询)。
+	// 超时/取消路径 ctx 已取消,必须用不取消的派生 ctx,否则必然读取失败。
+	readCtx := context.WithoutCancel(ctx)
+	resp, err := sessSvc.Get(readCtx, &session.GetRequest{AppName: "agent-workflow", UserID: userID, SessionID: sessionID})
 	if err == nil && resp.Session != nil {
 		e.collectResult(exec, resp.Session)
 	} else {
@@ -438,7 +449,8 @@ func (e *Engine) syncNodeStates(exec *model.Execution) {
 		exec.CurrentNodeID = fmt.Sprint(v)
 	}
 	if v, ok := exec.StateData[compiler.KeyLoopCount]; ok {
-		if i, ok := v.(int); ok {
+		// 状态经 JSON 持久化往返,int 已变 float64
+		if i, ok := compiler.IntOfOk(v); ok {
 			exec.Iterations["loop"] = i
 		}
 	}
