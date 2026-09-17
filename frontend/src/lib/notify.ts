@@ -35,8 +35,8 @@ export async function initNotifications() {
   }
   subscribeEvents((ev) => {
     if (Notification.permission !== "granted") return;
-    let title = "";
-    let body = "";
+    let title: string;
+    let body: string;
     switch (ev.type) {
       case "workflow.completed":
         title = "工作流已完成";

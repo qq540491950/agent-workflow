@@ -377,7 +377,7 @@ function DesignerInner() {
   };
   const run = async () => {
     if (!wf) return;
-    let variables: Record<string, unknown> = {};
+    let variables: Record<string, unknown>;
     try {
       variables = JSON.parse(runVars || "{}");
     } catch {

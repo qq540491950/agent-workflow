@@ -106,7 +106,7 @@ export default function Workflows() {
 
   const run = async () => {
     if (!runTarget) return;
-    let variables: Record<string, unknown> = {};
+    let variables: Record<string, unknown>;
     try {
       variables = JSON.parse(runVars || "{}");
     } catch {

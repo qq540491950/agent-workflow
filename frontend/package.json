@@ -7,6 +7,7 @@
     "dev": "node --env-file=.env node_modules/vite/bin/vite.js",
     "build:dev": "tsc && node --env-file=.env node_modules/vite/bin/vite.js build --minify false --mode development",
     "build": "tsc && node --env-file=.env node_modules/vite/bin/vite.js build --mode production",
+    "lint": "eslint .",
     "preview": "node --env-file=.env node_modules/vite/bin/vite.js preview"
   },
   "dependencies": {

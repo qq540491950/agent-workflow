@@ -5,29 +5,29 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "== 1/6 gofmt =="
+echo "== 1/7 gofmt =="
 UNFORMATTED=$(gofmt -l workflow/ agent/ skill/ persistence/ event/ template/ \
 	permission/ git/ contextx/ logx/ api/ app/ main.go 2>/dev/null)
 [ -z "$UNFORMATTED" ] || { echo "未格式化: $UNFORMATTED"; exit 1; }
 echo "OK"
 
-echo "== 2/6 go vet =="
+echo "== 2/7 go vet =="
 go vet ./workflow/... ./agent/... ./skill/... ./persistence/... ./event/... \
 	./template/... ./permission/... ./git/... ./contextx/... ./logx/... ./api/... ./app/... .
 echo "OK"
 
-echo "== 3/6 go test -race =="
+echo "== 3/7 go test -race =="
 go test -count=1 -race ./...
 echo "OK"
 
-echo "== 4/6 前端构建 + vitest =="
-(cd frontend && npm run build >/dev/null && npx vitest run)
+echo "== 4/7 前端 lint + 构建 + vitest ="
+(cd frontend && npm run lint && npm run build >/dev/null && npx vitest run)
 echo "OK"
 
-echo "== 5/6 冒烟:服务器模式 REST+SSE+HITL =="
+echo "== 5/7 冒烟:服务器模式 REST+SSE+HITL =="
 ./scripts/smoke.sh
 
-echo "== 6/6 冒烟:SSE 实时流 =="
+echo "== 6/7 冒烟:SSE 实时流 =="
 ./scripts/smoke_sse.sh
 
 echo ""

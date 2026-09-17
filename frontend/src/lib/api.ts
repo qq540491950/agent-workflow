@@ -61,7 +61,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   const text = await res.text();
-  let data: unknown = undefined;
+  let data: unknown;
   try {
     data = text ? JSON.parse(text) : undefined;
   } catch {

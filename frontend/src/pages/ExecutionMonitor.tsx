@@ -29,6 +29,7 @@ function Timeline({
 }) {
   if (!startedAt || nodes.length === 0) return null;
   const t0 = new Date(startedAt).getTime();
+  // eslint-disable-next-line react-hooks/purity -- 时间线右端 = 当前时刻,渲染时取墙钟是有意行为
   const t1 = finishedAt ? new Date(finishedAt).getTime() : Date.now();
   const span = Math.max(1, t1 - t0);
   const stateColor: Record<string, string> = {
