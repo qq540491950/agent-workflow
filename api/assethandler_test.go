@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	app "agentworkflow/app/application"
 )
 
 // 回归:桌面模式下 AssetHandler 挂载在 Wails AssetServer 的 /api 前缀,
@@ -11,7 +13,12 @@ import (
 // AssetHandler 必须补回前缀,否则 /api/health 等路由 404、
 // 导出/备份下载链接落入 SPA fallback 下载到 HTML。
 func TestAssetHandlerReprefixesStrippedPath(t *testing.T) {
-	s := NewServer(nil) // /api/health 不依赖 app
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+	s := NewServer(a) // /api/health 不依赖 app 状态
 	h := &AssetHandler{Srv: s}
 
 	// 模拟 Wails:请求 /api/health,剥掉 /api 后交给 AssetHandler
