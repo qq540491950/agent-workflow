@@ -379,6 +379,10 @@
   Layout/EventsAudit 实时刷新防抖;Wails 内部日志接入 logx。✅
 - **进程级浸泡**:35 次真实执行(30 串行 + 5 并发)全部 COMPLETED、
   无残留未终态,RSS 19.5MB → 24.5MB(正常区间)。✅
+- 覆盖率快照(`-cover`):event/skill 100%、claude 96%/pi 96%/mock 95%、
+  template 89%/dsl 87%/agent 83%/logx 81%/contextx 77%/permission 66%/api 66%
+  /persistence 58%/git 51%/app 48%/compiler 31%(lower 生成器由 runtime
+  集成测试间接覆盖)。✅
 
 ### 回归汇总(轮次 25 收尾)
 
