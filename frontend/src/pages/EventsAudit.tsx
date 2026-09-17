@@ -47,7 +47,16 @@ export default function EventsAudit() {
 
   useEffect(() => {
     refresh();
-    return subscribeEvents(() => refresh());
+    // 实时事件防抖刷新:agent.output 等高频事件不应逐条触发全量拉取
+    let timer: number | undefined;
+    const unsub = subscribeEvents(() => {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => refresh(), 200);
+    });
+    return () => {
+      unsub();
+      if (timer) window.clearTimeout(timer);
+    };
   }, [refresh]);
 
   return (
