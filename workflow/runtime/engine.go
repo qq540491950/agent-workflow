@@ -229,14 +229,22 @@ func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 		cancel()
 		return nil
 	}
-	exec, err := e.loadExec(executionID)
+	// 非运行路径用 CAS:并发取消只产生一次状态变更与事件
+	ok, err := e.Repo.CasExecutionState(executionID,
+		[]model.ExecutionState{model.ExecutionCreated, model.ExecutionPaused, model.ExecutionWaitingUser},
+		model.ExecutionCancelled)
 	if err != nil {
 		return err
 	}
-	if err := e.transitionAndSave(exec, model.ExecutionCancelled); err != nil {
-		return err
+	if !ok {
+		exec, err := e.loadExec(executionID)
+		if err != nil {
+			return err
+		}
+		return model.NewError(model.KindStateError, "INVALID_TRANSITION",
+			fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, exec.State))
 	}
-	e.Bus.Emit(event.New(event.WorkflowCancelled, exec.ID, exec.CurrentNodeID, nil))
+	e.Bus.Emit(event.New(event.WorkflowCancelled, executionID, "", nil))
 	return nil
 }
 
