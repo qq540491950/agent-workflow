@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"agentworkflow/agent"
 	"agentworkflow/app/application"
@@ -40,7 +42,9 @@ type Server struct {
 }
 
 // NewServer 创建服务器并注册路由。
+// 顺接通 Bus → UI 处理器的桥接(SSE 依赖;幂等,桌面模式重复调用无害)。
 func NewServer(app *application.App) *Server {
+	app.ConnectEvents()
 	s := &Server{app: app, mux: http.NewServeMux()}
 	s.routes()
 	return s
@@ -362,6 +366,8 @@ func (s *Server) wrap(h func(http.ResponseWriter, *http.Request) error) http.Han
 }
 
 // handleSSE 推送实时 UIEvent。
+// 连接建立立即下发响应头 + SSE 注释行:否则 EventSource 在首个事件前
+// 一直处于 CONNECTING 状态;每 15s 发 keepalive 注释防止代理断开空闲连接。
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -371,19 +377,48 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	// 事件(总线 emit goroutine)与 keepalive(本 goroutine)并发写,需互斥;
+	// closed 防止处理器退出后仍有飞行中写入与 finishRequest 竞争
+	var writeMu sync.Mutex
+	closed := false
+	writeSSE := func(payload string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if closed {
+			return
+		}
+		fmt.Fprint(w, payload)
+		flusher.Flush()
+	}
 
 	unsub := s.app.Subscribe(func(ev event.UIEvent) {
 		raw, err := json.Marshal(ev)
 		if err != nil {
 			return
 		}
-		fmt.Fprintf(w, "data: %s\n\n", raw)
-		flusher.Flush()
+		writeSSE("data: " + string(raw) + "\n\n")
 	})
-	defer unsub()
+	defer func() {
+		writeMu.Lock()
+		closed = true
+		writeMu.Unlock()
+		unsub()
+	}()
 
-	// 客户端断开或超时退出
-	<-r.Context().Done()
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepalive.C:
+			writeSSE(": keepalive\n\n")
+		}
+	}
 }
 
 // AssetHandler 返回可挂载到 Wails AssetServer 指定 Route 前缀的处理器。

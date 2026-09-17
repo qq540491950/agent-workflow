@@ -49,6 +49,7 @@ type App struct {
 	DisabledSkills map[string]bool
 	// 供 Wails/SSE 桥接实时事件。
 	eventsMu      sync.RWMutex
+	connectOnce   sync.Once
 	eventHandlers map[int]func(event.UIEvent)
 	nextHandlerID int
 
@@ -351,18 +352,22 @@ func (a *App) Subscribe(h func(event.UIEvent)) func() {
 	}
 }
 
-// ConnectEvents 把总线事件桥接到 UI 处理器(进程内一次调用)。
+// ConnectEvents 把总线事件桥接到 UI 处理器。
+// 幂等:桌面(main)与 HTTP 服务器(api.NewServer)都会调用,只生效一次。
+// 此前仅桌面模式调用,服务器模式的 SSE 客户端收不到任何实时事件。
 func (a *App) ConnectEvents() {
-	a.Bus.Subscribe(func(ev event.UIEvent) {
-		a.eventsMu.RLock()
-		handlers := make([]func(event.UIEvent), 0, len(a.eventHandlers))
-		for _, h := range a.eventHandlers {
-			handlers = append(handlers, h)
-		}
-		a.eventsMu.RUnlock()
-		for _, h := range handlers {
-			h(ev)
-		}
+	a.connectOnce.Do(func() {
+		a.Bus.Subscribe(func(ev event.UIEvent) {
+			a.eventsMu.RLock()
+			handlers := make([]func(event.UIEvent), 0, len(a.eventHandlers))
+			for _, h := range a.eventHandlers {
+				handlers = append(handlers, h)
+			}
+			a.eventsMu.RUnlock()
+			for _, h := range handlers {
+				h(ev)
+			}
+		})
 	})
 }
 
