@@ -78,3 +78,67 @@ func TestEvalConditionIterationAfterRoundTrip(t *testing.T) {
 		t.Error("iteration >= 2 should be true after JSON round trip (loop count preserved)")
 	}
 }
+
+// matchBranch:先匹配有条件分支,无条件分支仅作兜底;全不匹配返回 false。
+func TestMatchBranch(t *testing.T) {
+	l := &lowerer{env: &RunEnv{Vars: map[string]any{}}}
+	branches := []RouteBranch{
+		{Condition: `decision == "APPROVED"`},
+		{Condition: `decision == "REJECTED"`},
+		{},
+	}
+
+	st := &fakeState{data: map[string]any{KeyDecision: "REJECTED"}}
+	idx, ok := l.matchBranch(branches, st)
+	if !ok || idx != 1 {
+		t.Fatalf("REJECTED → idx=%d ok=%v, want 1 true", idx, ok)
+	}
+
+	st = &fakeState{data: map[string]any{KeyDecision: "APPROVED"}}
+	idx, ok = l.matchBranch(branches, st)
+	if !ok || idx != 0 {
+		t.Fatalf("APPROVED → idx=%d ok=%v, want 0 true", idx, ok)
+	}
+
+	// 未知决策:条件全不成立 → 兜底无条件分支
+	st = &fakeState{data: map[string]any{KeyDecision: "WHATEVER"}}
+	idx, ok = l.matchBranch(branches, st)
+	if !ok || idx != 2 {
+		t.Fatalf("fallback → idx=%d ok=%v, want 2 true", idx, ok)
+	}
+}
+
+// EvalCondition 支持 decision/status/output 字符串比较与 iteration 数值比较。
+func TestEvalConditionVariants(t *testing.T) {
+	st := &fakeState{data: map[string]any{
+		KeyDecision:  "APPROVED",
+		KeyStatus:    "success",
+		KeyOutput:    "done",
+		KeyLoopCount: float64(3),
+	}}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`decision == "APPROVED"`, true},
+		{`decision != "REJECTED"`, true},
+		{`status == "success" && iteration >= 2`, true},
+		{`output contains "on"`, true},
+		{`iteration > 5`, false},
+	}
+	for _, c := range cases {
+		got, err := EvalCondition(c.expr, st, nil)
+		if err != nil {
+			t.Fatalf("eval %q: %v", c.expr, err)
+		}
+		if got != c.want {
+			t.Errorf("eval %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+	// 变量注入
+	st2 := &fakeState{data: map[string]any{}}
+	got, err := EvalCondition(`variables.level == "high"`, st2, map[string]any{"level": "high"})
+	if err != nil || !got {
+		t.Errorf("variables condition = %v, %v", got, err)
+	}
+}
