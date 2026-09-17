@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,7 +61,9 @@ type App struct {
 }
 
 // NewApp 初始化应用(打开数据库、注册 Agent/Skill、恢复执行)。
-func NewApp(dataDir string) (*App, error) {
+// examples 为示例工作流目录的 FS(通常由 main 包 go:embed 提供,
+// 打包后的 .app 从任意 CWD 启动都能种子;传 nil 跳过种子)。
+func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建数据目录失败: %w", err)
 	}
@@ -137,7 +140,12 @@ func NewApp(dataDir string) (*App, error) {
 	}
 
 	// 首次启动:导入示例工作流
-	app.seedExamples()
+	if examples != nil {
+		sub, err := fs.Sub(examples, "workflows/examples")
+		if err == nil {
+			app.seedExamples(sub)
+		}
+	}
 
 	logx.Info("应用初始化完成", "data_dir", dataDir)
 	return app, nil
@@ -358,9 +366,9 @@ func (a *App) ConnectEvents() {
 }
 
 // seedExamples 导入示例工作流(按示例文件的工作流 ID 补种缺失的)。
-func (a *App) seedExamples() {
-	dir := "workflows/examples"
-	entries, err := os.ReadDir(dir)
+// 使用嵌入 FS 而非磁盘相对路径:打包后的应用从任意工作目录启动都有效。
+func (a *App) seedExamples(dir fs.FS) {
+	entries, err := fs.ReadDir(dir, ".")
 	if err != nil {
 		return
 	}
@@ -368,7 +376,7 @@ func (a *App) seedExamples() {
 		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".yaml") && !strings.HasSuffix(entry.Name(), ".yml")) {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		raw, err := fs.ReadFile(dir, entry.Name())
 		if err != nil {
 			continue
 		}
@@ -849,45 +857,47 @@ func (s *SettingsService) ExportBackup() (map[string]any, error) {
 
 // RestoreBackup 恢复备份:已存在同 ID 工作流跳过(避免覆盖用户修改),
 // Agent 配置覆盖写入。
+// 输入统一经 JSON 归一:API/前端路径是 []any + map[string]any,
+// 进程内路径(ExportBackup 直出)是 []model.Workflow + map[string]json.RawMessage。
 func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, error) {
+	b, err := json.Marshal(backup)
+	if err != nil {
+		return nil, fmt.Errorf("备份格式无效: %w", err)
+	}
+	var norm struct {
+		Workflows    []json.RawMessage          `json:"workflows"`
+		AgentConfigs map[string]json.RawMessage `json:"agent_configs"`
+	}
+	if err := json.Unmarshal(b, &norm); err != nil {
+		return nil, fmt.Errorf("备份格式无效: %w", err)
+	}
+
 	restoredWf, skipped := 0, 0
-	if rawWfs, ok := backup["workflows"].([]any); ok {
-		for _, raw := range rawWfs {
-			b, err := json.Marshal(raw)
-			if err != nil {
-				continue
-			}
-			wf := model.Workflow{}
-			if err := json.Unmarshal(b, &wf); err != nil || wf.ID == "" {
-				continue
-			}
-			if existing, err := s.app.Repo.GetWorkflow(wf.ID); err == nil && existing != nil {
-				skipped++
-				continue
-			}
-			wf.Version = 0
-			if err := s.app.Repo.SaveWorkflow(&wf, false); err != nil {
-				return nil, err
-			}
-			restoredWf++
+	for _, raw := range norm.Workflows {
+		wf := model.Workflow{}
+		if err := json.Unmarshal(raw, &wf); err != nil || wf.ID == "" {
+			continue
 		}
+		if existing, err := s.app.Repo.GetWorkflow(wf.ID); err == nil && existing != nil {
+			skipped++
+			continue
+		}
+		wf.Version = 0
+		if err := s.app.Repo.SaveWorkflow(&wf, false); err != nil {
+			return nil, err
+		}
+		restoredWf++
 	}
 	restoredCfg := 0
-	if cfgs, ok := backup["agent_configs"].(map[string]any); ok {
-		for id, raw := range cfgs {
-			b, err := json.Marshal(raw)
-			if err != nil {
-				continue
-			}
-			if err := s.app.Repo.SaveAgentConfig(id, b); err != nil {
-				return nil, err
-			}
-			cfg := agent.AgentConfig{}
-			if json.Unmarshal(b, &cfg) == nil {
-				_ = s.app.applyAgentConfig(id, cfg)
-			}
-			restoredCfg++
+	for id, raw := range norm.AgentConfigs {
+		if err := s.app.Repo.SaveAgentConfig(id, raw); err != nil {
+			return nil, err
 		}
+		cfg := agent.AgentConfig{}
+		if json.Unmarshal(raw, &cfg) == nil {
+			_ = s.app.applyAgentConfig(id, cfg)
+		}
+		restoredCfg++
 	}
 	return map[string]any{"workflows_restored": restoredWf, "workflows_skipped": skipped, "agent_configs_restored": restoredCfg}, nil
 }

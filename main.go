@@ -32,6 +32,9 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+//go:embed all:workflows/examples
+var examplesFS embed.FS
+
 func main() {
 	serverMode := flag.Bool("server", false, "以 HTTP 服务器模式运行(无 GUI)")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP 监听地址")
@@ -51,7 +54,7 @@ func main() {
 		dir = filepath.Join(base, "agent-workflow")
 	}
 
-	app, err := app.NewApp(dir)
+	app, err := app.NewApp(dir, examplesFS)
 	if err != nil {
 		logx.Error("应用初始化失败", "error", err)
 		os.Exit(1)
