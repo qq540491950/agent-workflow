@@ -396,7 +396,12 @@ SQLite(workflows / versions / executions / nodes / events / artifacts)</div>
   过程中发现并修复 6 个 Bug,每次修复独立提交 git。
   可重复执行的冒烟脚本:<code>scripts/smoke.sh</code>(健康检查 / 示例种子 /
   正常闭环 / 循环保护 / HITL 恢复 / 记录导出 / 事件流 / 负路径语义,8 项断言)
-  与 <code>scripts/smoke_sse.sh</code>(SSE 实时流端到端,3 项断言)。
+  与 <code>scripts/smoke_sse.sh</code>(SSE 实时流端到端,4 项断言)。
+  轮次 24-25:官方资料对照审计(ADK Go v1.7.0 / Wails v3 beta.20)驱动
+  的可靠性强化 —— 修复数据竞争 ×3、孤儿进程阻塞 ×2、SSE 未接通、
+  恢复后循环计数丢失、桌面下载断链、双开写库、种子路径、备份恢复等
+  20 项缺陷;新增 Go/前端测试基建、系统原生通知、单实例防双开;
+  一键门禁 <code>scripts/verify.sh</code>。
   详细记录见仓库 <code>docs/TESTING.md</code>;本页全部截图即视觉测试实证。</p>
 <table>
   <tr><th>轮次</th><th>类型</th><th>结果</th><th>修复</th></tr>
