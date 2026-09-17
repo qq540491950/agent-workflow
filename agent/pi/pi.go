@@ -94,6 +94,10 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	}
 
 	cmd := exec.CommandContext(cctx, a.cfg.Bin, args...)
+	// 取消/超时击杀整个进程组;WaitDelay 兜底关闭遗留管道,
+	// 保证孤儿进程不会让调用方阻塞在 Output() 上。
+	coreagent.ConfigureProcess(cmd)
+	cmd.WaitDelay = 5 * time.Second
 	if req.WorkingDir != "" {
 		cmd.Dir = req.WorkingDir
 	}
