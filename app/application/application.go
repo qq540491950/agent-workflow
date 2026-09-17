@@ -71,8 +71,9 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 注意:生产总线不保留事件历史(无消费者,长期运行会无界增长);
+	// 事件已实时持久化 SQLite,回放走 /api/executions/{id}/events。
 	bus := event.NewBus()
-	bus.KeepHistory = true
 
 	agents := agent.NewRegistry()
 	skills := skill.NewRegistry()

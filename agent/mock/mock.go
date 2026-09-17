@@ -146,8 +146,12 @@ func (a *Agent) Execute(ctx context.Context, req agent.AgentRequest) (*agent.Age
 	}
 
 	iter := 0
-	if v, ok := req.Context["iteration"].(int); ok {
+	// iteration 可能经 JSON 持久化往返变成 float64
+	switch v := req.Context["iteration"].(type) {
+	case int:
 		iter = v
+	case float64:
+		iter = int(v)
 	}
 	resp.Summary = render(script.SummaryTemplate, req.Task, iter, call+1)
 	if resp.Summary == "" {

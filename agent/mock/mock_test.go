@@ -137,3 +137,16 @@ func TestConcurrentCalls(t *testing.T) {
 		t.Errorf("Calls = %d, want 50", a.Calls("review"))
 	}
 }
+
+// 回归:iteration 经 JSON 持久化往返变 float64,模板 {iteration} 曾渲染 0。
+func TestTemplateIterationFloat64(t *testing.T) {
+	a := New(Options{Scripts: map[string]*Script{
+		"review": {SummaryTemplate: "iter={iteration}"},
+	}})
+	resp, _ := a.Execute(context.Background(), agent.AgentRequest{
+		Mode: "review", Context: map[string]any{"iteration": float64(3)},
+	})
+	if resp.Summary != "iter=3" {
+		t.Errorf("summary = %q, want iter=3", resp.Summary)
+	}
+}
