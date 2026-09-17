@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"runtime"
 	"path/filepath"
 	"testing"
 	"time"
@@ -428,5 +429,34 @@ edges:
 	}
 	if got := shared.Calls("plan") + shared.Calls("review") + shared.Calls("execute"); got != 3 {
 		t.Errorf("branch calls = %d, want 3", got)
+	}
+}
+
+// 回归:连续多次执行后 goroutine 数必须回落(streamAgentOutput 定时器、
+// 取消协程等曾存在泄漏风险);执行完成后的基线允许少量常驻协程。
+func TestNoGoroutineLeakAcrossExecutions(t *testing.T) {
+	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionApproved})
+	wf := loadWf(t, f.engine, loopWorkflowYAML)
+
+	// 预热一次,让惰性初始化的协程(replector/连接池)稳定
+	exec, err := f.engine.Start(context.Background(), wf, "warmup", nil)
+	if err != nil {
+		t.Fatalf("start warmup: %v", err)
+	}
+	waitForState(t, f.engine, exec.ID, model.ExecutionCompleted)
+	time.Sleep(300 * time.Millisecond)
+	base := runtime.NumGoroutine()
+
+	for i := 0; i < 20; i++ {
+		exec, err := f.engine.Start(context.Background(), wf, "leak-check", nil)
+		if err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		waitForState(t, f.engine, exec.ID, model.ExecutionCompleted)
+	}
+	time.Sleep(500 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > base+5 {
+		t.Fatalf("goroutine 泄漏: 基线 %d → %d (+%d)", base, after, after-base)
 	}
 }
