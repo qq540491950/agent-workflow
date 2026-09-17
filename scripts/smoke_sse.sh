@@ -31,7 +31,7 @@ for i in $(seq 1 40); do
   if grep -q "workflow.started" "$OUT" 2>/dev/null; then
     echo "OK: workflow.started 事件经 SSE 送达"
     grep -m1 "node.started" "$OUT" >/dev/null && echo "OK: node.started 事件送达"
-    kill $CURL_PID 2>/dev/null; wait $CURL_PID 2>/dev/null
+    kill $CURL_PID 2>/dev/null || true; wait $CURL_PID 2>/dev/null || true
 
     # keepalive 检查:独立空闲连接,17s 内应收到 ": keepalive"
     KA_OUT=$(mktemp /tmp/awo-sse-ka-XXXXXX)
@@ -43,7 +43,7 @@ for i in $(seq 1 40); do
       grep -q ": keepalive" "$KA_OUT" 2>/dev/null && { KA_OK=1; break; }
       sleep 1
     done
-    kill $KA_CURL 2>/dev/null; wait $KA_CURL 2>/dev/null
+    kill $KA_CURL 2>/dev/null || true; wait $KA_CURL 2>/dev/null || true
     [ "$KA_OK" = "1" ] || { echo "FAIL: 17s 内未见 keepalive"; exit 1; }
     echo "OK: keepalive 注释行送达"
     echo "✅ SSE E2E PASS"
