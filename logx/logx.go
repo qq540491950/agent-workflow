@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 )
 
 // 敏感键名模式(忽略大小写):key=value / key: value / "key": "value",
@@ -19,11 +20,18 @@ func Mask(s string) string {
 	return sensitivePattern.ReplaceAllString(s, `${1}***`)
 }
 
-var logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-	Level: slog.LevelInfo,
-}))
+var logger atomic.Pointer[slog.Logger]
+
+func init() {
+	logger.Store(newLogger(slog.LevelInfo))
+}
+
+func newLogger(level slog.Level) *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+}
 
 // SetLevel 控制日志级别(debug/info/warn/error)。
+// 运行中可被设置页调用,用原子指针替换避免与并发写日志竞争。
 func SetLevel(level string) {
 	var l slog.Level
 	switch strings.ToLower(level) {
@@ -36,10 +44,12 @@ func SetLevel(level string) {
 	default:
 		l = slog.LevelInfo
 	}
-	logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
+	logger.Store(newLogger(l))
 }
 
-func Debug(msg string, args ...any) { logger.Debug(Mask(msg), args...) }
-func Info(msg string, args ...any)  { logger.Info(Mask(msg), args...) }
-func Warn(msg string, args ...any)  { logger.Warn(Mask(msg), args...) }
-func Error(msg string, args ...any) { logger.Error(Mask(msg), args...) }
+func get() *slog.Logger { return logger.Load() }
+
+func Debug(msg string, args ...any) { get().Debug(Mask(msg), args...) }
+func Info(msg string, args ...any)  { get().Info(Mask(msg), args...) }
+func Warn(msg string, args ...any)  { get().Warn(Mask(msg), args...) }
+func Error(msg string, args ...any) { get().Error(Mask(msg), args...) }
