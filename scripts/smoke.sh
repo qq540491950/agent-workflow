@@ -73,4 +73,23 @@ curl -s -X POST "$BASE/api/executions/$exec2/input" -H 'Content-Type: applicatio
 code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$BASE/api/executions/ghost")
 [ "$code" = "200" ] || fail "幂等 DELETE → $code, want 200"
 
-echo "✅ SMOKE OK(8 项全部通过)"
+# 9. 失败重试/跳过:禁用 submit 技能 → FAILED → 跳过重试 → COMPLETED → 重新启用
+curl -sf -X POST "$BASE/api/skills/submit/enable" -H 'Content-Type: application/json' -d '{"enabled":false}' >/dev/null
+EXEC3=$(curl -sf -X POST "$BASE/api/workflows/coding-task/run" -H 'Content-Type: application/json' -d '{"task":"smoke 失败重试"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+STATE3=""
+for i in $(seq 1 60); do
+  STATE3=$(curl -sf "$BASE/api/executions/$EXEC3" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+  [ "$STATE3" = "FAILED" ] && break
+  sleep 0.5
+done
+[ "$STATE3" = "FAILED" ] || fail "禁用 submit 后未失败 state=$STATE3"
+curl -sf -X POST "$BASE/api/executions/$EXEC3/retry" -H 'Content-Type: application/json' -d '{"skip":true}' >/dev/null
+for i in $(seq 1 60); do
+  STATE3=$(curl -sf "$BASE/api/executions/$EXEC3" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+  [ "$STATE3" = "COMPLETED" ] && break
+  sleep 0.5
+done
+[ "$STATE3" = "COMPLETED" ] || fail "跳过重试后 state=$STATE3"
+curl -sf -X POST "$BASE/api/skills/submit/enable" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
+
+echo "✅ SMOKE OK(9 项全部通过)"
