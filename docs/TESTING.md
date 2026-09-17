@@ -247,6 +247,71 @@
 - 边界语义复查:运行不存在工作流 / 恢复 COMPLETED / 删除不存在记录 / 空 commit /
   空工作流校验 / 非法重试目标 —— 全部返回明确结构化错误(NOT_FOUND / INVALID_RESUME / 参数校验)。✅
 
+---
+
+## 轮次 24:权威资料对照审计与可靠性强化(ADK v1.7.0 / Wails v3 beta.20)
+
+> 方法:并行开展两路**官方资料对照审计**(ADK Go v1.7.0 源码 + adk.dev 官方文档;
+> Wails v3 beta.20 源码 + v3.wails.io 官方文档),与实现逐条对照,产出改进
+> backlog 后按价值排序逐项"实现 → 测试 → 提交"。全程 10 个提交,每项独立回归。
+
+### 测试盲区补齐(需求 §30)
+
+- 新增 skill 注册表、skill/builtin、event 总线(并发 -race)、mock agent
+  (决策序列/Reset/模板/取消)、claude/pi 适配器(假 CLI 真进程:超时/取消/
+  环境合并/模型传递/结构化解析/权限前置)测试。✅
+- 前端 vitest 基础设施 + api.ts 12 项测试(双模式探测竞速与缓存、asArray
+  防御、HTTP 错误提取、SPA fallback 回退、SSE 分发/退订)。✅
+- application 服务层 8 项测试(掩码合并语义、备份恢复往返、复制/导入/启停)。✅
+
+### 修复的 Bug(#9-#16)
+
+- **#9 孤儿进程阻塞**:exec.CommandContext 默认只杀直接子进程,CLI Agent
+  派生的进程持有 stdout 管道,超时后调用方多等 4s+(实测)。Unix 下
+  Setpgid 进程组击杀 + cmd.WaitDelay 兜底(Windows);三平台交叉编译。✅
+- **#10 恢复后循环计数丢失**(ADK 审计):计数经 JSON 持久化往返变 float64,
+  loopResetter/syncNodeStates 只断言 int → Resume 后计数回落,过早触发循环
+  保护。新增 compiler.IntOfOk 双类型兼容 + 回归测试。✅
+- **#11 超时路径读会话必失败**(ADK 审计):超时/取消后用已取消的 ctx 调
+  sessSvc.Get,必然落入兜底分支;改用 context.WithoutCancel。✅
+- **#12 并行分支数据竞争**(ADK 审计):parallel 分支并发写共享
+  Exec.CurrentNodeID / Exec.NodeStates(无锁 map)。RunEnv 加锁 +
+  TestParallelBranchesRace(-race 验证旧代码确实触发 DATA RACE)。✅
+- **#13 桌面模式下载断链**(Wails 审计):桌面 AssetServer 无 /api 路由,
+  导出/备份链接落入 SPA fallback 下载到 HTML。api.AssetHandler 挂载
+  Route:/api + 补前缀适配(单元测试覆盖三种路径形态)。✅
+- **#14 双开写库**:数据目录仅一个 SQLite,双开并发写;启用 Wails
+  SingleInstance,二次启动聚焦已有窗口。✅
+- **#15 示例工作流打包后不种子**:seedExamples 用相对路径读盘,打包 .app
+  从 Finder 启动(CWD=/)静默跳过;改 go:embed 嵌入。✅
+- **#16 进程内备份恢复静默失效**:RestoreBackup 只认 JSON 归一形态,
+  ExportBackup 直出形态会被静默恢复 0 条;统一 JSON 归一。✅
+
+### 功能增强
+
+- **Go 侧原生通知**:完成/失败/等待输入系统级提醒(WKWebView 的 Web
+  Notification 权限模型不可靠),点击聚焦窗口并导航到执行;桌面模式前端
+  跳过 Web 通知避免双重提醒。✅(编译 + 单测;通知真机弹窗待打包签名验证)
+- 桌面模式 OnShutdown 给运行中执行最多 5s 收尾(与服务器模式对齐)。✅
+- /api/version、/api/health 版本信息从构建信息动态读取(不再硬编码)。✅
+
+### 杂项
+
+- 事件流不再整体丢弃:Escalate(循环退出/HITL 暂停)记 Warn 日志。✅
+- 吞错清理:nodeAgent/loopGuard/loopResetter/noopAgent 的 agent.New 错误
+  经 Compile 上抛(替换 panic)。✅
+- 循环保护默认上限统一 compiler.DefaultMaxIterations;detectMode 魔数提取
+  常量;npm @wailsio/runtime 精确对齐 Go 模块 beta.20(消除协议漂移)。✅
+- @wailsio/runtime 升级坑记录:Windows 下 `wails3 doctor` 提示的
+  configLoader 告警抑制(3774232)。
+
+### 回归汇总(轮次 24 收尾)
+
+- `go test -count=1 -race ./...` 全部通过;vet 干净;gofmt 干净。✅
+- 前端 `tsc && vite build` + vitest 12/12。✅
+- 冒烟脚本 7 项通过(覆盖服务器模式 REST + SSE + HITL + 导出)。✅
+- Go/Windows/Linux 交叉编译通过(agent 包及主程序)。✅
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
@@ -259,5 +324,6 @@
 | 6 | 视觉:HITL+并行 | ✅ | — |
 | 7 | 视觉:Agents/Skills | ✅ | — |
 | 8 | 回归:双模式传输 | ✅ | #4 传输误判 #5 /wails/ 路径拦截 |
+| 24 | 官方资料对照审计 + 可靠性强化(见上) | ✅ | #9 孤儿进程 #10 循环计数 #11 取消 ctx #12 并行竞态 #13 桌面下载断链 #14 双开 #15 种子路径 #16 备份恢复 |
 
 **需求第四十五条(第一阶段完成标准)逐条核对**见 `docs/index.html` 使用说明附录。

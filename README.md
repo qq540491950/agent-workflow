@@ -33,9 +33,10 @@ wails3 task package   # 产物 build/bin/agent-workflow.app
 - **并行编排**:parallel → merge 分支并行,汇合后继续
 - **持久化与恢复**:执行实时写 SQLite,重启后可恢复;Execution 绑定工作流版本;数据一键备份/恢复
 - **可靠性**:工作流级超时、节点级重试(次数+退避)、循环上限与停滞检测、失败节点重试/跳过
-- **可观测**:实时事件流(SSE/IPC)、跨执行审计页、节点输出、会话 State 查看器、Artifacts(git diff)、桌面通知
+- **可观测**:实时事件流(SSE/IPC)、跨执行审计页、节点输出、会话 State 查看器、Artifacts(git diff)、系统原生通知(完成/失败/等待输入,点击直达执行)
 - **Git 集成**:status/diff/log/branch/checkout/commit 节点 + Git 面板,权限策略约束
 - **配置即代码**:YAML 导入导出;Mock Agent 决策脚本可配置,无需真实模型即可演示完整闭环
+- **桌面体验**:单实例(二次启动聚焦已有窗口)、退出前给运行中执行收尾、REST API 同源挂载(导出/备份链接桌面/服务器通用)
 
 ## 架构原则
 
@@ -49,6 +50,15 @@ wails3 task package   # 产物 build/bin/agent-workflow.app
 ## 测试
 
 ```bash
+# 后端:vet + 全量测试(含 -race)
 go vet ./workflow/... ./agent/... ./skill/... ./persistence/... ./event/... ./template/... ./permission/... ./git/... ./contextx/... ./api/... ./app/... .
+go test -race ./...
+# 或最小集:
 go test ./workflow/... ./agent/... ./skill/... ./persistence/... ./event/... ./template/... ./permission/... ./git/... ./contextx/...
+
+# 前端:构建 + vitest
+cd frontend && npm run build && npx vitest run
+
+# 端到端冒烟(服务器模式:REST+SSE+HITL+导出,7 项断言)
+./scripts/smoke.sh
 ```
