@@ -312,6 +312,51 @@
 - 冒烟脚本 7 项通过(覆盖服务器模式 REST + SSE + HITL + 导出)。✅
 - Go/Windows/Linux 交叉编译通过(agent 包及主程序)。✅
 
+---
+
+## 轮次 25:持续审计迭代(并发/资源/实时流)
+
+> 方法:延续轮次 24 的审计驱动模式,精读 executor/persistence/api 层源码 +
+> 回归测试先行,共 12 个提交。
+
+### 修复的 Bug(#17-#22)
+
+- **#17 服务器模式 SSE 从未接通**:ConnectEvents(Bus→UI 桥接)只在桌面模式
+  调用,/api/events 客户端收不到任何实时事件(历史走 SQLite 查询,浏览器
+  E2E 未暴露)。ConnectEvents 幂等化 + NewServer 顺接通;
+  `scripts/smoke_sse.sh` 端到端验证(: connected 立即达 / 执行事件经流送达)。✅
+- **#18 git 钩子挂起阻塞**:commit 触发的钩子挂起时持有输出管道,
+  CombinedOutput 阻塞到钩子自行退出(实测取消后仍阻塞 30s);
+  进程组击杀 + WaitDelay,回归测试验证新旧行为(30s→0.39s)。✅
+- **#19 ErrWaitDelay 误判失败**:进程成功退出、孤儿进程延迟关管道时,
+  Output/CombinedOutput 返回 exec.ErrWaitDelay,script/git/claude/pi 四处
+  曾误判为节点失败;输出已完整捕获应视为成功。✅
+- **#20 Skill WAIT_USER 被吞**:Skill 接口承诺 WAIT_USER,runSkillNode 只映射
+  FAILED,WAIT_USER 静默当 SUCCESS;现映射 NodeWaiting 暂停(测试:暂停→
+  恢复→完成)。✅
+- **#21 生产 Bus 无界内存增长**:KeepHistory=true 但 History() 生产零消费者,
+  所有 UIEvent 永久累积;关闭(事件已实时落库,回放走 API)。✅
+- **#22 logx SetLevel 数据竞争**:运行中替换全局 logger 与并发写日志竞争;
+  atomic.Pointer + 并发回归测试。✅
+
+### 加固与改进
+
+- handleSSE:连接立即下发响应头(此前 EventSource 首事件前一直 CONNECTING)、
+  15s keepalive、写锁+closed 防退出竞争(-race 抓到)。✅
+- SaveExecution/SaveExecutionNode 改原子 upsert(消除两步 check-then-write)。✅
+- API 状态码语义化:NOT_FOUND→404、权限→403(此前一律 400);body 附
+  code/kind;DELETE 保持幂等 200。6 组 httptest 契约测试。✅
+- mock 模板 {iteration} 兼容 float64(JSON 往返);清理 executor 死代码。✅
+- 移除未使用依赖 zustand;@wailsio/runtime 精确对齐 Go beta.20。✅
+- 桌面 .app 真机验证:全新数据目录启动,3 个示例工作流经嵌入 FS 种子成功
+  (#15 的真机复核)。✅
+
+### 回归汇总(轮次 25 收尾)
+
+- `go test -count=1 -race ./...` 全部通过;vet/gofmt 干净。✅
+- 前端构建 + vitest 12/12。✅
+- smoke.sh 7 项 + smoke_sse.sh 3 项全部通过。✅
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
@@ -325,5 +370,6 @@
 | 7 | 视觉:Agents/Skills | ✅ | — |
 | 8 | 回归:双模式传输 | ✅ | #4 传输误判 #5 /wails/ 路径拦截 |
 | 24 | 官方资料对照审计 + 可靠性强化(见上) | ✅ | #9 孤儿进程 #10 循环计数 #11 取消 ctx #12 并行竞态 #13 桌面下载断链 #14 双开 #15 种子路径 #16 备份恢复 |
+| 25 | 持续审计迭代:并发/资源/实时流 | ✅ | #17 SSE 未接通 #18 git 钩子阻塞 #19 ErrWaitDelay #20 Skill WAIT_USER #21 Bus 内存增长 #22 logx 竞争 |
 
 **需求第四十五条(第一阶段完成标准)逐条核对**见 `docs/index.html` 使用说明附录。

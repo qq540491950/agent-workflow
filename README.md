@@ -61,4 +61,6 @@ cd frontend && npm run build && npx vitest run
 
 # 端到端冒烟(服务器模式:REST+SSE+HITL+导出,7 项断言)
 ./scripts/smoke.sh
+# SSE 实时流端到端(连接即达 + 执行事件经流送达)
+./scripts/smoke_sse.sh
 ```
