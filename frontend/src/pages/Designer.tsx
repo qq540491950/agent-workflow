@@ -955,6 +955,18 @@ function WorkflowPropertyPanel({
           </SelectContent>
         </Select>
       </Row>
+      <Row label="Timeout(秒,0=不限,防单轮挂死)">
+        <Input
+          type="number"
+          min={0}
+          value={String(wf.settings.timeout_seconds ?? 0)}
+          onChange={(e) =>
+            onChange({
+              settings: { ...wf.settings, timeout_seconds: Number(e.target.value) },
+            })
+          }
+        />
+      </Row>
       <p className="text-xs text-muted-foreground">
         选中节点或连线可编辑其属性;拖动左侧节点类型到画布添加新节点。
       </p>

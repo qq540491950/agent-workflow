@@ -33,6 +33,7 @@ export interface WFEdge {
 export interface WorkflowSettings {
   max_iterations?: number;
   on_loop_limit?: string;
+  timeout_seconds?: number;
 }
 
 export interface Workflow {
