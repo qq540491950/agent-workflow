@@ -78,8 +78,29 @@
 
 ## 错误格式
 
-非 2xx 返回 `{"error": "..."}`。校验/权限/状态机错误为结构化类型,
-例如:`PermissionError(PERMISSION_DENIED): agent "mock-pi" 无权执行 fs:write`。
+非 2xx 返回 JSON,`error` 为人类可读文本;结构化错误额外附带 `code` 与 `kind`,
+供程序化处理:
+
+```json
+{"error": "NOT_FOUND(...): workflow \"x\" not found", "code": "NOT_FOUND", "kind": "WorkflowError"}
+```
+
+HTTP 状态码语义:
+
+| 状态码 | 场景 |
+| --- | --- |
+| 400 | 校验失败(WORKFLOW_INVALID 等)/ 参数错误 |
+| 403 | 权限拒绝(PERMISSION_DENIED) |
+| 404 | 资源不存在(NOT_FOUND) |
+| 200 | DELETE 为幂等语义:删除不存在的资源同样返回 200 |
+
+## SSE 实时事件流(GET /api/events)
+
+- 连接建立立即返回 `text/event-stream` 响应头与注释行(`: connected`),
+  EventSource 立即进入 OPEN 状态;
+- 之后每个 UIEvent 以 `data: {JSON}\n\n` 推送;
+- 每 15 秒发送 keepalive 注释行(`: keepalive`)防止代理断开空闲连接;
+- 客户端断开由 EventSource 自动重连。
 
 ## 实时事件类型(UIEvent.type)
 
