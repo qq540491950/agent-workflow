@@ -94,6 +94,8 @@ export default function ExecutionMonitor() {
   const [events, setEvents] = useState<UIEvent[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [instruction, setInstruction] = useState("");
+  // 提交互斥:防止双击重复提交(后端另有 CAS 兜底)
+  const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -150,6 +152,8 @@ export default function ExecutionMonitor() {
     "工作流需要人工确认";
 
   const provide = async (response: string, extra?: string) => {
+    if (busy) return;
+    setBusy(true);
     try {
       await api.provideInput(exec.id, {
         response,
@@ -160,6 +164,8 @@ export default function ExecutionMonitor() {
       setTimeout(refresh, 300);
     } catch (e) {
       toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -252,11 +258,11 @@ export default function ExecutionMonitor() {
           <CardContent className="space-y-3">
             <p className="text-sm">{prompt}</p>
             <div className="flex gap-2">
-              <Button size="sm" onClick={() => provide("approve")}>Approve</Button>
-              <Button size="sm" variant="outline" className="text-red-400" onClick={() => provide("reject")}>
+              <Button size="sm" disabled={busy} onClick={() => provide("approve")}>Approve</Button>
+              <Button size="sm" variant="outline" className="text-red-400" disabled={busy} onClick={() => provide("reject")}>
                 Reject
               </Button>
-              <Button size="sm" variant="outline" onClick={() => provide("continue")}>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => provide("continue")}>
                 Continue
               </Button>
             </div>
@@ -270,6 +276,7 @@ export default function ExecutionMonitor() {
               <Button
                 size="sm"
                 variant="secondary"
+                disabled={busy}
                 onClick={() => provide("instruction", instruction)}
               >
                 Provide instruction
