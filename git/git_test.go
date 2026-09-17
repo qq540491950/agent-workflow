@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // newTempRepo 创建带一次提交的临时 git 仓库。
@@ -91,5 +93,40 @@ func TestUnsupportedOperation(t *testing.T) {
 	_, err := s.Run(context.Background(), "push", nil)
 	if err == nil {
 		t.Fatal("push should be unsupported at service level (push 由权限策略+人工控制)")
+	}
+}
+
+// 回归:commit 触发的钩子若挂起并持有输出管道,CombinedOutput 曾会
+// 阻塞到钩子自行退出(超过取消时机);进程组击杀 + WaitDelay 后及时返回。
+func TestCommitHookCancelPromptReturn(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		if _, err := s.exec(context.Background(), dir, args); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
+	script := "#!/bin/sh\nsleep 30\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err := s.Commit(ctx, "hook hangs")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error from hung hook + cancel")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Commit blocked %v after cancel — orphan process still holding pipe", elapsed)
 	}
 }

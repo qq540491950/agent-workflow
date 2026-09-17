@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	coreagent "agentworkflow/agent"
 	"agentworkflow/workflow/model"
 )
 
@@ -207,12 +208,21 @@ func (s *Service) exec(ctx context.Context, dir string, args []string) (string, 
 	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, bin, args...)
+	// commit 触发的钩子等子进程可能挂起并持有输出管道:
+	// 进程组击杀 + WaitDelay 兜底,保证调用方及时返回
+	coreagent.ConfigureProcess(cmd)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		gitErr := model.NewError(model.KindGitError, "GIT_COMMAND_FAILED",
 			fmt.Sprintf("git %s 失败: %s", strings.Join(args, " "), strings.TrimSpace(string(out))))
 		gitErr.Detail = err.Error()
+		if cctx.Err() == context.DeadlineExceeded {
+			gitErr.Code = "GIT_TIMEOUT"
+		} else if ctx.Err() == context.Canceled {
+			gitErr.Code = "GIT_CANCELLED"
+		}
 		return "", gitErr
 	}
 	return string(out), nil
