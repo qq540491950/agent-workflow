@@ -357,6 +357,15 @@
   (#15 的真机复核)。✅
 - SaveExecution/SaveExecutionNode 原子 upsert;前端组件测试基础设施
   (jsdom + testing-library)+ StateBadge 8 项。✅
+- **#26 Dashboard 状态卡片口径**:从最近 8 条执行计数,长时场景下
+  RUNNING 被新记录挤出窗口后错误归零;改 stats 全量聚合。✅
+- version() 双模式统一走 /api(桌面关于卡片显示 ADK/Wails 版本);
+  EventsAudit 实时刷新 200ms 防抖;contextx 死代码 IterationOf 清理。✅
+- 测试扩充:goroutine 泄漏回归(20 次执行后协程回落)、嵌套工作流
+  集成(父→子真实链路 + 缺失子失败)、matchBranch/EvalCondition 变体、
+  git 路由契约(临时仓库)。✅
+- **进程级浸泡**:35 次真实执行(30 串行 + 5 并发)全部 COMPLETED、
+  无残留未终态,RSS 19.5MB → 24.5MB(正常区间)。✅
 
 ### 回归汇总(轮次 25 收尾)
 
