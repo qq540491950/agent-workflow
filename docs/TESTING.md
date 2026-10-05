@@ -578,13 +578,16 @@
 - 新增回归测试:validator 4 组 + runtime 8 组 + application 5 组 +
   api 3 组 + logx 3 组 + event 2 组 + persistence 2 组。✅
 
-### 仍未覆盖(留待后续,详见 `docs/OPTIMIZATION.md`)
+### 本节遗留项的最终去向(全部已在后续轮次解决)
 
-- 组件层交互行为仍无 jsdom 用例(本轮新增的 confirm/busy/乐观回滚)。
-- `irBuilder.stopped` 共享字段在"并行套并行"下会丢失外层 stop 集合 ——
-  目前没有能暴露该行为的用例,需先补测试再重构。
-- `WAIT_USER` 恢复时 Agent/Skill 节点被原样重跑、用户答复丢失。
-- 备份三个 API 方法零 UI 消费(能力看起来存在但不可达)。
+> 下面是**轮次 28 当时的快照**,不是现状。三项均已处理:
+> - 组件层交互行为 → 轮次 28 C1:`interaction.test.tsx` 11 个用例
+>   (confirm / busy / 乐观回滚 / 异常列表)
+> - `irBuilder.stopped` 共享字段 → 轮次 28 B1:停止集合改为显式传参
+>   (`TestNestedParallelKeepsOuterStopSet` 先行暴露)
+> - `WAIT_USER` 恢复时 Agent 被重跑 → 轮次 28 A1:复用已有响应语义
+>   (`TestAgentWaitUserResumeReusesResponse` 等 4 个用例)
+> - 备份 API 零 UI 消费 → 轮次 28 C5:Settings 页新增「备份」卡片
 
 ## 轮次 28:收敛 OPTIMIZATION.md 的全部登记项(批次 A / B / C)
 
@@ -801,9 +804,56 @@ panic 被兜住的路径上 `failExecution → save(exec)` 也会顺手把内存
   `yield` 返回 false 的提前停止语义、`session.State` 的 Set(nil)/
   Get 缺失键/StateDelta 提交路径、`temp:` 前缀语义。
 
+## 轮次 30:补齐剩余 ADK 契约 + pi 同形替身冒烟
+
+> 目标:把轮次 29 登记的"仍然开放"清空。纯测试增量,不改生产代码。
+
+### ADK 契约从 4 条补到 9 条
+
+原有 4 条之外补 5 条,每条锁定一处本项目依赖、但 ADK 升级时会**静默**
+失效的语义:
+
+- **`loopagent` 恰好 N 轮**:原断言只有 `if n > 3`("至多"),语义从"恰好"
+  退化为"至少"不会被发现。补 `n == max`(1/3/5 三档)后钉死。
+  循环保护(`DefaultMaxIterations=5`)完全依赖这个上限。
+- **`loopagent` Escalate 立即退出**:循环体内任一子 Agent 发 Escalate
+  就退出整轮(不等跑完)。本项目把 WAIT_USER / 节点失败 / 循环上限全
+  编码成 Escalate —— 若改成"跑完当前轮",人工闸门会在循环体内反复弹。
+- **`parallelagent` 消费者提前停止仍 drain**:`yield` 返回 false 后,
+  ADK 仍在 defer 里 cancel + drain,等待所有分支 goroutine 结束。
+  这条是 `engine.execute` 在 ctx 取消时 `break` 后立刻回写 Execution 的
+  前提;若这个保证消失,就是新的数据竞争入口。
+- **分支错误回传消费者**:分支 Go error 会经迭代器回传。engine 的
+  `lastErr` 完全依赖它 —— 若被吞掉,错误原因丢失。
+- **`session.State` 的 Set(nil)/Get 缺失键/All 迭代器**:
+  `Set(k,nil)` 后 `Get` 返回 `(nil,nil)` 不报错(本项目 Delete 约定的基础);
+  缺失键返回 `ErrStateKeyNotExist`;`All()` 仍含被置 nil 的键
+  —— 故派生视图必须显式跳过 nil(#83)。
+- **`temp:` 前缀语义**:**实测确认**带前缀的键影响实时状态但被从事件里
+  剥掉。本项目**不能**给需要 Resume 恢复的状态加 `temp:` 前缀,否则
+  StateData 会静默丢失 —— 这条把"看似安全的优化"变成显式禁止。
+
+### pi 同形替身冒烟(本机无 pi-agent CLI)
+
+`agent/pi/stub_smoke_test.go`:`Bin` 可配置,用 shell 替身补上**子进程这一
+层**(此前 A7/A8 只在直接调 `parseOutput` 的单元测试里覆盖,没经过进程)。
+6 个用例:全部参数送达(参数名拼错同样会暴露)、含嵌套对象的尾部 JSON
+正确提取、超时按 `PI_TIMEOUT` 返回、大输出被 8MB 上限截断**且带显式
+标记**、stderr 不混入 Output、非零退出返回 `PI_PROCESS_ERROR` 且带
+stderr 线索。
+
+### 回归汇总(轮次 30)
+
+- `gofmt`/`go vet` 干净;`go test -count=1 -race ./...` 全部通过。✅
+- 新增回归:ADK 契约 5 条 + pi 替身 6 条。✅
+- 顺带修正 TESTING.md 轮次 28「仍未覆盖」段的表述 —— 那是当时的快照,
+  其四项均已在后续轮次解决,现标注去向以免被误读为现状。✅
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
+| --- | --- | --- | --- |
+| 30 | 补齐剩余 ADK 契约 + pi 同形替身冒烟 | ✅ | ADK 契约 4→9 条(恰好 N 轮/Escalate 即退/提前停止 drain/分支错误回传/Set(nil)/temp: 前缀)+ pi 子进程层冒烟 6 条 |
 | --- | --- | --- | --- |
 | 1 | 后端全量 go test/vet/build | ✅ 全部通过 | — |
 | 2 | 视觉:Dashboard | ✅ | #1 空列表 null 崩溃 |

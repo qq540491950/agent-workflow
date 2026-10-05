@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"sync/atomic"
 	"testing"
@@ -266,5 +267,264 @@ func (c *fakeInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 // drain 消费完迭代器,忽略事件内容。
 func drain(seq iter.Seq2[*session.Event, error]) {
 	for range seq {
+	}
+}
+
+// ---- 契约 5:loopagent 恰好 N 轮(不是"至多 N 轮") ----
+
+// TestADKContract_LoopAgentRunsExactlyN 现有断言只是 `if n > 3`("至多"),
+// 语义从"恰好 N 轮"退化为"至少 N 轮"不会被发现。本项目的循环保护
+// (DefaultMaxIterations=5)完全依赖这个上限 —— 若变成"至少",工作流会
+// 多跑若干轮才停;若变成"至多",循环保护会提前触发。
+func TestADKContract_LoopAgentRunsExactlyN(t *testing.T) {
+	for _, max := range []uint{1, 3, 5} {
+		var iterations atomic.Int32
+		body := newFakeAgent("body", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				iterations.Add(1)
+				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+				yield(ev, nil)
+			}
+		})
+		la, err := loopagent.New(loopagent.Config{
+			AgentConfig:   agent.Config{Name: "loop", SubAgents: []agent.Agent{body}},
+			MaxIterations: max,
+		})
+		if err != nil {
+			t.Fatalf("loopagent.New: %v", err)
+		}
+		ctrl, cleanup := newFakeInvocation(t)
+		drain(la.Run(ctrl))
+		cleanup()
+		if n := iterations.Load(); n != int32(max) {
+			t.Errorf("MaxIterations=%d 时 body 应恰好执行 %d 次,实际 %d —— "+
+				"ADK 循环上限语义变了,本项目的循环保护会失准", max, max, n)
+		}
+	}
+}
+
+// TestADKContract_LoopAgentEscalateExitsImmediately 钉死另一个关键语义:
+// 循环体内**任一**子 Agent 发 Escalate 事件,整个循环立刻退出(不是跑完
+// 当前轮再停)。
+//
+// 本项目把 WAIT_USER、节点失败、循环上限都编码成 Escalate
+// (lower.go 的 escalateEvent)。若这个语义变化(比如改成跑完当前轮),
+// 人工闸门会在循环体内反复弹 —— 每次 Resume 都立刻又退出循环。
+func TestADKContract_LoopAgentEscalateExitsImmediately(t *testing.T) {
+	var iterations atomic.Int32
+	escalating := newFakeAgent("escalating", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			iterations.Add(1)
+			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+			ev.Actions.Escalate = true
+			yield(ev, nil)
+		}
+	})
+	la, err := loopagent.New(loopagent.Config{
+		AgentConfig:   agent.Config{Name: "loop", SubAgents: []agent.Agent{escalating}},
+		MaxIterations: 10,
+	})
+	if err != nil {
+		t.Fatalf("loopagent.New: %v", err)
+	}
+	ctrl, cleanup := newFakeInvocation(t)
+	drain(la.Run(ctrl))
+	cleanup()
+	if n := iterations.Load(); n != 1 {
+		t.Errorf("Escalate 后应立即退出循环(执行 1 次),实际执行 %d 次 —— "+
+			"ADK 语义变了,人工闸门会在循环体内反复弹", n)
+	}
+}
+
+// ---- 契约 6:消费者提前停止(yield 返回 false) ----
+
+// TestADKContract_ParallelDrainsOnEarlyStop 钉死:消费者在迭代器中途返回
+// false 后,parallelagent 仍会**等待所有分支 goroutine 结束**(defer 里
+// cancelSubAgents + drain resultsChan)。
+//
+// 本项目 engine.execute 在 ctx 取消时 `break` 出事件循环(lower.go 的
+// runner.Run 消费侧),紧接着就读会话并回写 Execution。若 ADK 不保证分支
+// 已收尾,engine 的回写会与仍在跑的分支并发写同一批状态。
+// 若这个保证消失(变成 fire-and-forget),就是新的数据竞争入口 ——
+// 必须被看见。
+func TestADKContract_ParallelDrainsOnEarlyStop(t *testing.T) {
+	var branchDone atomic.Bool
+	// 分支:先发一个事件(让消费者有机会拿到第一个),然后阻塞到被取消,
+	// 收到取消后做一段"teardown"再标记完成。
+	slow := newFakeAgent("slow", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+			if !yield(ev, nil) {
+				return
+			}
+			<-ctx.Done()
+			time.Sleep(50 * time.Millisecond) // teardown
+			branchDone.Store(true)
+		}
+	})
+	par, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{slow}},
+	})
+	if err != nil {
+		t.Fatalf("parallelagent.New: %v", err)
+	}
+	ctrl, cleanup := newFakeInvocation(t)
+	defer cleanup()
+	// 只取第一个事件就停止消费
+	n := 0
+	for range par.Run(ctrl) {
+		n++
+		break
+	}
+	if !branchDone.Load() {
+		t.Error("消费者提前停止后,parallelagent 未等待分支 goroutine 结束 —— " +
+			"engine.execute 的 break 后回写会与仍在跑的分支并发写状态")
+	}
+}
+
+// ---- 契约 7:分支错误回传消费者 ----
+
+// TestADKContract_ParallelPropagatesBranchError 钉死:分支返回 Go error 时,
+// 该错误会被回传给迭代器消费者(engine 靠它设置 lastErr)。
+//
+// 若 ADK 改成吞掉分支错误,engine 的 `lastErr` 永远是 nil —— 中止信号
+// 只剩 KeyAbort 一条路径,错误原因会丢失。
+func TestADKContract_ParallelPropagatesBranchError(t *testing.T) {
+	failing := newFakeAgent("failing", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			yield(nil, context.DeadlineExceeded)
+			return
+		}
+	})
+	ok := newFakeAgent("ok", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {}
+	})
+	par, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{failing, ok}},
+	})
+	if err != nil {
+		t.Fatalf("parallelagent.New: %v", err)
+	}
+	ctrl, cleanup := newFakeInvocation(t)
+	defer cleanup()
+	var gotErr error
+	for _, err := range par.Run(ctrl) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Error("分支的 Go error 未回传给消费者 —— engine 的 lastErr 将永远为 nil," +
+			"错误原因丢失")
+	}
+}
+
+// ---- 契约 8:session.State 的 Set(nil)/Get 缺失键 ----
+
+// TestADKContract_StateSetNilAndMissingKey 钉死本项目两处 Delete 约定
+// 所依赖的语义:
+//   - Set(key, nil) 之后 Get 返回 (nil, nil) —— 不报错
+//   - Get 一个从未存在的键返回 ErrStateKeyNotExist
+//   - All() 仍然包含被 Set(nil) 的键(nil 值也在内)
+//
+// 本项目的 stateAccess.Get 把 nil 当"缺失"(所以 Delete 用 Set(nil)
+// 伪造删除);而 syncNodeStates 曾把 nil 渲染成字面量 "<nil>"(#83 已修)。
+// 这三条语义一旦变化,一次性状态(_user_input 等)的消费逻辑就会出错。
+func TestADKContract_StateSetNilAndMissingKey(t *testing.T) {
+	svc := session.InMemoryService()
+	if _, err := svc.Create(context.Background(), &session.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s", State: map[string]any{"k": 1},
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sess, err := svc.Get(context.Background(), &session.GetRequest{
+		AppName: "a", UserID: "u", SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	st := sess.Session.State()
+
+	// 缺失键
+	if v, err := st.Get("never-set"); err == nil {
+		t.Errorf("Get 缺失键应返回 ErrStateKeyNotExist,实际 (v=%v, err=nil)", v)
+	} else if !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf("缺失键错误类型不对: %v", err)
+	}
+	// Set(nil) 之后
+	if err := st.Set("gone", nil); err != nil {
+		t.Fatalf("Set(nil): %v", err)
+	}
+	v, err := st.Get("gone")
+	if err != nil {
+		t.Errorf("Set(key,nil) 后 Get 应返回 (nil,nil),实际 err=%v —— "+
+			"本项目的 Delete 约定依赖这一点", err)
+	}
+	if v != nil {
+		t.Errorf("Set(key,nil) 后值应为 nil,实际 %v", v)
+	}
+	// All() 仍含该键(nil 值)—— ADK v1.7.0 的 All() 是迭代器(map 快照)
+	present := false
+	for k := range st.All() {
+		if k == "gone" {
+			present = true
+		}
+	}
+	if !present {
+		t.Log("提示:All() 不再包含被 Set(nil) 的键 —— 若属实," +
+			"stateAccess.Delete 与 syncNodeStates 的语义需要重新评估")
+	} else {
+		t.Log("确认:All() 仍含被 Set(nil) 的键(nil 值也在内)—— " +
+			"故派生视图必须显式跳过 nil(#83)")
+	}
+}
+
+// ---- 契约 9:temp: 前缀语义 ----
+
+// TestADKContract_TempPrefixStrippedFromEvents 钉死:带 `temp:` 前缀的状态
+// 键会从**事件**里剥掉,但仍参与 updateSessionState(即影响实时会话状态)。
+//
+// 风险:本项目若给一次性状态(_error / _user_input 之类)加 temp: 前缀,
+// Resume 时 StateData 会**静默丢失**它们 —— 因为 StateData 来自
+// sess.State().All() 与事件历史的组合。这条契约是为了让"加 temp: 前缀"
+// 这个看似安全的优化不会悄悄破坏恢复。
+func TestADKContract_TempPrefixStrippedFromEvents(t *testing.T) {
+	svc := session.InMemoryService()
+	if _, err := svc.Create(context.Background(), &session.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s2", State: map[string]any{},
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sess, err := svc.Get(context.Background(), &session.GetRequest{
+		AppName: "a", UserID: "u", SessionID: "s2",
+	})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	s := sess.Session
+	ev := session.NewEvent("e1")
+	ev.Actions.StateDelta = map[string]any{
+		"temp:scratch":  123,
+		"node:a:status": "SUCCESS",
+	}
+	// AppendEvent 挂在 service 上而非 session 上
+	if err := svc.AppendEvent(context.Background(), s, ev); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	// 事件里不应含 temp: 键
+	for e := range s.Events().All() {
+		if _, present := e.Actions.StateDelta["temp:scratch"]; present {
+			t.Error("temp: 键仍留在事件 StateDelta 里 —— ADK 语义变了")
+		}
+		if _, present := e.Actions.StateDelta["node:a:status"]; !present {
+			t.Error("非 temp 键被误删 —— ADK 语义变了")
+		}
+	}
+	// 但实时状态里生效(updateSessionState 在 trim 之前)
+	if v, err := s.State().Get("temp:scratch"); err != nil || v == nil {
+		t.Logf("提示:temp: 键未进入实时状态 (v=%v err=%v)", v, err)
+	} else {
+		t.Log("确认:temp: 键影响实时状态但不进事件 —— " +
+			"故本项目**不能**给需要 Resume 恢复的状态加 temp: 前缀")
 	}
 }

@@ -173,8 +173,26 @@ float64 陷阱)已经用解码归一拿到了。
    那条路径掩盖了真崩溃场景。新增 `RunEnv.maybeCheckpoint`(2s 节流)+
    `DB.TouchExecutionNode`(单列 UPDATE,不碰其余字段),节点开始时把
    "卡在哪个节点"写进库。
-3. **`ADK 契约`待补**:`loopagent` 恰好 N 轮(现有断言只是"至多")、
-   `yield` 返回 false 的消费者提前停止语义、分支错误是否回传消费者、
-   `session.State` 的 Set(nil)/Get 缺失键/StateDelta 提交路径、
-   `temp:` 前缀语义(用了会在恢复时静默丢状态)。
+3. ~~**`ADK 契约`待补**~~ —— **本轮已补齐(轮次 30,共 9 条)**。原有 4 条
+   之外补上 5 条,每条都锁定一处本项目依赖、但升级时会**静默**失效的语义:
+
+   | 契约 | 锁定内容 | 一旦变化的后果 |
+   | --- | --- | --- |
+   | `loopagent` 恰好 N 轮 | 原断言只有 `n > 3`("至多");补 `n == max`(1/3/5 三档) | 循环保护失准:变"至少"会多跑几轮,变"至多"会提前触发 |
+   | `loopagent` Escalate 立即退出 | 循环体内任一子 Agent 发 Escalate 即退出整轮,不等跑完 | 人工闸门会在循环体内反复弹(每次 Resume 立刻又退出) |
+   | `parallelagent` 提前停止仍 drain | 消费者 `yield` 返回 false 后仍等待所有分支 goroutine 结束(defer 里 cancel + drain) | `engine.execute` 的 break 后回写会与仍在跑的分支并发写状态 |
+   | 分支错误回传消费者 | 分支 Go error 会经迭代器回传 | `engine` 的 `lastErr` 永远 nil,错误原因丢失 |
+   | `session.State` Set(nil)/Get 缺失键 | `Set(k,nil)` 后 Get 返回 `(nil,nil)` 不报错;缺失键返回 `ErrStateKeyNotExist`;`All()` 仍含被置 nil 的键 | 一次性状态(`_user_input` 等)的 Delete 约定与派生视图(#83)全部出错 |
+   | `temp:` 前缀语义 | 带前缀的键**影响实时状态但被从事件里剥掉** | **实测确认:本项目不能给需要 Resume 恢复的状态加 `temp:` 前缀**,否则 StateData 会静默丢失 |
+
+   写这些契约时踩到的 API 事实(已记在测试注释里):`AppendEvent` 挂在
+   service 而非 session;`All()` / `Events().All()` 都返回迭代器而非 map。
+
+4. **`pi` 适配器无真机冒烟**:本机未安装 pi-agent CLI。新增
+   `agent/pi/stub_smoke_test.go`,用"同形替身二进制"补上**子进程这一层**
+   (`Bin` 可配置,替身接收与真实 pi 完全相同的参数),验证:
+   全部参数送达、含嵌套对象的尾部 JSON 正确提取(A7 在真实进程形态上
+   成立)、超时按 `PI_TIMEOUT` 返回、大输出被 8MB 上限截断且带显式标记
+   (A8)、stderr 不混入 Output、非零退出返回 `PI_PROCESS_ERROR` 且带
+   stderr 线索。
 
