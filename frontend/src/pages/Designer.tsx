@@ -355,12 +355,17 @@ function DesignerInner() {
   const save = async () => {
     setSaving(true);
     try {
-      const ok = await validate(true);
+      // 先本地校验再提交:后端 Save 同样会校验,并把 validator 错误数组
+      // 原样塞进 error 字段(用户只看到一坨裸 JSON)。此前无论校验是否
+      // 通过都提交,既拿不到可读提示,后端的 warning 分支也不可达。
+      if (!(await validate(true))) {
+        toast.error("校验未通过,已阻止保存(见画布下方错误列表)");
+        return;
+      }
       const saved = await api.saveWorkflow(toModel());
       setWf(saved);
       hydrate(saved);
-      if (ok) toast.success(`已保存 (v${saved.version})`);
-      else toast.warning(`已保存 (v${saved.version}),但存在校验问题`);
+      toast.success(`已保存 (v${saved.version})`);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
