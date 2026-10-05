@@ -454,6 +454,19 @@ func (e *Engine) runHumanNode(ctx context.Context, env *compiler.RunEnv, node *m
 	if ui, ok := st.Get(compiler.KeyUserInput); ok && ui != nil {
 		if m, ok := ui.(map[string]any); ok && len(m) > 0 {
 			raw, _ := json.Marshal(m)
+			// reject 是显式否决,必须中止工作流。此前无论什么响应都返回
+			// NodeSuccess,拒绝后后续 execute/fix 照常执行、执行最终标
+			// COMPLETED(与路由决策路径 lower.go 的 reject→KeyAbort 语义
+			// 不一致)。改走通用 NodeFailed 分支:由 lower.go 统一设置
+			// KeyAbort=FAILED:<nodeID>,engine 落库 FAILED。
+			if resp, _ := m["response"].(string); strings.EqualFold(strings.TrimSpace(resp), "reject") {
+				return compiler.NodeOutcome{
+					State:   model.NodeFailed,
+					Error:   "用户在节点 " + node.ID + " 拒绝继续",
+					Summary: string(raw),
+					Data:    m,
+				}
+			}
 			// 人工指令写入上下文,后续 execute/fix 节点可用 {{user_instruction}} 引用
 			if inst, _ := m["instruction"].(string); inst != "" {
 				st.Set("user_instruction", inst)
