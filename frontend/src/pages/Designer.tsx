@@ -155,7 +155,6 @@ function DesignerInner() {
   const [runVars, setRunVars] = useState("{}");
   const [agents, setAgents] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
-  const idCounter = useRef(1);
   const wrapRef = useRef<HTMLDivElement>(null);
   const { fitView } = useReactFlow();
 
@@ -305,7 +304,7 @@ function DesignerInner() {
         x: e.clientX - bounds.left - 80,
         y: e.clientY - bounds.top - 20,
       };
-      const nid = `${type}-${idCounter.current++}`;
+      const nid = nextNodeId(nodes, type);
       setNodes((nds) => [
         ...nds,
         {
@@ -327,7 +326,7 @@ function DesignerInner() {
       ]);
       setSelectedNodeId(nid);
     },
-    [setNodes],
+    [nodes, setNodes],
   );
 
   const validate = async (silent = false) => {
@@ -531,7 +530,10 @@ function DesignerInner() {
         <div className="w-72 shrink-0 overflow-auto border-l p-4">
           {selectedNode ? (
             <NodePropertyPanel
-              key={selectedNode.id + JSON.stringify(selectedNode.data.cfg)}
+              // 注意:key 只能随"选中的节点"变化。此前把 cfg 也拼进 key,
+              // 而每次按键都会产生新的 cfg 对象 → 整个面板被卸载重建,
+              // 输入框失焦,model / prompt / command 等字段只能敲一个字符。
+              key={selectedNode.id}
               node={selectedNode}
               agents={agents}
               onChange={(patch) =>
@@ -552,7 +554,7 @@ function DesignerInner() {
                 setSelectedNodeId(null);
               }}
               onDuplicate={() => {
-                const nid = `${selectedNode.data.wtype}-${idCounter.current++}`;
+                const nid = nextNodeId(nodes, String(selectedNode.data.wtype ?? "node"));
                 setNodes((nds) => [
                   ...nds,
                   {
@@ -643,6 +645,18 @@ function defaultConfig(type: string): Record<string, unknown> {
     default:
       return {};
   }
+}
+
+// 生成不与现有节点冲突的节点 ID。
+// 此前使用组件内自增计数器且从不扫描已 hydrate 的节点:打开一个含
+// agent-1 的工作流再拖入 agent 节点,ID 必然重复,保存时被后端
+// DUPLICATE_NODE 拒绝,而界面无法解释原因。
+// 导出以便单测锁定该行为(见 designer.test.ts)。
+export function nextNodeId(nodes: RFNode[], type: string): string {
+  const used = new Set(nodes.map((n) => n.id));
+  let i = 1;
+  while (used.has(`${type}-${i}`)) i++;
+  return `${type}-${i}`;
 }
 
 // ---- 属性面板组件 ----
