@@ -246,6 +246,8 @@ func (l *lowerer) lower(p *Plan, name string) (agent.Agent, error) {
 		return l.routeAgent(p, name)
 	case KindSwitch:
 		return l.switchAgent(p, name)
+	case KindWarning:
+		return l.warningAgent(p, name)
 	default:
 		return l.noopAgent(name)
 	}
@@ -313,6 +315,28 @@ func (c cascadeCtx) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
 func (c cascadeCtx) Done() <-chan struct{}       { return c.ctx.Done() }
 func (c cascadeCtx) Err() error                  { return c.ctx.Err() }
 func (c cascadeCtx) Value(key any) any           { return c.ctx.Value(key) }
+
+// warningAgent 只发告警事件、不执行任何节点。
+// 用于编译期发现的拓扑问题(如并行分支不收敛):不能默默丢弃后续节点,
+// 也不能阻止执行 —— 各分支照常跑完,只是明确告知用户"这段没有收口,
+// 分支之后的链不会执行"。
+func (l *lowerer) warningAgent(p *Plan, name string) (agent.Agent, error) {
+	env := l.env
+	msg := fmt.Sprintf("节点 %s 之后的链路不会执行:该处没有公共汇合点("+
+		"各并行分支终点互不相同),请把分支连到同一个 merge 节点上", p.NodeID)
+	return agent.New(agent.Config{
+		Name:        l.uniqueName(name + ".warn"),
+		Description: "拓扑告警",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				logx.Warn(msg, "execution", env.Exec.ID, "node", p.NodeID)
+				env.Bus.Emit(event.New("runtime.warning", env.Exec.ID, p.NodeID, map[string]any{
+					"node": p.NodeID, "reason": "parallel_not_converged", "message": msg,
+				}))
+			}
+		},
+	})
+}
 
 // switchAgent 纯条件选择:按状态求值条件挑一条链执行,自身不执行任何
 // 节点。用于一个决策点存在多条回边时,在循环体内选择本轮走哪条回边。

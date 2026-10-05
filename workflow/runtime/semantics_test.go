@@ -392,3 +392,68 @@ func TestMockSharedSpaceStillResets(t *testing.T) {
 }
 
 var _ = dsl.Parse
+
+// ---- B2:并行分支不收敛必须告警 ----
+
+// TestNonConvergingParallelWarns 验证并行分支不收敛时执行仍能跑完各分支,
+// 但必须发出 runtime.warning 告警说明"分支之后的链不会执行"。
+// 此前塞一个合成的 `fanout.merge` 占位节点(落到 lower 变 noop),
+// 后续链被静默丢弃,执行报成功。
+func TestNonConvergingParallelWarns(t *testing.T) {
+	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionApproved})
+	wf := loadWf(t, f.engine, `
+workflow:
+  id: diverging
+  name: 不收敛并行
+nodes:
+  - id: fanout
+    type: parallel
+  - id: a
+    type: agent
+    agent: mock-claude
+    mode: plan
+  - id: b
+    type: agent
+    agent: mock-claude
+    mode: plan
+  - id: tail_a
+    type: skill
+    skill: log
+  - id: tail_b
+    type: skill
+    skill: log
+edges:
+  - from: fanout
+    to: a
+  - from: fanout
+    to: b
+  - from: a
+    to: tail_a
+  - from: b
+    to: tail_b
+`)
+	exec, err := f.engine.Start(context.Background(), wf, "不收敛", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	final := waitForState(t, f.engine, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
+	if final.State != model.ExecutionCompleted {
+		t.Fatalf("不收敛不应让执行失败(各分支照常跑),实际 %s (%s)", final.State, final.Error)
+	}
+	// 各分支都跑到了
+	for _, id := range []string{"a", "b", "tail_a", "tail_b"} {
+		if final.NodeStates[id] != string(model.NodeSuccess) {
+			t.Errorf("节点 %s 应执行完成,实际 %q", id, final.NodeStates[id])
+		}
+	}
+	// 但必须有告警
+	warned := false
+	for _, ev := range f.bus.History() {
+		if ev.Type == "runtime.warning" && ev.NodeID == "fanout" {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Error("并行分支不收敛必须发 runtime.warning 告警(此前静默丢弃后续链)")
+	}
+}

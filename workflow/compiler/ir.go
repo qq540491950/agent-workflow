@@ -24,6 +24,9 @@ const (
 	// 与 KindRoute 的区别是不含决策节点(不会重新执行它),用于一个决策点
 	// 存在多条回边时,在循环体内选择本轮走哪条回边。
 	KindSwitch PlanKind = "switch"
+	// KindWarning 只发告警事件、不执行任何节点。用于"编译期发现拓扑
+	// 问题但不妨碍执行"的场景(如并行分支不收敛)。
+	KindWarning PlanKind = "warning"
 )
 
 // RouteBranch 是路由的一个出口分支。
@@ -51,6 +54,10 @@ type Plan struct {
 	Children []*Plan // KindSeq/KindPar 的子计划
 	Branches []RouteBranch
 	Loop     *LoopSpec
+	// Unconverged 标记并行区没有公共汇合点(各分支终点互不相同)。
+	// 此时分支之后的链不会进入计划,必须由 lower 阶段发告警 ——
+	// 静默丢弃等于"该跑的没跑却报成功"。
+	Unconverged bool
 	// NodeID 序列(仅 KindSeq 用于调试展示)。
 	Path []string
 }
@@ -79,6 +86,9 @@ func (p *Plan) Flatten() []string {
 			out = append(out, b.Target.Flatten()...)
 		}
 		return out
+	case KindWarning:
+		// 不执行任何节点,不产生节点 ID
+		return nil
 	default:
 		var out []string
 		for _, c := range p.Children {
@@ -94,8 +104,6 @@ type irBuilder struct {
 	// maxIterations 为循环默认上限。
 	maxIterations int
 	onLoopLimit   string
-	// stopped 为 chain 构建时的临时停止集合(仅 chainStop 设置)。
-	stopped map[string]bool
 }
 
 // BuildPlan 将已通过校验的 Workflow 编译为 Plan IR。
@@ -134,6 +142,18 @@ func (b *irBuilder) findStart() string {
 // chain 构建从 fromID 开始的线性计划;遇到决策点并入 route;
 // 遇到 stopSet(汇合点/回边目标)即停止。
 func (b *irBuilder) chain(fromID string, ancestors map[string]bool) *Plan {
+	return b.chainStop(fromID, ancestors, nil)
+}
+
+// chainStop 是 chain 的完整形式:stop 为本层的停止集合(并行区汇合点 /
+// 循环回边目标),命中即停止向下展开。
+//
+// stop 必须显式沿调用链传递,不能放在 irBuilder 上当共享字段:内层
+// chainStop(嵌套并行 / 分支内路由)返回时会把共享字段清空,外层尚未
+// 展开完的 stop 集合就此丢失 —— 分支随后一路走过汇合点及其后所有节点,
+// 那些节点在分支内被重复执行一次。并行区里 ADK 会并发跑分支,重复执行
+// 意味着并发写同一批状态。
+func (b *irBuilder) chainStop(fromID string, ancestors map[string]bool, stop map[string]bool) *Plan {
 	var children []*Plan
 	var path []string
 	visited := map[string]bool{}
@@ -142,12 +162,12 @@ func (b *irBuilder) chain(fromID string, ancestors map[string]bool) *Plan {
 		if cur == "" || visited[cur] || ancestors[cur] {
 			break
 		}
-		if b.stopped != nil && b.stopped[cur] {
+		if stop != nil && stop[cur] {
 			break
 		}
 		// 并行区域:par + 汇合后的后续链(需要真正的多分支才有并行语义)
 		if node, _ := b.wf.FindNode(cur); node.Type == model.NodeTypeParallel && len(b.wf.OutgoingEdges(cur)) >= 2 {
-			par := b.parallel(cur, ancestors)
+			par := b.parallel(cur, ancestors, stop)
 			if par != nil {
 				children = append(children, par...)
 				path = append(path, cur)
@@ -160,7 +180,7 @@ func (b *irBuilder) chain(fromID string, ancestors map[string]bool) *Plan {
 
 		// 决策点:多条出边或带条件出边
 		if len(out) > 1 || (len(out) == 1 && out[0].Condition != "") {
-			children = append(children, b.route(cur, ancestors))
+			children = append(children, b.route(cur, ancestors, stop))
 			path = append(path, cur+"(route)")
 			break
 		}
@@ -176,7 +196,7 @@ func (b *irBuilder) chain(fromID string, ancestors map[string]bool) *Plan {
 
 // parallel 编译 parallel 节点:每个出边是一条分支,分支在汇合点
 // (入边>1 的节点)处结束;返回 [par, 汇合点后续链]。
-func (b *irBuilder) parallel(parID string, ancestors map[string]bool) []*Plan {
+func (b *irBuilder) parallel(parID string, ancestors map[string]bool, outerStop map[string]bool) []*Plan {
 	parNode, err := b.wf.FindNode(parID)
 	if err != nil {
 		return nil
@@ -195,7 +215,11 @@ func (b *irBuilder) parallel(parID string, ancestors map[string]bool) []*Plan {
 	newAncestors := copySet(ancestors)
 	newAncestors[parID] = true
 	for _, e := range out {
-		stop := map[string]bool{}
+		// 分支的停止集合 = 内层汇合点 ∪ 外层停止集合。
+		// 只放内层汇合点会让分支一路走到外层的汇合点及其后节点 ——
+		// 那些节点本该在并行区之后执行一次,却会在分支内被重复执行,
+		// 而并行分支是并发跑的,等于并发写同一批状态。
+		stop := copySet(outerStop)
 		if join != "" {
 			stop[join] = true
 		}
@@ -207,23 +231,33 @@ func (b *irBuilder) parallel(parID string, ancestors map[string]bool) []*Plan {
 		Children: branches,
 	}}
 	if join != "" {
-		plans = append(plans, b.chain(join, newAncestors))
-	} else {
-		plans = append(plans, &Plan{Kind: KindSingle, NodeID: parID + ".merge"})
+		// 汇合点之后的链同样受外层停止集合约束
+		plans = append(plans, b.chainStop(join, newAncestors, outerStop))
+		return plans
 	}
+	// 不收敛:各分支的终点互不相同,没有公共汇合点。
+	//
+	// 此前塞一个合成的 "<parID>.merge" 占位节点并丢掉并行区之后的链 ——
+	// 用户在工作流里并不存在这个节点,它落到 lower 时变成 noop,而
+	// 分支之后的节点一个都没进 Plan。执行会报成功,但那一段根本没跑。
+	// 现在不造假节点:直接返回并行区本身,并在 Plan 上标记不收敛,
+	// 由 lower 阶段发告警事件(执行仍继续跑各分支,只是提醒用户
+	// 拓扑没有收口,后续链不会执行)。
+	plans[0].Unconverged = true
+	plans[0].Branches = nil
+	plans = append(plans, &Plan{
+		Kind:   KindWarning,
+		NodeID: parID,
+		Branches: []RouteBranch{{
+			Condition: "",
+			Target:    &Plan{Kind: KindSeq}, // 空动作,仅用于承载告警
+		}},
+	})
 	return plans
 }
 
-// chainStop 与 chain 相同,但额外在 stopSet 命中时停止。
-func (b *irBuilder) chainStop(fromID string, ancestors map[string]bool, stopSet map[string]bool) *Plan {
-	b.stopped = stopSet
-	p := b.chain(fromID, ancestors)
-	b.stopped = nil
-	return p
-}
-
 // route 编译决策节点:执行节点后按条件选择出口;检测回边形成循环。
-func (b *irBuilder) route(decisionID string, ancestors map[string]bool) *Plan {
+func (b *irBuilder) route(decisionID string, ancestors map[string]bool, stop map[string]bool) *Plan {
 	out := b.wf.OutgoingEdges(decisionID)
 
 	// 分类出口:loop 回边 vs exit 出口
@@ -242,11 +276,12 @@ func (b *irBuilder) route(decisionID string, ancestors map[string]bool) *Plan {
 	newAncestors := copySet(ancestors)
 	newAncestors[decisionID] = true
 
-	// exit 分支
+	// exit 分支:出口链同样受外层停止集合约束(并行分支内的路由,
+	// 出口不能越过并行区的汇合点)
 	for _, e := range exits {
 		rp.Branches = append(rp.Branches, RouteBranch{
 			Condition: e.Condition,
-			Target:    b.chain(e.To, newAncestors),
+			Target:    b.chainStop(e.To, newAncestors, stop),
 		})
 	}
 
@@ -258,14 +293,16 @@ func (b *irBuilder) route(decisionID string, ancestors map[string]bool) *Plan {
 	// 并列分支,任一成立即可进入循环(语义上等价于"这些路径都要回到
 	// 决策点重跑")。
 	if len(loopEdges) > 0 {
-		stop := map[string]bool{decisionID: true}
+		// 循环体的停止集合 = 决策节点自身(防无限展开)∪ 外层停止集合
+		bodyStop := copySet(stop)
+		bodyStop[decisionID] = true
 		spec := &LoopSpec{
 			RevisitNodeID: decisionID,
 			MaxIterations: b.maxIterations,
 			OnLoopLimit:   b.onLoopLimit,
 		}
 		if len(loopEdges) == 1 {
-			spec.Body = b.chainStop(loopEdges[0].To, newAncestors, stop)
+			spec.Body = b.chainStop(loopEdges[0].To, newAncestors, bodyStop)
 		} else {
 			// 多条回边:用 switch 表达"本轮走哪条回边" —— 每条回边的条件
 			// 对应一个分支,任一成立即执行该分支并回到决策点。
@@ -273,7 +310,7 @@ func (b *irBuilder) route(decisionID string, ancestors map[string]bool) *Plan {
 			for _, e := range loopEdges {
 				spec.Body.Branches = append(spec.Body.Branches, RouteBranch{
 					Condition: e.Condition,
-					Target:    b.chainStop(e.To, newAncestors, stop),
+					Target:    b.chainStop(e.To, newAncestors, bodyStop),
 				})
 			}
 		}
