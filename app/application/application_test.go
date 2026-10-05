@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -592,4 +593,98 @@ func TestSetPermissionPropagatesReadError(t *testing.T) {
 	if err := a.AgentSvc.SetPermission("mock-claude", permission.Policy{FilesystemRead: true}); err == nil {
 		t.Error("读失败时 SetPermission 应上抛,否则会清空其他 Agent 的权限策略")
 	}
+}
+
+// TestSkillDisabledConcurrentAccess 验证 DisabledSkills 的并发安全:
+// 执行协程经 IsSkillDisabled 读(工作流 skill 节点路径),Skills 页开关
+// 经 SetEnabled 写。此前是裸 map,同进程内并发读写在生产环境是
+// "concurrent map read and map write" runtime fatal(recover 无效,
+// 整应用退出),-race 下是 DATA RACE。
+func TestSkillDisabledConcurrentAccess(t *testing.T) {
+	a := newTestApp(t)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// 读者:模拟执行协程持续查询禁用状态
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = a.Engine.IsSkillDisabled("log")
+					_ = a.SkillDisabled("submit")
+					_ = a.SkillSvc.List()
+				}
+			}
+		}()
+	}
+	// 写者:模拟 REST 开关反复切换
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			if err := a.SkillSvc.SetEnabled("log", i%2 == 0); err != nil {
+				t.Errorf("SetEnabled: %v", err)
+				return
+			}
+		}
+	}()
+
+	// 等写者结束再停读者
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// TestSkillSetEnabledPersistsBeforeMemory 验证 SetEnabled 先落库:
+// 持久化失败时不留下"内存已禁用但库中未禁用"的分裂状态。
+func TestSkillSetEnabledPersistsBeforeMemory(t *testing.T) {
+	a := newTestApp(t)
+	_ = a.Repo.Close() // 之后所有写入都会失败
+
+	if err := a.SkillSvc.SetEnabled("log", false); err == nil {
+		t.Fatal("持久化失败应上抛")
+	}
+	if a.SkillDisabled("log") {
+		t.Error("落库失败时内存态不应改变(重启即失效的假成功)")
+	}
+}
+
+// TestLogLevelConcurrentAccess 验证 Settings.Info 与 Settings.Update
+// 并发时 LogLevel 无数据竞争(此前是无锁裸 string 字段)。
+func TestLogLevelConcurrentAccess(t *testing.T) {
+	a := newTestApp(t)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = a.Settings.Info()
+					_ = a.LogLevelValue()
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		levels := []string{"debug", "info", "warn", "error"}
+		for i := 0; i < 20; i++ {
+			_, _ = a.Settings.Update("", levels[i%len(levels)], nil)
+		}
+	}()
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

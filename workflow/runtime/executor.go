@@ -27,17 +27,14 @@ const defaultScriptTimeoutSeconds = 120
 func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
 	started := time.Now()
 	// 尝试次数:循环/重试导致的重复执行记为 attempt 递增
-	attempt := 1
-	if v, ok := st.Get(attemptKey(node.ID)); ok {
-		if f, ok := v.(float64); ok {
-			attempt = int(f) + 1
-		} else if i, ok := v.(int); ok {
-			attempt = i + 1
-		}
-	}
+	attempt := nextAttempt(st, node.ID)
 	st.Set(attemptKey(node.ID), attempt)
 	en := &model.ExecutionNode{
-		ID:          env.Exec.ID + ":" + node.ID,
+		// 明细主键带 attempt:此前固定为 exec:node,SaveExecutionNode 按主键
+		// upsert —— 循环第二轮与节点级重试会把上一轮的 output/result_json/
+		// started_at/duration_ms 整行覆盖,监控页只剩最后一轮,重试与
+		// 迭代历史完全不可见。改为 exec:node:attempt 后每次执行独立成行。
+		ID:          fmt.Sprintf("%s:%s:%d", env.Exec.ID, node.ID, attempt),
 		ExecutionID: env.Exec.ID,
 		NodeID:      node.ID,
 		NodeType:    node.Type,
@@ -588,6 +585,23 @@ func truncate(s string, n int) string {
 // attemptKey 生成节点尝试次数的状态键。
 func attemptKey(nodeID string) string {
 	return "node:" + nodeID + ":attempt"
+}
+
+// nextAttempt 计算本次执行的 attempt 序号(循环/重试重复执行时递增)。
+// 状态经 SQLite state_json 持久化往返后 int 会变成 float64,两种都要认。
+func nextAttempt(st compiler.StateAccess, nodeID string) int {
+	prev, ok := st.Get(attemptKey(nodeID))
+	if !ok {
+		return 1
+	}
+	switch n := prev.(type) {
+	case int:
+		return n + 1
+	case float64:
+		return int(n) + 1
+	default:
+		return 1
+	}
 }
 
 // perms 返回本次运行的权限检查器:工作流覆盖的运行期实例优先。

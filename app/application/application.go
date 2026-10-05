@@ -46,12 +46,19 @@ type App struct {
 	Perms  *permission.Manager
 	GitSvc *git.Service
 
-	DataDir        string
-	LogLevel       string
+	DataDir  string
+	LogLevel string
+	// skillsMu 保护 DisabledSkills。此前是裸 map:执行协程在 runSkillNode
+	// 里经 IsSkillDisabled 读,Skills 页开关经 SetEnabled 写 ——
+	// 并发读写 map 在 -race 下是 DATA RACE,生产环境是 runtime 的
+	// "concurrent map read and map write" 直接 fatal(带执行中的应用退出)。
+	skillsMu       sync.RWMutex
 	DisabledSkills map[string]bool
 	// scriptNodes:设置页「允许执行 script 节点」。原子类型:设置页可在
 	// 执行运行中切换,裸 bool 会被并发读写(同 logx SetLevel 的教训)。
 	scriptNodes atomic.Bool
+	// logLevelMu 保护 LogLevel(设置页写、Settings.Info 读)。
+	logLevelMu sync.RWMutex
 	// 供 Wails/SSE 桥接实时事件。
 	eventsMu      sync.RWMutex
 	connectOnce   sync.Once
@@ -102,7 +109,7 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	}
 	app.Engine = wfruntime.NewEngine(agents, skills, perms, bus, gitSvc, repo)
 	app.Engine.SubworkflowRunner = app.runSubworkflow
-	app.Engine.IsSkillDisabled = func(id string) bool { return app.DisabledSkills[id] }
+	app.Engine.IsSkillDisabled = app.SkillDisabled
 	app.Engine.AllowScriptNodes = app.ScriptNodesAllowed
 
 	// 内置 Skill 注册
@@ -139,7 +146,9 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	}
 	// 禁用 Skill 恢复
 	if disabled, err := repo.ListDisabledSkills(); err == nil {
+		app.skillsMu.Lock()
 		app.DisabledSkills = disabled
+		app.skillsMu.Unlock()
 	}
 	// script 节点放行开关(默认关闭:该节点可执行任意本地命令;
 	// 设置项缺失时保持关闭)
@@ -314,6 +323,38 @@ func (a *App) reloadAgents() {
 func boolOf(v any) bool {
 	b, _ := v.(bool)
 	return b
+}
+
+// SkillDisabled 报告 Skill 是否被禁用(执行协程读,需加锁)。
+func (a *App) SkillDisabled(id string) bool {
+	a.skillsMu.RLock()
+	defer a.skillsMu.RUnlock()
+	return a.DisabledSkills[id]
+}
+
+// setSkillDisabled 更新内存态(调用方需持写锁)。
+func (a *App) setSkillDisabled(id string, disabled bool) {
+	a.skillsMu.Lock()
+	defer a.skillsMu.Unlock()
+	if disabled {
+		a.DisabledSkills[id] = true
+	} else {
+		delete(a.DisabledSkills, id)
+	}
+}
+
+// LogLevelValue 返回当前日志级别(设置页写、Info 读,需加锁)。
+func (a *App) LogLevelValue() string {
+	a.logLevelMu.RLock()
+	defer a.logLevelMu.RUnlock()
+	return a.LogLevel
+}
+
+// setLogLevel 更新内存态日志级别。
+func (a *App) setLogLevel(level string) {
+	a.logLevelMu.Lock()
+	defer a.logLevelMu.Unlock()
+	a.LogLevel = level
 }
 
 // runSubworkflow 同步执行嵌套工作流。
@@ -776,23 +817,23 @@ func (s *SkillService) List() []skill.DTO {
 	for _, sk := range s.app.Skills.List() {
 		out = append(out, skill.DTO{
 			ID: sk.ID(), Name: sk.Name(), Description: sk.Description(),
-			Enabled: !s.app.DisabledSkills[sk.ID()],
+			Enabled: !s.app.SkillDisabled(sk.ID()),
 		})
 	}
 	return out
 }
 
 // SetEnabled 启用/禁用 Skill(禁用后运行时拒绝调用)。
+// 先落库再改内存:此前先改内存,持久化失败时界面显示已保存但重启即失效。
 func (s *SkillService) SetEnabled(id string, enabled bool) error {
 	if _, err := s.app.Skills.Get(id); err != nil {
 		return err
 	}
-	if enabled {
-		delete(s.app.DisabledSkills, id)
-	} else {
-		s.app.DisabledSkills[id] = true
+	if err := s.app.Repo.SaveSkillEnabled(id, enabled); err != nil {
+		return err
 	}
-	return s.app.Repo.SaveSkillEnabled(id, enabled)
+	s.app.setSkillDisabled(id, !enabled)
+	return nil
 }
 
 // Test 执行一次 Skill 测试调用。
@@ -874,7 +915,7 @@ func (s *SettingsService) Info() *SettingsInfo {
 	return &SettingsInfo{
 		DataDir:          s.app.DataDir,
 		GitWorkingDir:    wd,
-		LogLevel:         s.app.LogLevel,
+		LogLevel:         s.app.LogLevelValue(),
 		AllowScriptNodes: s.app.ScriptNodesAllowed(),
 	}
 }
@@ -965,7 +1006,7 @@ func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNode
 		if err := s.Set("log_level", logLevel); err != nil {
 			return nil, err
 		}
-		s.app.LogLevel = logLevel
+		s.app.setLogLevel(logLevel)
 		logx.SetLevel(logLevel)
 	}
 	if allowScriptNodes != nil {

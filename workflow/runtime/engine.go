@@ -140,6 +140,17 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 	}
 
 	now := time.Now().Format(time.RFC3339Nano)
+	// 变量合并:DSL variables: 段为底,运行请求传入的 variables 覆盖。
+	// 此前只取请求参数,DSL 里声明的 variables 完全不生效 ——
+	// {{variable.xxx}} 渲染空串、`variables.xxx == ...` 条件恒假,
+	// 而 DSL 解析与导出都保留了这段(需求 §12 示例即用它)。
+	vars := map[string]any{}
+	for k, v := range wf.Variables {
+		vars[k] = v
+	}
+	for k, v := range variables {
+		vars[k] = v
+	}
 	exec := &model.Execution{
 		ID:              newID("exec"),
 		WorkflowID:      wf.ID,
@@ -147,7 +158,7 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 		WorkflowName:    wf.Name,
 		State:           model.ExecutionCreated,
 		Task:            task,
-		Variables:       variables,
+		Variables:       vars,
 		Iterations:      map[string]int{},
 		NodeStates:      map[string]string{},
 		CreatedAt:       now,

@@ -230,18 +230,32 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 
 // checkExpression 使用 expr 引擎做条件表达式语法检查。
 func checkExpression(expression string, addErr func(code, node, format string, args ...any), nodeID string) {
-	_, err := expr.Compile(expression, expr.Env(expressionEnv{}))
+	_, err := expr.Compile(expression, expr.Env(newExpressionEnv()))
 	if err != nil {
 		addErr("INVALID_EXPRESSION", nodeID, "条件表达式 %q 非法: %v", expression, err)
 	}
 }
 
 // expressionEnv 描述条件表达式可引用的变量。
-type expressionEnv struct {
-	Decision  string `expr:"decision"`
-	Status    string `expr:"status"`
-	Output    string `expr:"output"`
-	Iteration int    `expr:"iteration"`
+//
+// 必须与运行期 compiler.EvalCondition 的 env 保持一致(同源的 map
+// 形状):此前校验期用 struct env,只有 decision/status/output/iteration
+// 四个字段,`variables.env == "prod"` 会被判成 unknown name 而拒绝保存,
+// 但同样表达式在运行期完全合法 —— 校验器比运行时更严,导致用户无法
+// 使用运行期已支持的变量,两侧语义必须同源(见 AGENTS.md 硬性约定 #13)。
+type expressionEnv map[string]any
+
+// newExpressionEnv 构造与 compiler.EvalCondition 一致的校验环境。
+func newExpressionEnv() expressionEnv {
+	return expressionEnv{
+		"decision":  "",
+		"status":    "",
+		"output":    "",
+		"iteration": 0,
+		// variables 为任意键值 map:expr 在 map 形状的 env 下不做键穷举,
+		// 与运行期一致(运行期变量来自执行请求 + DSL variables 段)。
+		"variables": map[string]any{},
+	}
 }
 
 // markReachable BFS 标记从 starts 可达的节点。

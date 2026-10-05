@@ -20,6 +20,10 @@ const (
 	KindSeq    PlanKind = "seq"    // 顺序执行(ADK SequentialAgent)
 	KindPar    PlanKind = "par"    // 并行分支(ADK ParallelAgent)
 	KindRoute  PlanKind = "route"  // 条件路由 + 可选循环(动态)
+	// KindSwitch 纯条件选择:只按条件挑一条链执行,自身不执行任何节点。
+	// 与 KindRoute 的区别是不含决策节点(不会重新执行它),用于一个决策点
+	// 存在多条回边时,在循环体内选择本轮走哪条回边。
+	KindSwitch PlanKind = "switch"
 )
 
 // RouteBranch 是路由的一个出口分支。
@@ -67,6 +71,12 @@ func (p *Plan) Flatten() []string {
 		if p.Loop != nil {
 			out = append(out, p.Loop.Body.Flatten()...)
 			out = append(out, p.Loop.RevisitNodeID)
+		}
+		return out
+	case KindSwitch:
+		var out []string
+		for _, b := range p.Branches {
+			out = append(out, b.Target.Flatten()...)
 		}
 		return out
 	default:
@@ -218,14 +228,11 @@ func (b *irBuilder) route(decisionID string, ancestors map[string]bool) *Plan {
 
 	// 分类出口:loop 回边 vs exit 出口
 	var exits []model.Edge
-	var loopEdge *model.Edge
+	var loopEdges []model.Edge
 	for i := range out {
 		e := out[i]
 		if b.reaches(e.To, decisionID, map[string]bool{}) {
-			if loopEdge == nil {
-				cp := e
-				loopEdge = &cp
-			}
+			loopEdges = append(loopEdges, e)
 		} else {
 			exits = append(exits, e)
 		}
@@ -243,16 +250,34 @@ func (b *irBuilder) route(decisionID string, ancestors map[string]bool) *Plan {
 		})
 	}
 
-	// loop 分支
-	if loopEdge != nil {
+	// loop 分支。回边可能有多条(如 review --REJECTED--> fix 与
+	// review --REFACTOR--> refactor 都回到 review):此前只保留第一条,
+	// 其余既不进 exits 也不进 loop —— 对应子图永远不会进入 Plan、
+	// 永不执行,而校验器的可达性是纯图连通性判断,该节点"可达"、
+	// 校验通过,用户完全无从察觉。合并为一个循环体:回边条件作为
+	// 并列分支,任一成立即可进入循环(语义上等价于"这些路径都要回到
+	// 决策点重跑")。
+	if len(loopEdges) > 0 {
 		stop := map[string]bool{decisionID: true}
-		body := b.chainStop(loopEdge.To, newAncestors, stop)
-		rp.Loop = &LoopSpec{
-			Body:          body,
+		spec := &LoopSpec{
 			RevisitNodeID: decisionID,
 			MaxIterations: b.maxIterations,
 			OnLoopLimit:   b.onLoopLimit,
 		}
+		if len(loopEdges) == 1 {
+			spec.Body = b.chainStop(loopEdges[0].To, newAncestors, stop)
+		} else {
+			// 多条回边:用 switch 表达"本轮走哪条回边" —— 每条回边的条件
+			// 对应一个分支,任一成立即执行该分支并回到决策点。
+			spec.Body = &Plan{Kind: KindSwitch}
+			for _, e := range loopEdges {
+				spec.Body.Branches = append(spec.Body.Branches, RouteBranch{
+					Condition: e.Condition,
+					Target:    b.chainStop(e.To, newAncestors, stop),
+				})
+			}
+		}
+		rp.Loop = spec
 		// loop 退出条件 = 任一 exit 分支条件成立。
 		// guard 在降级阶段生成;IR 不需要显式存条件。
 	}

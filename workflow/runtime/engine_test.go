@@ -219,17 +219,28 @@ func TestFullLoop(t *testing.T) {
 		}
 	}
 
-	// 断言持久化:节点明细与事件可查(review 因循环执行 2 次,attempt=2)
+	// 断言持久化:节点明细与事件可查。
+	// review 因循环执行 2 次,明细主键为 exec:node:attempt,两轮各占一行 ——
+	// 此前主键固定为 exec:node,第二轮把第一轮整行覆盖(attempt 恒为 1),
+	// 循环/重试历史在 UI 上完全不可见。
 	nodes, _ := f.repo.ListExecutionNodes(exec.ID)
-	if len(nodes) != 5 {
-		t.Errorf("execution nodes = %d, want 5", len(nodes))
+	if len(nodes) != 6 {
+		t.Errorf("execution nodes = %d, want 6 (review 执行 2 轮各一行)", len(nodes))
 	}
+	attempts := map[string][]int{}
 	for _, n := range nodes {
-		if n.NodeID == "review" && n.Attempt != 2 {
-			t.Errorf("review attempt = %d, want 2", n.Attempt)
-		}
+		attempts[n.NodeID] = append(attempts[n.NodeID], n.Attempt)
 		if n.DurationMS < 0 {
 			t.Errorf("node %s negative duration", n.NodeID)
+		}
+	}
+	if got := attempts["review"]; len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("review 明细应保留第 1、2 轮, got %v", got)
+	}
+	// 其他节点各执行一次
+	for _, id := range []string{"plan", "execute", "fix", "submit"} {
+		if len(attempts[id]) != 1 {
+			t.Errorf("node %s 明细行数 = %d, want 1 (%v)", id, len(attempts[id]), attempts[id])
 		}
 	}
 	events, _ := f.repo.ListEvents(exec.ID, 0)

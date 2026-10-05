@@ -26,17 +26,18 @@ const DefaultMaxIterations = 5
 
 // 会话状态键(执行状态通过 ADK Session State 持久化)。
 const (
-	KeyTask        = "task"
-	KeyAbort       = "_abort"       // 非空 = 执行中断(失败/等待),后续节点跳过
-	KeyResumeNode  = "_resume_node" // 恢复执行时从该节点开始
-	KeyUserInput   = "_user_input"  // 人工节点的用户响应
-	KeyLoopExited  = "_loop_exited" // loop 因出口条件成立而退出
-	KeyLoopStuck   = "_loop_stuck"  // 检测到连续相同 Review,陷入停滞
-	KeyLoopCount   = "_loop_count"  // 当前循环轮数
-	KeyDecision    = "decision"     // 最近一次 Agent 决策
-	KeyStatus      = "status"       // 最近一次 Agent 状态
-	KeyOutput      = "output"       // 最近一次 Agent 输出
-	KeyCurrentNode = "_current_node"
+	KeyTask         = "task"
+	KeyAbort        = "_abort"         // 非空 = 执行中断(失败/等待),后续节点跳过
+	KeyResumeNode   = "_resume_node"   // 恢复执行时从该节点开始
+	KeyUserInput    = "_user_input"    // 人工节点的用户响应
+	KeyLoopExited   = "_loop_exited"   // loop 因出口条件成立而退出
+	KeyLoopStuck    = "_loop_stuck"    // 检测到连续相同 Review,陷入停滞
+	KeyLoopCount    = "_loop_count"    // 当前循环轮数
+	KeyDecision     = "decision"       // 最近一次 Agent 决策
+	KeyLoopDecision = "_loop_decision" // 循环体内用于选择回边分支的决策快照
+	KeyStatus       = "status"         // 最近一次 Agent 状态
+	KeyOutput       = "output"         // 最近一次 Agent 输出
+	KeyCurrentNode  = "_current_node"
 )
 
 // StatusKey / ResultKey 生成节点级状态键。
@@ -206,9 +207,66 @@ func (l *lowerer) lower(p *Plan, name string) (agent.Agent, error) {
 		})
 	case KindRoute:
 		return l.routeAgent(p, name)
+	case KindSwitch:
+		return l.switchAgent(p, name)
 	default:
 		return l.noopAgent(name)
 	}
+}
+
+// switchAgent 纯条件选择:按状态求值条件挑一条链执行,自身不执行任何
+// 节点。用于一个决策点存在多条回边时,在循环体内选择本轮走哪条回边。
+// 条件都不成立时什么都不做(由循环守卫决定退出或继续下一轮)。
+func (l *lowerer) switchAgent(p *Plan, name string) (agent.Agent, error) {
+	env := l.env
+	var subs []agent.Agent
+	for i, b := range p.Branches {
+		a, err := l.lower(b.Target, fmt.Sprintf("%s.alt%d", name, i))
+		if err != nil {
+			return nil, err
+		}
+		subs = append(subs, a)
+	}
+	conditions := make([]string, len(p.Branches))
+	for i, b := range p.Branches {
+		conditions[i] = b.Condition
+	}
+	return agent.New(agent.Config{
+		Name:        l.uniqueName(name),
+		Description: "条件选择",
+		SubAgents:   subs,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				actions := &session.EventActions{StateDelta: map[string]any{}}
+				st := &stateAccess{ctx: ctx, actions: actions}
+				if aborted(st) {
+					return
+				}
+				for i, cond := range conditions {
+					if cond == "" {
+						continue
+					}
+					// 用决策快照求值:循环体内的 KeyDecision 已被
+					// loopResetter 清空(见 loopResetter 注释)。
+					ok, err := evalConditionWithDecision(cond, st, env.Vars)
+					if err != nil || !ok {
+						continue
+					}
+					env.Bus.Emit(event.New(event.NodeCompleted, env.Exec.ID, "", map[string]any{
+						"switch": name, "branch": i, "condition": cond,
+					}))
+					for ev, err := range subs[i].Run(ctx) {
+						if !yield(ev, err) {
+							return
+						}
+					}
+					yield(stateEvent(ctx, actions), nil)
+					return
+				}
+				yield(stateEvent(ctx, actions), nil)
+			}
+		},
+	})
 }
 
 func (l *lowerer) findNode(id string) (*model.Node, error) {
@@ -532,7 +590,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 					return
 				}
 
-				// 4. 无匹配出口且无循环:走第一个无条件出口(若有),否则结束
+				// 4. 无匹配出口且无循环:走第一个无条件出口(若有)
 				for i, b := range exitBranches {
 					if b.Condition == "" {
 						for ev, err := range exitAgents[i].Run(ctx) {
@@ -540,10 +598,18 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 								return
 							}
 						}
-						break
+						yield(stateEvent(ctx, actions), nil)
+						return
 					}
 				}
-				yield(stateEvent(ctx, actions), nil)
+
+				// 5. 决策点没有任何出口匹配、也没有兜底无条件分支,且不存在
+				//    循环:此前直接收尾,执行被标 COMPLETED —— 后续节点
+				//    一个都没跑,UI 却显示"成功"。这是"静默成功"最危险的一类
+				//    缺陷(条件写错、decision 值对不上、上游返回空决策都会
+				//    命中)。显式判失败:告诉用户哪个决策点没有可用出口。
+				l.abortNoRoute(ctx, actions, st, env, decisionNode.ID, exitBranches)
+				yield(escalateEvent(ctx, actions), nil)
 			}
 		},
 	})
@@ -551,6 +617,30 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 		return nil, err
 	}
 	return routeAgt, nil
+}
+
+// abortNoRoute 记录"决策点无可用出口"的中止:置 KeyAbort 与可读的
+// _error,并发出节点失败事件,让 engine 落库 FAILED 而不是 COMPLETED。
+func (l *lowerer) abortNoRoute(ctx agent.InvocationContext, actions *session.EventActions,
+	st StateAccess, env *RunEnv, nodeID string, branches []RouteBranch) {
+	conds := make([]string, 0, len(branches))
+	for _, b := range branches {
+		if b.Condition != "" {
+			conds = append(conds, b.Condition)
+		}
+	}
+	decision := stringOf(st, KeyDecision)
+	msg := fmt.Sprintf("决策节点 %s 没有匹配的出口分支(decision=%q)", nodeID, decision)
+	if len(conds) > 0 {
+		msg += fmt.Sprintf(",已尝试条件: %s", strings.Join(conds, " | "))
+	}
+	msg += ";请补一条无条件默认分支,或修正条件表达式"
+	st.Set(KeyAbort, "FAILED:"+nodeID)
+	st.Set("_error", msg)
+	env.SetNodeState(nodeID, string(model.NodeFailed))
+	env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, nodeID, map[string]any{
+		"node": nodeID, "error": msg,
+	}))
 }
 
 // loopResetter 在每轮循环开始时清除循环体节点的完成状态,
@@ -570,6 +660,13 @@ func (l *lowerer) loopResetter(bodyNodeIDs []string, revisitNodeID, name string)
 				for _, id := range ids {
 					st.Set(StatusKey(id), "")
 					st.Set(ResultKey(id), "")
+				}
+				// 决策快照:清空 KeyDecision 之前先留一份,供多条回边的
+				// switch 选择本轮分支(值来自刚执行完的 review;第 1 轮来自
+				// 循环外执行的决策节点)。不回存的话 switch 读到的永远是
+				// 空串,所有回边条件都不成立,一条分支都不会走。
+				if d, ok := st.Get(KeyDecision); ok && d != nil && fmt.Sprint(d) != "" {
+					st.Set(KeyLoopDecision, fmt.Sprint(d))
 				}
 				st.Set(KeyDecision, "")
 				// 轮数计数(值可能经 JSON 往返变成 float64)
@@ -702,16 +799,44 @@ func (l *lowerer) matchBranch(branches []RouteBranch, st StateAccess) (int, bool
 	return -1, false
 }
 
+// expressionEnv 是条件表达式的求值环境(map 形状:variables 为任意键值)。
+// 必须是 map 别名而非具名类型:expr.Env 内部对 env 做类型断言,具名 map
+// 会 panic("interface conversion: ... not map[string]interface {}")。
+// 校验器(workflow/validator)有一份同源定义,两侧必须同步。
+type expressionEnv = map[string]any
+
 // EvalCondition 用 expr 引擎对状态求值条件表达式。
 // 可用变量: decision / status / output / iteration / variables.xxx。
 func EvalCondition(expression string, st StateAccess, vars map[string]any) (bool, error) {
-	env := map[string]any{
+	env := expressionEnv{
 		"decision":  stringOf(st, KeyDecision),
 		"status":    stringOf(st, KeyStatus),
 		"output":    stringOf(st, KeyOutput),
 		"iteration": intOf(st, KeyLoopCount),
 		"variables": vars,
 	}
+	return runCondition(expression, env)
+}
+
+// evalConditionWithDecision 与 EvalCondition 相同,但 decision 取循环
+// 体内的决策快照(KeyLoopDecision)。循环体每轮开头会清空 KeyDecision,
+// 多回边分支必须据此判断本轮该走哪条回边。
+func evalConditionWithDecision(expression string, st StateAccess, vars map[string]any) (bool, error) {
+	decision := stringOf(st, KeyDecision)
+	if snap, ok := st.Get(KeyLoopDecision); ok && snap != nil && fmt.Sprint(snap) != "" {
+		decision = fmt.Sprint(snap)
+	}
+	env := expressionEnv{
+		"decision":  decision,
+		"status":    stringOf(st, KeyStatus),
+		"output":    stringOf(st, KeyOutput),
+		"iteration": intOf(st, KeyLoopCount),
+		"variables": vars,
+	}
+	return runCondition(expression, env)
+}
+
+func runCondition(expression string, env expressionEnv) (bool, error) {
 	program, err := expr.Compile(expression, expr.Env(env))
 	if err != nil {
 		return false, err
