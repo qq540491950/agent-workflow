@@ -18,6 +18,10 @@ import (
 	"agentworkflow/workflow/model"
 )
 
+// defaultScriptTimeoutSeconds 是 script 节点的默认超时(节点未配置
+// timeout_seconds 时使用)。
+const defaultScriptTimeoutSeconds = 120
+
 // ExecuteNode 实现 compiler.NodeRunner:记录节点明细后按类型分发执行。
 // compiler 负责编排;本方法只关心单节点的业务语义。
 func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
@@ -400,15 +404,25 @@ func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.N
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	// 超时与工作目录读节点配置(此前硬编码 120s、且始终用全局 Git 目录,
+	// 节点上写的 timeout_seconds / working_dir 都不生效)
+	timeout := defaultScriptTimeoutSeconds
+	if s := cfgInt(node, "timeout_seconds"); s > 0 {
+		timeout = s
+	}
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, shell, "-c", command)
 	// 脚本派生的后台子进程可能持有输出管道:进程组击杀 + WaitDelay
 	// 兜底,保证调用方及时返回(与 Agent 适配器同一策略)
 	coreagent.ConfigureProcess(cmd)
 	cmd.WaitDelay = 5 * time.Second
-	if e.Git.WorkingDir != "" {
-		cmd.Dir = e.Git.WorkingDir
+	workDir := cfgStr(node, "working_dir")
+	if workDir == "" {
+		workDir = e.Git.WorkingDir
+	}
+	if workDir != "" {
+		cmd.Dir = workDir
 	}
 	out, err := cmd.CombinedOutput()
 	// 进程已成功退出、仅孤儿子进程延迟关管道时,输出已完整捕获,不算失败

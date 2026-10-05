@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -426,4 +427,84 @@ edges: []
 		t.Fatalf("resume after restart: %v", err)
 	}
 	waitForState(t, eng2, exec.ID, model.ExecutionCompleted)
+}
+
+// 回归:script 节点此前硬编码 120s 超时、且始终在全局 Git 目录下执行,
+// 节点上写的 timeout_seconds / working_dir 都不生效(静默失配)。
+func TestScriptNodeHonorsTimeoutAndWorkingDir(t *testing.T) {
+	workDir := t.TempDir()
+
+	t.Run("timeout_seconds 生效", func(t *testing.T) {
+		eng := newMinimalEngine(t)
+		eng.AllowScriptNodes = func() bool { return true }
+		doc, err := dsl.Parse([]byte(`
+version: "1"
+workflow:
+  id: script-timeout
+  name: Script Timeout
+nodes:
+  - id: bg
+    type: script
+    command: "sleep 30"
+    timeout_seconds: 2
+edges: []
+`))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		exec, err := eng.Start(context.Background(), doc.ToModel(), "t", nil)
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		t0 := time.Now()
+		final := waitForState(t, eng, exec.ID, model.ExecutionFailed, model.ExecutionCompleted)
+		elapsed := time.Since(t0)
+		if elapsed > 20*time.Second {
+			t.Fatalf("timeout_seconds 未生效,耗时 %v(应约 2s 被杀)", elapsed)
+		}
+		if final.State != model.ExecutionFailed {
+			t.Errorf("超时后状态 = %s, want FAILED", final.State)
+		}
+	})
+
+	t.Run("working_dir 生效", func(t *testing.T) {
+		eng := newMinimalEngine(t)
+		eng.AllowScriptNodes = func() bool { return true }
+		doc, err := dsl.Parse([]byte(`
+version: "1"
+workflow:
+  id: script-wd
+  name: Script WD
+nodes:
+  - id: bg
+    type: script
+    command: "pwd"
+    working_dir: ` + workDir + `
+edges: []
+`))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		exec, err := eng.Start(context.Background(), doc.ToModel(), "t", nil)
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		final := waitForState(t, eng, exec.ID, model.ExecutionFailed, model.ExecutionCompleted)
+		if final.State != model.ExecutionCompleted {
+			t.Fatalf("state = %s err = %s", final.State, final.Error)
+		}
+		nodes, err := eng.Repo.ListExecutionNodes(exec.ID)
+		if err != nil {
+			t.Fatalf("nodes: %v", err)
+		}
+		var out string
+		for _, n := range nodes {
+			if n.NodeID == "bg" {
+				out = n.Output
+			}
+		}
+		if !strings.Contains(strings.TrimSpace(out), workDir) {
+			t.Errorf("working_dir 未生效: 输出 = %q, 期望包含 %q", out, workDir)
+		}
+	})
 }
