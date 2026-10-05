@@ -248,7 +248,7 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		// 并发运行时决策序列互相错位。
 		ExecutionID: env.Exec.ID,
 	}
-	if wd := e.Git.WorkingDir; req.WorkingDir == "" && wd != "" {
+	if wd := e.Git.WorkingDir(); req.WorkingDir == "" && wd != "" {
 		req.WorkingDir = wd
 	}
 
@@ -518,7 +518,7 @@ func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.N
 	cmd.WaitDelay = 5 * time.Second
 	workDir := cfgStr(node, "working_dir")
 	if workDir == "" {
-		workDir = e.Git.WorkingDir
+		workDir = e.Git.WorkingDir()
 	}
 	if workDir != "" {
 		cmd.Dir = workDir

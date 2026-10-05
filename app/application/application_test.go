@@ -542,21 +542,22 @@ func TestSettingsUpdatePropagatesPersistError(t *testing.T) {
 	if err := a.Settings.Set("git_working_dir", "/tmp/before"); err != nil {
 		t.Fatal(err)
 	}
-	before := a.GitSvc.WorkingDir
-	levelBefore := a.LogLevel
+	before := a.GitSvc.WorkingDir()
+	// 走访问器而非直读字段:logLevel 现在不导出(并发保护),直读会绕过锁
+	levelBefore := a.LogLevelValue()
 	_ = a.Repo.Close() // 之后所有写入都会失败
 
 	if _, err := a.Settings.Update("/tmp/after", "", nil); err == nil {
 		t.Error("git_working_dir 持久化失败应上抛")
 	}
-	if a.GitSvc.WorkingDir != before {
-		t.Errorf("内存态不应在落库失败后被改动: %q → %q", before, a.GitSvc.WorkingDir)
+	if a.GitSvc.WorkingDir() != before {
+		t.Errorf("内存态不应在落库失败后被改动: %q → %q", before, a.GitSvc.WorkingDir())
 	}
 	if _, err := a.Settings.Update("", "debug", nil); err == nil {
 		t.Error("log_level 持久化失败应上抛")
 	}
-	if a.LogLevel != levelBefore {
-		t.Errorf("日志级别不应在落库失败后被改动: %q → %q", levelBefore, a.LogLevel)
+	if a.LogLevelValue() != levelBefore {
+		t.Errorf("日志级别不应在落库失败后被改动: %q → %q", levelBefore, a.LogLevelValue())
 	}
 	allow := true
 	if _, err := a.Settings.Update("", "", &allow); err == nil {

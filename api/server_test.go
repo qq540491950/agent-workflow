@@ -182,7 +182,7 @@ func TestGitRoutes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repoDir, "f.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a.GitSvc.WorkingDir = repoDir
+	a.GitSvc.SetWorkingDir(repoDir)
 
 	s := NewServer(a)
 
@@ -1209,7 +1209,7 @@ func newGitTestServer(t *testing.T) *Server {
 	if err := os.WriteFile(filepath.Join(repoDir, "f.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a.GitSvc.WorkingDir = repoDir
+	a.GitSvc.SetWorkingDir(repoDir)
 	if code, _, raw := doReq(t, NewServer(a), http.MethodPost, "/api/git/commit", `{"message":"init"}`); code != http.StatusOK {
 		t.Fatalf("初始提交失败: %d (%s)", code, raw)
 	}

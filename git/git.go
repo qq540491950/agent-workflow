@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	coreagent "agentworkflow/agent"
@@ -18,14 +19,34 @@ import (
 // Service 在指定工作目录上执行 git 操作。
 type Service struct {
 	// WorkingDir 是默认仓库目录。
-	WorkingDir string
-	// Bin 是 git 可执行文件路径,默认 "git"。
+	//
+	// 由设置页写、**执行协程读**(git/script/agent 节点在跑时读它决定
+	// cmd.Dir):Go 字符串是 (ptr, len) 二元组,非原子,无锁并发读写是
+	// DATA RACE,撕裂后可产生非法指针。改由 wdMu 保护,读写一律走
+	// WorkingDir()/SetWorkingDir()。
+	wdMu       sync.RWMutex
+	workingDir string
+	// Bin 是 git 可执行文件路径,默认 "git"。启动后不再修改,无锁读。
 	Bin string
 }
 
 // New 创建 Git Service。
 func New(workingDir string) *Service {
-	return &Service{WorkingDir: workingDir, Bin: "git"}
+	return &Service{workingDir: workingDir, Bin: "git"}
+}
+
+// WorkingDir 读取默认仓库目录(并发安全)。
+func (s *Service) WorkingDir() string {
+	s.wdMu.RLock()
+	defer s.wdMu.RUnlock()
+	return s.workingDir
+}
+
+// SetWorkingDir 更新默认仓库目录(并发安全)。
+func (s *Service) SetWorkingDir(dir string) {
+	s.wdMu.Lock()
+	defer s.wdMu.Unlock()
+	s.workingDir = dir
 }
 
 // Status 表示 git status 的结构化结果。
@@ -49,7 +70,7 @@ type LogEntry struct {
 func (s *Service) Run(ctx context.Context, operation string, args map[string]any) (string, error) {
 	dir, _ := args["working_dir"].(string)
 	if dir == "" {
-		dir = s.WorkingDir
+		dir = s.WorkingDir()
 	}
 	var gitArgs []string
 	switch operation {
@@ -128,7 +149,7 @@ func checkRefName(name string) error {
 
 // Status 返回结构化状态。
 func (s *Service) Status(ctx context.Context) (*Status, error) {
-	short, err := s.exec(ctx, s.WorkingDir, []string{"status", "--porcelain", "-b"})
+	short, err := s.exec(ctx, s.WorkingDir(), []string{"status", "--porcelain", "-b"})
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +183,7 @@ func (s *Service) Diff(ctx context.Context, staged bool) (string, error) {
 	if staged {
 		args = append(args, "--cached")
 	}
-	out, err := s.exec(ctx, s.WorkingDir, args)
+	out, err := s.exec(ctx, s.WorkingDir(), args)
 	if err != nil {
 		return "", err
 	}
@@ -177,7 +198,7 @@ func (s *Service) Log(ctx context.Context, maxCount int) ([]LogEntry, error) {
 	if maxCount <= 0 {
 		maxCount = 10
 	}
-	out, err := s.exec(ctx, s.WorkingDir, []string{
+	out, err := s.exec(ctx, s.WorkingDir(), []string{
 		"log", fmt.Sprintf("-%d", maxCount),
 		"--pretty=format:%h%x09%an%x09%ad%x09%s", "--date=short",
 	})
@@ -200,10 +221,10 @@ func (s *Service) Log(ctx context.Context, maxCount int) ([]LogEntry, error) {
 
 // Commit 执行 git add -A + commit,返回提交输出。
 func (s *Service) Commit(ctx context.Context, message string) (string, error) {
-	if _, err := s.exec(ctx, s.WorkingDir, []string{"add", "-A"}); err != nil {
+	if _, err := s.exec(ctx, s.WorkingDir(), []string{"add", "-A"}); err != nil {
 		return "", err
 	}
-	out, err := s.exec(ctx, s.WorkingDir, []string{"commit", "-m", message})
+	out, err := s.exec(ctx, s.WorkingDir(), []string{"commit", "-m", message})
 	if err != nil {
 		return "", err
 	}
@@ -212,7 +233,7 @@ func (s *Service) Commit(ctx context.Context, message string) (string, error) {
 
 // CurrentBranch 返回当前分支名。
 func (s *Service) CurrentBranch(ctx context.Context) (string, error) {
-	out, err := s.exec(ctx, s.WorkingDir, []string{"rev-parse", "--abbrev-ref", "HEAD"})
+	out, err := s.exec(ctx, s.WorkingDir(), []string{"rev-parse", "--abbrev-ref", "HEAD"})
 	if err != nil {
 		return "", err
 	}

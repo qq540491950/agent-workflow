@@ -2,9 +2,12 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -174,5 +177,53 @@ func TestCommitHookCancelPromptReturn(t *testing.T) {
 	}
 	if elapsed > 5*time.Second {
 		t.Fatalf("Commit blocked %v after cancel — orphan process still holding pipe", elapsed)
+	}
+}
+
+// TestWorkingDirConcurrentAccess 验证默认工作目录的并发安全。
+//
+// WorkingDir 由设置页写、**执行协程读**(git / script / agent 节点在跑时
+// 读它决定 cmd.Dir)。Go 字符串是 (ptr, len) 二元组,非原子:此前是裸
+// 导出字段,无锁并发读写是 DATA RACE,撕裂后可产生非法指针
+// (AGENTS.md 硬性约定 #15)。
+func TestWorkingDirConcurrentAccess(t *testing.T) {
+	s := New("/tmp/before")
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// 读者:模拟执行协程
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = s.WorkingDir()
+				}
+			}
+		}()
+	}
+	// 写者:模拟设置页反复改目录
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			s.SetWorkingDir(fmt.Sprintf("/tmp/dir-%d", i))
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// 最终值必须是一个完整的字符串(不是撕裂的 ptr/len)
+	final := s.WorkingDir()
+	if final == "" {
+		t.Error("最终工作目录不应为空")
+	}
+	if !strings.HasPrefix(final, "/tmp/dir-") {
+		t.Errorf("最终工作目录 = %q,形状异常(可能发生了字符串撕裂)", final)
 	}
 }

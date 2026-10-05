@@ -46,18 +46,23 @@ type App struct {
 	Perms  *permission.Manager
 	GitSvc *git.Service
 
-	DataDir  string
-	LogLevel string
-	// skillsMu 保护 DisabledSkills。此前是裸 map:执行协程在 runSkillNode
+	DataDir string
+	// logLevel 同样不导出:设置页写、Info 读,跨 goroutine(见 logLevelMu)。
+	logLevel string
+	// skillsMu 保护 disabledSkills。此前是裸 map:执行协程在 runSkillNode
 	// 里经 IsSkillDisabled 读,Skills 页开关经 SetEnabled 写 ——
 	// 并发读写 map 在 -race 下是 DATA RACE,生产环境是 runtime 的
 	// "concurrent map read and map write" 直接 fatal(带执行中的应用退出)。
+	//
+	// 字段**不导出**:导出等于把"必须持锁"这个约定交给调用方自觉,而
+	// package 内的 4 处访问都已有 SkillDisabled / setSkillDisabled 封装。
+	// 同理 LogLevel 见下。
 	skillsMu       sync.RWMutex
-	DisabledSkills map[string]bool
+	disabledSkills map[string]bool
 	// scriptNodes:设置页「允许执行 script 节点」。原子类型:设置页可在
 	// 执行运行中切换,裸 bool 会被并发读写(同 logx SetLevel 的教训)。
 	scriptNodes atomic.Bool
-	// logLevelMu 保护 LogLevel(设置页写、Settings.Info 读)。
+	// logLevelMu 保护 logLevel(设置页写、Settings.Info 读)。
 	logLevelMu sync.RWMutex
 	// 供 Wails/SSE 桥接实时事件。
 	eventsMu      sync.RWMutex
@@ -103,8 +108,8 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 		Perms:          perms,
 		GitSvc:         gitSvc,
 		DataDir:        dataDir,
-		LogLevel:       "info",
-		DisabledSkills: map[string]bool{},
+		logLevel:       "info",
+		disabledSkills: map[string]bool{},
 		eventHandlers:  map[int]func(event.UIEvent){},
 	}
 	app.Engine = wfruntime.NewEngine(agents, skills, perms, bus, gitSvc, repo)
@@ -133,21 +138,21 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	// 工作目录设置
 	var wd string
 	if err := repo.GetSetting("git_working_dir", &wd); err == nil && wd != "" {
-		gitSvc.WorkingDir = wd
+		gitSvc.SetWorkingDir(wd)
 	}
 	// 日志级别持久化
 	var lv string
 	if err := repo.GetSetting("log_level", &lv); err == nil && lv != "" {
 		logx.SetLevel(lv)
 	}
-	app.LogLevel = lv
-	if app.LogLevel == "" {
-		app.LogLevel = "info"
+	app.logLevel = lv
+	if app.logLevel == "" {
+		app.logLevel = "info"
 	}
 	// 禁用 Skill 恢复
 	if disabled, err := repo.ListDisabledSkills(); err == nil {
 		app.skillsMu.Lock()
-		app.DisabledSkills = disabled
+		app.disabledSkills = disabled
 		app.skillsMu.Unlock()
 	}
 	// script 节点放行开关(默认关闭:该节点可执行任意本地命令;
@@ -329,7 +334,7 @@ func boolOf(v any) bool {
 func (a *App) SkillDisabled(id string) bool {
 	a.skillsMu.RLock()
 	defer a.skillsMu.RUnlock()
-	return a.DisabledSkills[id]
+	return a.disabledSkills[id]
 }
 
 // setSkillDisabled 更新内存态(调用方需持写锁)。
@@ -337,9 +342,9 @@ func (a *App) setSkillDisabled(id string, disabled bool) {
 	a.skillsMu.Lock()
 	defer a.skillsMu.Unlock()
 	if disabled {
-		a.DisabledSkills[id] = true
+		a.disabledSkills[id] = true
 	} else {
-		delete(a.DisabledSkills, id)
+		delete(a.disabledSkills, id)
 	}
 }
 
@@ -347,14 +352,14 @@ func (a *App) setSkillDisabled(id string, disabled bool) {
 func (a *App) LogLevelValue() string {
 	a.logLevelMu.RLock()
 	defer a.logLevelMu.RUnlock()
-	return a.LogLevel
+	return a.logLevel
 }
 
 // setLogLevel 更新内存态日志级别。
 func (a *App) setLogLevel(level string) {
 	a.logLevelMu.Lock()
 	defer a.logLevelMu.Unlock()
-	a.LogLevel = level
+	a.logLevel = level
 }
 
 // runSubworkflow 同步执行嵌套工作流。
@@ -912,7 +917,7 @@ func (s *GitService) Commit(ctx context.Context, message string) (string, error)
 
 // SetWorkingDir 更新 Git 工作目录。
 func (s *GitService) SetWorkingDir(dir string) error {
-	s.app.GitSvc.WorkingDir = dir
+	s.app.GitSvc.SetWorkingDir(dir)
 	return s.app.Repo.SaveSetting("git_working_dir", dir)
 }
 
@@ -945,7 +950,7 @@ func (s *SettingsService) Info() *SettingsInfo {
 	var wd string
 	_ = s.app.Repo.GetSetting("git_working_dir", &wd)
 	if wd == "" {
-		wd = s.app.GitSvc.WorkingDir
+		wd = s.app.GitSvc.WorkingDir()
 	}
 	return &SettingsInfo{
 		DataDir:          s.app.DataDir,
@@ -1058,7 +1063,7 @@ func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNode
 		if err := s.Set("git_working_dir", gitWorkingDir); err != nil {
 			return nil, err
 		}
-		s.app.GitSvc.WorkingDir = gitWorkingDir
+		s.app.GitSvc.SetWorkingDir(gitWorkingDir)
 	}
 	if logLevel != "" {
 		if err := s.Set("log_level", logLevel); err != nil {
