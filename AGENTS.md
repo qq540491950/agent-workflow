@@ -76,6 +76,17 @@ GOOS=windows go build ./agent/... ./workflow/...
 12. **执行协程必须有兜底**:`execute` 顶层 `recover()` + 快照非空校验
     (`workflow/runtime/engine.go`)。新增任何 panic 风险路径(模板渲染、
     新适配器)不得依赖上层保护。
+13. **校验期与运行期必须同源**:条件表达式的可用变量集合、节点类型的
+    必填配置结构各只有一份来源(`compiler` 与 `validator` 共用)。
+    两份实现各自演化会直接变成"用户被自己的校验器挡住"或"运行期
+    支持但校验期判非法"(轮次 27 的 P0)。改任一侧必须同步另一侧。
+14. **"该失败却成功"等同 P0**:执行结束前若仍有未执行的可达节点
+    (条件出口全不匹配、并行不收敛、回边被丢弃),必须显式失败并给出
+    可读原因,不允许默认收尾落 COMPLETED。静默成功比崩溃更危险。
+15. **共享可变状态一律加锁**:跨 goroutine 读写的 map/slice/string
+    (如 DisabledSkills、LogLevel、Git 工作目录)必须有 `RWMutex` 或
+    原子类型。裸 map 的并发读写在生产是 runtime fatal,`recover`
+    救不了(轮次 27 的 P0)。
 
 ## 测试基建位置
 
@@ -94,4 +105,6 @@ GOOS=windows go build ./agent/... ./workflow/...
 
 ## 已知边界与后续方向
 
-见 `docs/ROADMAP.md`(ADK v2 迁移、session 持久化、托盘等评估与暂缓理由)。
+- `docs/ROADMAP.md`:ADK v2 迁移、session 持久化、托盘等评估与暂缓理由。
+- `docs/OPTIMIZATION.md`:轮次 27 全面审计的缺陷清单、已修项,以及剩余
+  缺陷的分批落地路线(运行时语义补齐 / 并行编译正确性 / 测试基建)。

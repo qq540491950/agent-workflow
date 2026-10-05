@@ -463,7 +463,128 @@
   agents/skills/git/settings/backup 等分支。
 - 校验器表达式环境缺 `variables`(运行时 `EvalCondition` 支持)、
   并行分支不收敛时后续节点被静默丢弃、节点明细按 `exec:node` 覆盖导致
-  重试/循环历史丢失 —— 已记录,未在本轮处理。
+  重试/循环历史丢失 —— 已记录,**均在轮次 27 修复**。
+
+## 轮次 27:三轮并行审计的全面收敛(P0 静默成功 + P1 数据/契约 + 前端 10 项)
+
+> 方法:三轮并行只读审计(workflow 运行时+编译器 / 持久化+API+应用层 /
+> 前端+双模式契约)共提出 41 条,逐条人工复核源码后定级;22 条已修复,
+> 每个修复与回归测试同 commit(3 个提交)。
+>
+> 与前几轮的关键差别:轮次 24-26 的缺陷多是崩溃/挂起;本轮 6 个 P0 里
+> 有 4 个属于**静默成功**——工作流语义上没走完,系统却报告成功。这类
+> 缺陷不触发任何异常路径,是"门禁全绿"却仍有 P0 的根本原因。
+
+### P0 修复(#42-#47)
+
+- **#42 决策点无匹配出口即静默 COMPLETED**:`review` 的条件出口全部不匹配
+  且无默认分支时,路由直接收尾 → 后续节点一个没跑,执行落 COMPLETED,
+  UI 显示"成功"。改为置 `KeyAbort` 落 FAILED,错误里带决策值与已尝试条件
+  并发 `node.failed`。`TestNoMatchingBranchFailsExecution`、
+  `TestSingleUnconditionalExitStillWorks`(补默认分支仍走通)。
+- **#43 决策点多条回边只保留第一条**:其余回边既不进 exits 也不进 loop,
+  对应子图永不执行,而校验器的可达性是纯图连通性判断,该节点"可达"
+  因而通过 —— 用户既看不到错误也查不到原因。新增 `KindSwitch` IR 节点
+  (纯条件选择、不重跑决策节点)+ 循环内决策快照键 `KeyLoopDecision`
+  (循环体每轮会清空 `KeyDecision`,不回存的话所有回边条件恒不成立)。
+  `TestSecondBackEdgeBranchIsCompiled`、`TestRefactorBackEdgeActuallyRuns`。
+- **#44 DSL `variables:` 段运行时完全失效**:`Engine.Start` 只取运行请求
+  传入的变量,工作流里声明的 variables 完全不生效(`{{variable.x}}` 渲染
+  空串、`variables.x == ...` 条件恒假),而 DSL 解析与导出都保留着这段。
+  改为以 DSL 变量打底、请求变量覆盖。`TestWorkflowVariablesReachRuntime`、
+  `TestRunVariablesOverrideWorkflowVariables`。
+- **#45 校验器比运行时更严**:validator 用 struct env 只暴露 4 个字段,
+  `variables.env == "prod"` 被判 unknown name 而拒绝保存,运行期完全
+  支持。两侧改为同源的 map 形状环境。`expression_env_test.go` 4 组
+  (含"两侧环境键集合必须一致"的直接比对)。
+- **#46 节点明细按 `exec:node` 覆盖**:循环第二轮与节点级重试整行覆盖上一轮
+  (attempt 恒为 1),监控页看不到任何迭代/重试痕迹。主键改为
+  `exec:node:attempt`,每次执行独立成行。`TestFullLoop` 的断言同步改写 ——
+  **此前它把"覆盖"当成期望值固化了**(`len==5` 且 `attempt==2`)。
+- **#47 `DisabledSkills` 裸 map 并发读写**:执行协程经 `IsSkillDisabled` 读、
+  Skills 页开关经 `SetEnabled` 写,生产环境是 `concurrent map read and map
+  write` **runtime fatal**(recover 无效,整应用退出,违反约定 #12 的意图)。
+  加 `RWMutex`;顺带修正 `SetEnabled` 写序(先落库再改内存)与 `LogLevel`
+  无锁字段。`TestSkillDisabledConcurrentAccess` **实测有效**:回退锁后
+  `-race` 报 3 处 DATA RACE 并 FAIL。
+
+### P1 修复(#48-#55)
+
+- **#48 工作流版本号由客户端请求体决定**:`model.Workflow.Version` 带 json
+  tag,`POST /api/workflows` 直接反序列化,伪造 `version:99` 被 ++ 后落库成
+  v100 并留下伪造快照;重复提交还会因 `workflow_versions` 唯一约束被
+  `INSERT OR REPLACE` 静默覆盖,版本历史失真且无告警。改为版本号以库中
+  `MAX(version)` 为准(事务内读取),快照改普通 `INSERT` 让唯一冲突报错。
+- **#49 `SaveWorkflow` 吞存在性查询错误**:DB 故障时对已存在工作流走 INSERT
+  分支,真实根因被一句主键冲突掩盖。改为上抛。
+- **#50 事件流三个出口不脱敏**:节点失败的 error 常含 CLI stderr,而 stderr
+  里常带 `ANTHROPIC_API_KEY=sk-…`。日志侧已由 `logx.Mask` 覆盖,但事件有
+  三条下游(SQLite 落库 / SSE / Wails IPC)此前是旁路。在 `Bus.Emit`
+  分发点统一脱敏一次,三条出口同时生效,新增订阅者不会漏。
+  脱敏走**廉价子串预筛后再进正则** —— Emit 是每节点每次执行的热路径,
+  裸正则在 `-race` 下让 SSE 背压用例从 0.6s 涨到 2.3s(2000 事件×1.1ms)。
+- **#51 `retry` 端点吞请求体解析错误**:`{"skip":"yes"}` 被吞后 skip 静默
+  变 false,用户点「跳过失败节点」实际重跑那个失败的 Agent(可能重复写
+  文件/重复外部调用)还返回 200 假装成功。
+- **#52 `enable` 端点 fail open**:`value != "false"` 让缺参、?value=0、
+  ?value=no 全部判为"启用" —— 一个禁用开关缺参数反而打开工作流。改为只
+  接受显式 true/false,其余 400。
+- **#53 JSON 请求体无上限**:服务器模式监听 127.0.0.1 且无鉴权,本机任意
+  进程都能打这些端点;此前只有 import 端点有 1MB 限制。统一
+  `MaxBytesReader`(空 body 端点用 optional 变体,保持 `/run` 可不带 body)。
+- **#54 备份恢复绕过校验**:`RestoreBackup` 直接 `Repo.SaveWorkflow`,不走
+  `WorkflowService.Save` 与 `Engine.Validate`,悬空边/空图的非法定义会落库
+  并在列表里正常可见,直到运行时才炸。改为过校验 + 跳过计数 + 回报非法 ID;
+  Agent 配置解不出结构也不再落库(此前形成"库里有、运行不生效"的分裂态)。
+- **#55 补 `events(type)` 与 `executions(created_at)` 索引**:审计页 type
+  前缀过滤与执行列表排序此前都退化为全表扫描,events 是唯一无上限增长的表。
+
+### 前端修复(#56-#65)
+
+- **#56 `versionDSL`/`exportYAML` 把后端错误 JSON 当成内容**:两者绕过
+  `http()` 自建 fetch 且不检查 `res.ok`,`wrap()` 的 JSON 错误体被
+  `res.text()` 原样返回 —— 404 的错误弹进版本对话框,或写进下载的
+  `.yaml`。新增 `httpText()`;`WorkflowHistory` 的 try/catch 此前永远
+  不触发,因为 fetch 并不抛错。
+- **#57 `http()` 丢弃后端 `code`/`kind`**:403 权限不足与 400 参数错误在
+  UI 上完全无法区分。新增 `ApiError` 携带 `code`/`kind`/`status`。
+- **#58 Agents Test 按钮吞异常**:无 catch → unhandled rejection,用户点了
+  按钮完全没有反馈。补 catch + busy 态。
+- **#59 权限切换用陈旧闭包快照**:快速连点同一 Switch 时两次都基于同一份
+  `a.permissions` 计算新值,最终态与用户意图相反;失败无回滚。改为以最新
+  state 为基准 + 乐观更新 + 失败回滚 + 同行 in-flight 锁。
+- **#60 Executions 表格列错位**:删除按钮单元格被插在第 2 位而表头第 2 列
+  是 Workflow;空态 `colSpan={7}` 也与 8 列表头不符。按钮移到行尾。
+- **#61 ExecutionMonitor 三处列表未过 `asArray`**:桌面 IPC 允许返回
+  null,`setNodes(null)` 会在 `nodes.length` 抛 TypeError 导致整页白屏。
+  全项目 12 处列表都用了 `asArray`,唯独这三处漏掉。
+- **#62 layout 用 `?? []` 而非 `asArray`**:挡不住"被解析成 HTML 兜底页的
+  对象",`execs.filter` 抛错让整个 Layout 崩溃 —— 影响面是所有页面。
+- **#63 GitPanel 渲染处读 `.length` 崩溃**:`fileChips` 内部有 `files ?? []`
+  但调用点的 `status.staged.length` 先执行,防御位置错了。改为在 refresh
+  里用 `asArray` 归一整个 status 形状。
+- **#64 GitPanel commit 无二次确认**:后端走 `git add -A` + commit,输入框
+  回车即提交全部改动(含未跟踪),不可逆。补 confirm 并展示文件数。
+- **#65 Agent「恢复默认」能力空洞**:后端 REST 与 Wails 绑定都就绪,但
+  `api.ts` 两个分支都没封装、UI 无入口 —— 配错配置后没有逃生口。补双分支
+  封装 + 按钮(带确认)。另:重试/跳过按钮接入 busy 态防连点。
+
+### 回归汇总(轮次 27 收尾)
+
+- `gofmt`/`go vet` 干净;`go test -count=1 -race ./...` 全部通过。✅
+- 前端 `tsc --noEmit` + `eslint --max-warnings=0` + `vite build` 通过;
+  vitest 32/32(新增 `httpText` 与 `ApiError` 共 5 个用例)。✅
+- `./scripts/verify.sh` 7 步全绿(含 smoke 9 项 / SSE 4 项)。✅
+- 新增回归测试:validator 4 组 + runtime 8 组 + application 5 组 +
+  api 3 组 + logx 3 组 + event 2 组 + persistence 2 组。✅
+
+### 仍未覆盖(留待后续,详见 `docs/OPTIMIZATION.md`)
+
+- 组件层交互行为仍无 jsdom 用例(本轮新增的 confirm/busy/乐观回滚)。
+- `irBuilder.stopped` 共享字段在"并行套并行"下会丢失外层 stop 集合 ——
+  目前没有能暴露该行为的用例,需先补测试再重构。
+- `WAIT_USER` 恢复时 Agent/Skill 节点被原样重跑、用户答复丢失。
+- 备份三个 API 方法零 UI 消费(能力看起来存在但不可达)。
 
 ## 汇总
 
@@ -480,5 +601,6 @@
 | 24 | 官方资料对照审计 + 可靠性强化(见上) | ✅ | #9 孤儿进程 #10 循环计数 #11 取消 ctx #12 并行竞态 #13 桌面下载断链 #14 双开 #15 种子路径 #16 备份恢复 |
 | 25 | 持续审计迭代:并发/资源/实时流 | ✅ | #17 SSE 未接通 #18 git 钩子阻塞 #19 ErrWaitDelay #20 Skill WAIT_USER #21 Bus 内存增长 #22 logx 竞争 |
 | 26 | 静态审计收敛:P0 正确性/安全 + P1 数据与体验 | ✅ | #29 git add_all 不提交 #30 reject 等同 continue #31 第二个闸门被跳过 #32 script 节点无权限门 #33 执行 panic 杀进程 #34 logx args 不脱敏 #35 SSE 背压反压引擎 #36 属性面板重挂载 #37 节点 ID 冲突 #38 保存无视校验 #39 吞错清空权限/设置假成功 #40 404 语义不齐 #41 script 配置失效 |
+| 27 | 三轮并行全面审计(运行时/持久化+API/前端):P0 静默成功 + P1 数据/契约 | ✅ | #42 无出口静默 COMPLETED #43 多回边丢弃 #44 DSL variables 失效 #45 校验器拒绝合法表达式 #46 节点明细按 exec:node 覆盖 #47 DisabledSkills 并发 fatal #48 版本号越权 #49 吞存在性查询错 #50 事件流泄密 #51 retry 吞 body 错 #52 enable fail open #53 请求体无上限 #54 备份绕过校验 #55 缺索引 #56-#65 前端 10 项 |
 
 **需求第四十五条(第一阶段完成标准)逐条核对**见 `docs/index.html` 使用说明附录。
