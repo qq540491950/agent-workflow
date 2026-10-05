@@ -70,3 +70,52 @@ func TestSSEStream(t *testing.T) {
 		}
 	}
 }
+
+// 回归:SSE 订阅回调由总线在产生事件的工作流协程里同步调用,直接写
+// ResponseWriter 时,慢客户端的 TCP 背压会反压到执行引擎(一个不读数据的
+// 连接即可卡住工作流)。现为每连接带缓冲队列 + 独立写协程,投递非阻塞。
+func TestSSESlowClientDoesNotBlockProducer(t *testing.T) {
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+	s := NewServer(a)
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// 故意不读响应体:模拟挂死/极慢的客户端
+	t.Cleanup(func() { resp.Body.Close() })
+	time.Sleep(200 * time.Millisecond) // 等订阅建立
+
+	// 事件量远超队列容量:写协程会被 socket 背压卡住,队列随之填满
+	const n = 2000
+	big := strings.Repeat("x", 128)
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		for i := 0; i < n; i++ {
+			a.Bus.Emit(event.New(event.NodeStarted, "exec-slow", "n1", map[string]any{"i": i, "pad": big}))
+		}
+		done <- time.Since(start)
+	}()
+
+	select {
+	case elapsed := <-done:
+		if elapsed > 2*time.Second {
+			t.Errorf("Emit 被慢客户端阻塞 %v(应非阻塞投递)", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Emit 长时间未返回:订阅回调仍在同步写客户端")
+	}
+}

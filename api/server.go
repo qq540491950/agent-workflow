@@ -10,7 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"agentworkflow/agent"
@@ -370,6 +370,12 @@ func (s *Server) wrap(h func(http.ResponseWriter, *http.Request) error) http.Han
 // handleSSE 推送实时 UIEvent。
 // 连接建立立即下发响应头 + SSE 注释行:否则 EventSource 在首个事件前
 // 一直处于 CONNECTING 状态;每 15s 发 keepalive 注释防止代理断开空闲连接。
+//
+// 扇出非阻塞:订阅回调由总线在"产生事件的工作流协程"里同步调用,
+// 直接写 ResponseWriter 会让慢客户端的 TCP 背压反压到执行引擎
+// (单个挂死连接即可卡住工作流)。故每连接一个带缓冲 channel +
+// 独立写协程,回调只做非阻塞投递;缓冲满则丢弃并计数(事件已实时落库,
+// 回放走 /api/executions/{id}/events,实时流按 best-effort 处理)。
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -383,33 +389,34 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, ": connected\n\n")
 	flusher.Flush()
 
-	// 事件(总线 emit goroutine)与 keepalive(本 goroutine)并发写,需互斥;
-	// closed 防止处理器退出后仍有飞行中写入与 finishRequest 竞争
-	var writeMu sync.Mutex
-	closed := false
-	writeSSE := func(payload string) {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		if closed {
+	const queueSize = 256
+	queue := make(chan event.UIEvent, queueSize)
+	var dropped atomic.Int64
+
+	// 写超时:客户端停止读取时,写操作最多阻塞到该期限,避免写协程永久挂起
+	rc := http.NewResponseController(w)
+	write := func(payload string) {
+		if err := rc.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			logx.Debug("SSE 设置写超时失败(连接可能已关闭)", "error", err.Error())
+		}
+		if _, err := io.WriteString(w, payload); err != nil {
+			logx.Debug("SSE 写入失败(客户端已断开)", "error", err.Error())
 			return
 		}
-		fmt.Fprint(w, payload)
 		flusher.Flush()
 	}
 
 	unsub := s.app.Subscribe(func(ev event.UIEvent) {
-		raw, err := json.Marshal(ev)
-		if err != nil {
-			return
+		select {
+		case queue <- ev:
+		default:
+			// 慢客户端:丢弃而不是阻塞执行引擎,每 100 条记一次日志
+			if n := dropped.Add(1); n%100 == 1 {
+				logx.Warn("SSE 客户端消费过慢,已丢弃事件", "dropped", n, "queue", queueSize)
+			}
 		}
-		writeSSE("data: " + string(raw) + "\n\n")
 	})
-	defer func() {
-		writeMu.Lock()
-		closed = true
-		writeMu.Unlock()
-		unsub()
-	}()
+	defer unsub()
 
 	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
@@ -417,8 +424,14 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case ev := <-queue:
+			raw, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			write("data: " + string(raw) + "\n\n")
 		case <-keepalive.C:
-			writeSSE(": keepalive\n\n")
+			write(": keepalive\n\n")
 		}
 	}
 }
