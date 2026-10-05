@@ -392,6 +392,79 @@
 - 前端构建 + vitest 12/12。✅
 - smoke.sh 7 项 + smoke_sse.sh 3 项全部通过。✅
 
+## 轮次 26:静态审计驱动的缺陷收敛(P0 正确性/安全 + P1 数据与体验)
+
+> 方法:三轮并行只读审计(workflow 运行时+编译器 / 持久化+API+应用层 /
+> 前端+桌面壳)逐条人工复核后按严重度修复;每项修复与回归测试同 commit,
+> 11 个提交。审计结论的前提是"门禁全绿"——缺陷全部落在未被测试覆盖的
+> 语义分支上(测试集中在解析→编译→跑通→回放的正常路径)。
+
+### P0 修复(#29-#37)
+
+- **#29 git 节点 add_all 覆盖 commit 参数**:`gitArgs` 被整体覆盖成
+  `["add","-A"]`,提交从未发生却返回成功(工作区脏、后续 diff/review 读到
+  未提交状态)。同时 `branch`/`checkout` 拒绝以 `-` 开头的引用名(DSL
+  参数注入)。`TestRunCommitWithAddAll`、`TestRunRejectsOptionLikeRefName`。
+- **#30 人工闸门 reject 等同 continue**:`runHumanNode` 对任何响应返回
+  NodeSuccess,拒绝后后续节点照跑、执行标 COMPLETED(内置示例
+  approval-demo 即此拓扑)。改走通用 NodeFailed 分支,与 `lower.go` 路由
+  路径的 reject→FAILED 对齐。`TestHumanRejectAbortsExecution`。
+- **#31 `_user_input` 消费后不清除**:`StateAccess` 无 Delete,该键残留
+  会话状态并随 StateData 持久化,同链第二个 human 闸门读到上一次的输入
+  直接 SUCCESS。`StateAccess` 增加 Delete(nil 即不存在)。实测修复前第二道
+  闸门直接跳到 submit 并 COMPLETED。`TestSecondHumanGatePausesAgain`。
+- **#32 script 节点无任何权限门**:以 `/bin/sh -c` 执行 DSL 任意命令,而
+  工作流可由 YAML 导入获得,叠加未鉴权 REST 层即任意命令执行。新增显式
+  开关 `AllowScriptNodes`(设置项 `allow_script_nodes`,默认 false,
+  fail closed)+ 设置页「安全」卡片。`TestScriptNodeDeniedByDefault`、
+  `TestScriptNodesGateDefaultsOff`。
+- **#33 执行协程无 recover**:全仓零 `recover()`,任一节点适配器/ADK
+  panic 会终止整个进程且执行永久停留 RUNNING。`execute` 顶层兜底 +
+  快照非空校验(修 `snapshot_json` 损坏时的 nil 解引用根因)。
+  `TestNodePanicDoesNotCrashProcess`、`TestMissingSnapshotFailsCleanly`。
+
+### P1 修复(#38-#45)
+
+- **#34 logx 只脱敏 msg**:args 原样落盘,api 层 `error=` 里的 CLI stderr
+  会带出 token。现对 string/error/Stringer 参数值脱敏。
+- **#35 SSE 背压反压执行引擎**:订阅回调在产生事件的协程里同步写客户端,
+  一个不读数据的连接即可卡住工作流。改为每连接 256 条缓冲队列 + 写超时
+  10s,投递非阻塞(满则丢弃并告警,回放走 SQLite)。
+  `TestSSESlowClientDoesNotBlockProducer`(旧实现实测 10s 超时失败)。
+- **#36 属性面板每次按键重挂载**:key 含 `JSON.stringify(cfg)`,cfg 每次
+  按键都是新对象 → 面板卸载重建、输入框失焦,配置字段只能敲一个字符。
+- **#37 新节点 ID 与画布冲突**:自增计数器从不扫描已 hydrate 的节点,
+  打开含 `agent-1` 的工作流再拖 agent 节点必然重复 ID,保存被
+  DUPLICATE_NODE 拒绝。改为 `nextNodeId` 扫描取最小可用值。
+- **#38 保存无视校验结果**:校验不通过仍提交,用户只看到后端裸 JSON 错误;
+  "已保存但存在校验问题"分支不可达。改为校验不通过即阻止保存。
+- **#39 吞错导致权限被清空/设置假成功**:`SetPermission` 读失败后重建空
+  map → 整表写清空其他 Agent 权限策略;`Settings.Update` 先改内存再忽略
+  写错误;`Export` 丢三次查询错误;`parseWorkflow` 丢 Unmarshal 错误落库
+  残缺工作流。四处均改为上抛/先落库后改内存。
+- **#40 404 语义不齐**:`wrapNotFound` 是无人调用的死代码,
+  `GetWorkflowVersion`/`GetSetting` 走 `wrap()` → 400。接入后返回 404 +
+  `code: NOT_FOUND`。
+- **#41 script 节点配置静默失效**:`timeout_seconds` 被硬编码 120s 覆盖、
+  `working_dir` 被全局 Git 目录覆盖。
+
+### 回归汇总(轮次 26 收尾)
+
+- `gofmt`/`go vet` 干净;`go test -count=1 -race ./...` 全部通过(新增
+  HITL/panic/script 门禁共 8 个新回归用例)。✅
+- 前端 `tsc` + `eslint` + `vite build` 通过;vitest 27/27(新增
+  `designer.test.ts` 4 组 `nextNodeId` 用例)。✅
+- `smoke.sh` 9 项 + `smoke_sse.sh` 4 项全部通过。✅
+
+### 仍未覆盖(留待后续)
+
+- 属性面板连续输入的焦点保持、危险操作二次确认等交互行为无 jsdom 用例。
+- REST 端点契约测试仍只覆盖 6 处(30+ 端点),`api.test.ts` 尚未覆盖
+  agents/skills/git/settings/backup 等分支。
+- 校验器表达式环境缺 `variables`(运行时 `EvalCondition` 支持)、
+  并行分支不收敛时后续节点被静默丢弃、节点明细按 `exec:node` 覆盖导致
+  重试/循环历史丢失 —— 已记录,未在本轮处理。
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
@@ -406,5 +479,6 @@
 | 8 | 回归:双模式传输 | ✅ | #4 传输误判 #5 /wails/ 路径拦截 |
 | 24 | 官方资料对照审计 + 可靠性强化(见上) | ✅ | #9 孤儿进程 #10 循环计数 #11 取消 ctx #12 并行竞态 #13 桌面下载断链 #14 双开 #15 种子路径 #16 备份恢复 |
 | 25 | 持续审计迭代:并发/资源/实时流 | ✅ | #17 SSE 未接通 #18 git 钩子阻塞 #19 ErrWaitDelay #20 Skill WAIT_USER #21 Bus 内存增长 #22 logx 竞争 |
+| 26 | 静态审计收敛:P0 正确性/安全 + P1 数据与体验 | ✅ | #29 git add_all 不提交 #30 reject 等同 continue #31 第二个闸门被跳过 #32 script 节点无权限门 #33 执行 panic 杀进程 #34 logx args 不脱敏 #35 SSE 背压反压引擎 #36 属性面板重挂载 #37 节点 ID 冲突 #38 保存无视校验 #39 吞错清空权限/设置假成功 #40 404 语义不齐 #41 script 配置失效 |
 
 **需求第四十五条(第一阶段完成标准)逐条核对**见 `docs/index.html` 使用说明附录。

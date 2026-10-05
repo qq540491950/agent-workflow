@@ -29,13 +29,14 @@ wails3 task package   # 产物 build/bin/agent-workflow.app
 - **可视化编排**:React Flow 画布,9 种可注册节点类型,拖拽/连线/自动布局/复制,结构化校验并定位问题节点
 - **每 Agent 模型配置**:模型 / API 端点 / 超时 / 环境变量逐 Agent 配置,仅通过调用级参数与环境变量生效,**不影响本地配置文件**;节点可再逐节点覆盖
 - **循环与保护**:Review→Fix 循环自动识别,`max_iterations` + 停滞检测,达到上限转人工(wait_user)或失败
-- **Human-in-the-loop**:执行暂停等待输入(Approve / Reject / Continue / Instruction),指令注入后续上下文;失败执行可重试或跳过
+- **Human-in-the-loop**:执行暂停等待输入(Approve / Reject / Continue / Instruction),指令注入后续上下文;**Reject 会中止工作流**(落库 FAILED),同链多个闸门互不串扰;失败执行可重试或跳过
 - **并行编排**:parallel → merge 分支并行,汇合后继续
 - **持久化与恢复**:执行实时写 SQLite,重启后可恢复;Execution 绑定工作流版本;数据一键备份/恢复
 - **可靠性**:工作流级超时、节点级重试(次数+退避)、循环上限与停滞检测、失败节点重试/跳过
 - **可观测**:实时事件流(SSE/IPC)、跨执行审计页、节点输出、会话 State 查看器、Artifacts(git diff)、系统原生通知(完成/失败/等待输入,点击直达执行)
 - **Git 集成**:status/diff/log/branch/checkout/commit 节点 + Git 面板,权限策略约束
 - **配置即代码**:YAML 导入导出;Mock Agent 决策脚本可配置,无需真实模型即可演示完整闭环
+- **安全默认**:script 节点(任意本地命令)默认不放行,需在设置页显式开启;敏感环境变量 GET 掩码、日志脱敏(含结构化参数)
 - **桌面体验**:单实例(二次启动聚焦已有窗口)、退出前给运行中执行收尾、REST API 同源挂载(导出/备份链接桌面/服务器通用)
 
 ## 架构原则

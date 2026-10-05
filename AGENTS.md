@@ -69,6 +69,13 @@ GOOS=windows go build ./agent/... ./workflow/...
 10. **双模式**:改动 REST API 时必须同步检查 `frontend/src/lib/api.ts`
     双分支与 vitest 契约测试;桌面模式 `/api` 经 AssetHandler 挂载,补前缀
     逻辑见 `api.AssetHandler.ServeHTTP`。
+11. **script 节点默认不放行**(`Engine.AllowScriptNodes`,设置项
+    `allow_script_nodes` 默认 false):该节点以 `/bin/sh -c` 执行 DSL 里的
+    任意命令,而工作流可由 YAML 导入获得。钩子未注入即拒绝(fail closed),
+    新增 exec 路径同理;改动时勿绕过门禁。
+12. **执行协程必须有兜底**:`execute` 顶层 `recover()` + 快照非空校验
+    (`workflow/runtime/engine.go`)。新增任何 panic 风险路径(模板渲染、
+    新适配器)不得依赖上层保护。
 
 ## 测试基建位置
 
