@@ -100,6 +100,56 @@ func (e *Engine) dispatchNode(ctx context.Context, env *compiler.RunEnv, node *m
 	}
 }
 
+// answeredOutcome 处理"WAIT_USER 节点被用户答复后恢复"的路径。
+//
+// 语义(已与产品确认):复用 WAIT_USER 那次的响应 —— 用户现在的答复是对
+// 那个 prompt 的回应,不是要求把同样的活再干一遍。Agent/Skill 节点的
+// 副作用(写文件、跑测试、git 操作)只应发生一次。
+//
+// 返回值 ok=true 表示本次应直接返回该 outcome 而不再调用 Agent/Skill。
+func answeredOutcome(st compiler.StateAccess, nodeID string) (compiler.NodeOutcome, bool) {
+	// 必须真的有用户答复才算"已答复":只有 _answered 而没有 _user_input
+	// 的场景(理论上不该出现)按未答复处理更安全。
+	ui, hasInput := st.Get(compiler.KeyUserInput)
+	if !hasInput || ui == nil {
+		return compiler.NodeOutcome{}, false
+	}
+	raw, ok := st.Get(compiler.AnsweredKey(nodeID))
+	if !ok {
+		return compiler.NodeOutcome{}, false
+	}
+	var prev compiler.NodeOutcome
+	if err := json.Unmarshal([]byte(fmt.Sprint(raw)), &prev); err != nil {
+		// 快照损坏:不猜,按未答复处理(重跑一次胜过静默吞掉用户答复)
+		return compiler.NodeOutcome{}, false
+	}
+	resp, _ := ui.(map[string]any)
+	// reject 是显式否决,必须让工作流失败而不是"复用上一次的成功响应"
+	if r, _ := resp["response"].(string); strings.EqualFold(strings.TrimSpace(r), "reject") {
+		return compiler.NodeOutcome{
+			State: model.NodeFailed,
+			Error: "用户在节点 " + nodeID + " 拒绝继续",
+		}, true
+	}
+	// 答复内容写入上下文,供后续节点用 {{user_instruction}} 引用
+	inst, _ := resp["instruction"].(string)
+	if inst == "" {
+		if r, _ := resp["response"].(string); r != "" &&
+			!strings.EqualFold(r, "approve") && !strings.EqualFold(r, "reject") &&
+			!strings.EqualFold(r, "continue") {
+			inst = r
+		}
+	}
+	if inst != "" {
+		_ = st.Set("user_instruction", inst)
+	}
+	// 复用原响应,但明确标注这是"用户答复后完成",不是 Agent 重新执行
+	out := prev
+	out.State = model.NodeSuccess
+	out.Summary = strings.TrimSpace(prev.Summary + " (用户已答复,复用原响应)")
+	return out, true
+}
+
 // cfgStr / cfgInt 读取节点配置的辅助函数。
 func cfgStr(node *model.Node, key string) string {
 	if v, ok := node.Config[key]; ok {
@@ -128,6 +178,15 @@ func cfgInt(node *model.Node, key string) int {
 func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
 	agentID := cfgStr(node, "agent")
 	mode := cfgStr(node, "mode")
+
+	// WAIT_USER 恢复:复用 WAIT_USER 那次的响应,不再重复调用 Agent。
+	// 此前 lower.go 把 _user_input 塞回状态就放行,这里从不读它 ——
+	// Agent 被第二次真实调用,用户答复丢失,且 execute/fix 模式会
+	// 重复写文件、重复跑测试、重复 git 操作。
+	if out, ok := answeredOutcome(st, node.ID); ok {
+		_ = st.Delete(compiler.KeyUserInput)
+		return out
+	}
 
 	// 权限策略:执行前检查(fs:read 为最低要求);工作流覆盖优先
 	if err := e.perms(env).Check(agentID, permission.FSRead); err != nil {
@@ -299,6 +358,11 @@ func retryBackoffDelay(attempt int, backoff string) time.Duration {
 
 // runSkillNode 执行 Skill 节点。
 func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
+	// 与 agent 节点同语义:WAIT_USER 被答复后复用原响应,不重复执行 Skill
+	if out, ok := answeredOutcome(st, node.ID); ok {
+		_ = st.Delete(compiler.KeyUserInput)
+		return out
+	}
 	skillID := cfgStr(node, "skill")
 	s, err := e.Skills.Get(skillID)
 	if err != nil {

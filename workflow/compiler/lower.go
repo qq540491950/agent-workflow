@@ -42,7 +42,11 @@ const (
 
 // StatusKey / ResultKey 生成节点级状态键。
 func StatusKey(nodeID string) string { return "node:" + nodeID + ":status" }
-func ResultKey(nodeID string) string { return "node:" + nodeID + ":result" }
+
+// AnsweredKey 生成"该等待节点已被用户答复"的状态键(值为 WAIT_USER
+// 那次的结果 JSON 快照,供恢复后复用,不再重复调用 Agent/Skill)。
+func AnsweredKey(nodeID string) string { return "node:" + nodeID + ":answered" }
+func ResultKey(nodeID string) string   { return "node:" + nodeID + ":result" }
 
 // NodeRunner 由 runtime 实现:真正执行一个节点的业务逻辑。
 // compiler 只负责编排,不感知 Agent/Skill/Git 的实现细节。
@@ -325,14 +329,22 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 						return
 					}
 				}
-				// 人工节点恢复:等待中的节点收到用户输入后重新执行
+				// 人工/等待节点恢复:收到用户输入后重新执行。
+				// 标记 _answered:该节点此前已返回过 WAIT_USER 并把 prompt
+				// 交给用户看过,用户现在的答复是"对这个 prompt 的回应",
+				// 不是"让我把同样的活再干一遍"。execute/fix 模式的 Agent
+				// 第二次调用会重复写文件、重复跑测试、重复 git 操作。
+				// 语义(已与产品确认):复用已有响应,答复作为上下文注入,
+				// 节点按"已答复"完成,不再重复调 Agent。
 				if s, ok := st.Get(StatusKey(node.ID)); ok && s == string(model.NodeWaiting) {
 					resume, _ := st.Get(KeyResumeNode)
 					if fmt.Sprint(resume) != node.ID {
 						return // 未被指定恢复的等待节点保持等待
 					}
 					st.Set(KeyResumeNode, "")
+					answered, _ := st.Get(ResultKey(node.ID))
 					st.Set(KeyUserInput, mustUserInput(st))
+					st.Set(AnsweredKey(node.ID), answered)
 				}
 
 				st.Set(StatusKey(node.ID), string(model.NodeRunning))
