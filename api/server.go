@@ -326,11 +326,13 @@ func (s *Server) routes() {
 		var body struct {
 			GitWorkingDir string `json:"git_working_dir"`
 			LogLevel      string `json:"log_level"`
+			// 缺省(nil)表示不修改,保持既有值
+			AllowScriptNodes *bool `json:"allow_script_nodes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			return badRequest(err.Error())
 		}
-		info, err := s.app.Settings.Update(body.GitWorkingDir, body.LogLevel)
+		info, err := s.app.Settings.Update(body.GitWorkingDir, body.LogLevel, body.AllowScriptNodes)
 		return writeJSON(w, info, err)
 	}))
 

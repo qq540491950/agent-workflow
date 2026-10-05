@@ -325,6 +325,7 @@ export const api = {
     data_dir: string;
     git_working_dir: string;
     log_level: string;
+    allow_script_nodes: boolean;
   }> {
     if ((await detectMode()) === "desktop") {
       return nn(await (await wailsBindings()).st.Info());
@@ -334,13 +335,22 @@ export const api = {
   async updateSettings(patch: {
     git_working_dir?: string;
     log_level?: string;
+    /** script 节点放行开关;缺省表示不修改(后端保持既有值) */
+    allow_script_nodes?: boolean;
   }): Promise<{
     data_dir: string;
     git_working_dir: string;
     log_level: string;
+    allow_script_nodes: boolean;
   }> {
     if ((await detectMode()) === "desktop") {
-      return nn(await (await wailsBindings()).st.Update(patch.git_working_dir ?? "", patch.log_level ?? ""));
+      return nn(
+        await (await wailsBindings()).st.Update(
+          patch.git_working_dir ?? "",
+          patch.log_level ?? "",
+          patch.allow_script_nodes ?? null,
+        ),
+      );
     }
     return http("/api/settings", { method: "POST", body: JSON.stringify(patch) });
   },

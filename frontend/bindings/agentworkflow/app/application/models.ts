@@ -8,4 +8,8 @@ export interface SettingsInfo {
     "data_dir": string;
     "git_working_dir": string;
     "log_level": string;
+    /**
+     * AllowScriptNodes 放行 script 节点(任意本地命令执行),默认 false。
+     */
+    "allow_script_nodes": boolean;
 }

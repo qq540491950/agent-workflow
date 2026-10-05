@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -110,10 +111,74 @@ edges:
 	exec = waitForState(t, eng, exec.ID, model.ExecutionCompleted)
 }
 
+// script 节点等价于任意本地命令执行,而工作流可由 YAML 导入获得。
+// 默认必须拒绝(fail closed):未注入 AllowScriptNodes 钩子即不放行。
+func TestScriptNodeDeniedByDefault(t *testing.T) {
+	scriptYAML := func(command string) string {
+		return `
+version: "1"
+workflow:
+  id: script-gate
+  name: Script Gate
+nodes:
+  - id: danger
+    type: script
+    command: "` + command + `"
+edges: []
+`
+	}
+	run := func(t *testing.T, allow func() bool, command string) *model.Execution {
+		t.Helper()
+		eng := newMinimalEngine(t)
+		eng.AllowScriptNodes = allow
+		doc, err := dsl.Parse([]byte(scriptYAML(command)))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		wf := doc.ToModel()
+		if res := eng.Validate(wf); !res.Valid {
+			t.Fatalf("invalid: %+v", res.Errors)
+		}
+		exec, err := eng.Start(context.Background(), wf, "t", nil)
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		return waitForState(t, eng, exec.ID, model.ExecutionFailed, model.ExecutionCompleted)
+	}
+
+	t.Run("未注入钩子", func(t *testing.T) {
+		final := run(t, nil, "true")
+		if final.State != model.ExecutionFailed {
+			t.Fatalf("state = %s, want FAILED", final.State)
+		}
+		if final.NodeStates["danger"] != string(model.NodeFailed) {
+			t.Errorf("danger = %s, want FAILED", final.NodeStates["danger"])
+		}
+	})
+	t.Run("显式拒绝", func(t *testing.T) {
+		final := run(t, func() bool { return false }, "true")
+		if final.State != model.ExecutionFailed {
+			t.Fatalf("state = %s, want FAILED", final.State)
+		}
+	})
+	t.Run("显式放行后命令真实执行", func(t *testing.T) {
+		marker := filepath.Join(t.TempDir(), "pwned")
+		final := run(t, func() bool { return true }, "touch "+marker)
+		if final.State != model.ExecutionCompleted {
+			t.Fatalf("放行后应执行成功,state = %s err = %s", final.State, final.Error)
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatalf("放行后命令未执行: %v", err)
+		}
+	})
+}
+
 // 回归:script 节点派生的后台子进程持有输出管道时,CombinedOutput 曾
 // 阻塞到子进程退出(60s);进程组击杀 + WaitDelay 后及时返回。
 func TestScriptNodeOrphanPipe(t *testing.T) {
 	eng := newMinimalEngine(t)
+	// script 节点默认不放行(见 TestScriptNodeDeniedByDefault),显式放行
+	eng.AllowScriptNodes = func() bool { return true }
 
 	yml := `
 version: "1"

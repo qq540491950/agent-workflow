@@ -383,10 +383,18 @@ func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *mod
 }
 
 // runScriptNode 执行脚本节点(本地 shell)。
+// 显式开关门禁:该节点等价于任意本地命令执行,而工作流可由 YAML 导入
+// 获得,故默认拒绝,需用户在设置页显式放行(需求 §42 禁止绕过权限系统)。
 func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.NodeOutcome {
 	command := cfgStr(node, "command")
 	if command == "" {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: "script 节点缺少 command"}
+	}
+	if e.AllowScriptNodes == nil || !e.AllowScriptNodes() {
+		return compiler.NodeOutcome{
+			State: model.NodeFailed,
+			Error: "script 节点未放行:该节点可执行任意本地命令,需在设置页开启「允许执行 script 节点」后重试",
+		}
 	}
 	shell := cfgStr(node, "shell")
 	if shell == "" {

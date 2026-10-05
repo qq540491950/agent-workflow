@@ -68,8 +68,8 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 |
-| POST | `/api/settings` | 更新设置(日志级别即时生效) |
+| GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关 |
+| POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改) |
 | GET | `/api/backup` | 导出备份(工作流 + Agent 配置,含明文敏感环境变量) |
 | POST | `/api/backup/restore` | 恢复备份(已存在工作流跳过) |
 | GET | `/api/events` | **SSE** 实时事件流(UIEvent;连接即达响应头,15s keepalive) |

@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -22,6 +23,7 @@ interface SettingsInfo {
   data_dir: string;
   git_working_dir: string;
   log_level: string;
+  allow_script_nodes: boolean;
 }
 
 export default function Settings() {
@@ -29,6 +31,7 @@ export default function Settings() {
   const [ver, setVer] = useState<Record<string, string>>({});
   const [gitDir, setGitDir] = useState("");
   const [level, setLevel] = useState("info");
+  const [allowScript, setAllowScript] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -37,6 +40,7 @@ export default function Settings() {
       setInfo(i);
       setGitDir(i.git_working_dir);
       setLevel(i.log_level || "info");
+      setAllowScript(!!i.allow_script_nodes);
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -50,9 +54,14 @@ export default function Settings() {
   const save = async () => {
     setSaving(true);
     try {
-      const i = await api.updateSettings({ git_working_dir: gitDir, log_level: level });
+      const i = await api.updateSettings({
+        git_working_dir: gitDir,
+        log_level: level,
+        allow_script_nodes: allowScript,
+      });
       setInfo(i);
-      toast.success("设置已保存(日志级别即时生效)");
+      setAllowScript(!!i.allow_script_nodes);
+      toast.success("设置已保存(日志级别与 script 开关即时生效)");
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -111,6 +120,25 @@ export default function Settings() {
 
         <Card>
           <CardHeader className="py-3">
+            <CardTitle className="text-base">安全</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="text-xs">允许执行 script 节点</Label>
+                <p className="text-[11px] text-muted-foreground">
+                  script 节点以 <code className="font-mono">/bin/sh -c</code>{" "}
+                  执行工作流里写明的任意本地命令,而工作流可以通过 YAML 导入获得。
+                  默认关闭:关闭时 script 节点执行会失败并提示开启本开关。
+                </p>
+              </div>
+              <Switch checked={allowScript} onCheckedChange={setAllowScript} />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3">
             <CardTitle className="text-base">关于</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1 font-mono text-xs text-muted-foreground">
@@ -133,6 +161,7 @@ export default function Settings() {
               <li>Agent 的模型/API 端点/环境变量保存在本应用自己的 SQLite 中,不写入 ~/.claude 等本地配置。</li>
               <li>敏感环境变量通过 API 读取时以 *** 掩码,不进入日志。</li>
               <li>权限策略(fs:write / git:commit / git:push)由 Permission Manager 强制执行。</li>
+              <li>script 节点默认不放行(见上方「安全」),避免导入的工作流直接执行本地命令。</li>
             </ul>
           </CardContent>
         </Card>

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agentworkflow/agent"
@@ -47,6 +48,9 @@ type App struct {
 	DataDir        string
 	LogLevel       string
 	DisabledSkills map[string]bool
+	// scriptNodes:设置页「允许执行 script 节点」。原子类型:设置页可在
+	// 执行运行中切换,裸 bool 会被并发读写(同 logx SetLevel 的教训)。
+	scriptNodes atomic.Bool
 	// 供 Wails/SSE 桥接实时事件。
 	eventsMu      sync.RWMutex
 	connectOnce   sync.Once
@@ -98,6 +102,7 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	app.Engine = wfruntime.NewEngine(agents, skills, perms, bus, gitSvc, repo)
 	app.Engine.SubworkflowRunner = app.runSubworkflow
 	app.Engine.IsSkillDisabled = func(id string) bool { return app.DisabledSkills[id] }
+	app.Engine.AllowScriptNodes = app.ScriptNodesAllowed
 
 	// 内置 Skill 注册
 	for _, s := range builtin.All() {
@@ -134,6 +139,12 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	// 禁用 Skill 恢复
 	if disabled, err := repo.ListDisabledSkills(); err == nil {
 		app.DisabledSkills = disabled
+	}
+	// script 节点放行开关(默认关闭:该节点可执行任意本地命令;
+	// 设置项缺失时保持关闭)
+	var allowScript bool
+	if err := repo.GetSetting("allow_script_nodes", &allowScript); err == nil {
+		app.scriptNodes.Store(allowScript)
 	}
 
 	// 崩溃恢复
@@ -343,6 +354,9 @@ func randHex(n int) string {
 	_, _ = crypto_rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// ScriptNodesAllowed 报告 script 节点是否已放行(供引擎门禁与设置页读取)。
+func (a *App) ScriptNodesAllowed() bool { return a.scriptNodes.Load() }
 
 // Subscribe 注册 UI 事件处理器(Wails Emit / SSE 都通过这里)。
 func (a *App) Subscribe(h func(event.UIEvent)) func() {
@@ -827,6 +841,8 @@ type SettingsInfo struct {
 	DataDir       string `json:"data_dir"`
 	GitWorkingDir string `json:"git_working_dir"`
 	LogLevel      string `json:"log_level"`
+	// AllowScriptNodes 放行 script 节点(任意本地命令执行),默认 false。
+	AllowScriptNodes bool `json:"allow_script_nodes"`
 }
 
 // Info 返回当前设置。
@@ -837,13 +853,16 @@ func (s *SettingsService) Info() *SettingsInfo {
 		wd = s.app.GitSvc.WorkingDir
 	}
 	return &SettingsInfo{
-		DataDir:       s.app.DataDir,
-		GitWorkingDir: wd,
-		LogLevel:      s.app.LogLevel,
+		DataDir:          s.app.DataDir,
+		GitWorkingDir:    wd,
+		LogLevel:         s.app.LogLevel,
+		AllowScriptNodes: s.app.ScriptNodesAllowed(),
 	}
 }
 
-// Update 更新设置:git_working_dir / log_level(日志级别即时生效)。
+// Update 更新设置:git_working_dir / log_level(日志级别即时生效)/
+// allow_script_nodes(script 节点放行开关,默认关闭)。
+// allowScriptNodes 为 nil 表示不修改,保持既有值。
 // ExportBackup 导出全部工作流与 Agent 配置(备份用;含明文敏感环境变量,请妥善保管)。
 func (s *SettingsService) ExportBackup() (map[string]any, error) {
 	wfs, err := s.app.Repo.ListWorkflows()
@@ -914,7 +933,7 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 	return map[string]any{"workflows_restored": restoredWf, "workflows_skipped": skipped, "agent_configs_restored": restoredCfg}, nil
 }
 
-func (s *SettingsService) Update(gitWorkingDir, logLevel string) (*SettingsInfo, error) {
+func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNodes *bool) (*SettingsInfo, error) {
 	if gitWorkingDir != "" {
 		s.app.GitSvc.WorkingDir = gitWorkingDir
 		_ = s.Set("git_working_dir", gitWorkingDir)
@@ -923,6 +942,11 @@ func (s *SettingsService) Update(gitWorkingDir, logLevel string) (*SettingsInfo,
 		s.app.LogLevel = logLevel
 		logx.SetLevel(logLevel)
 		_ = s.Set("log_level", logLevel)
+	}
+	if allowScriptNodes != nil {
+		s.app.scriptNodes.Store(*allowScriptNodes)
+		_ = s.Set("allow_script_nodes", *allowScriptNodes)
+		logx.Warn("script 节点放行开关已变更", "allow_script_nodes", *allowScriptNodes)
 	}
 	return s.Info(), nil
 }

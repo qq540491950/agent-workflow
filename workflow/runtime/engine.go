@@ -48,6 +48,10 @@ type Engine struct {
 	SubworkflowRunner func(ctx context.Context, workflowID, task string, input map[string]any) (map[string]any, error)
 	// IsSkillDisabled 由 application 层注入(检查 Skill 启用状态)。
 	IsSkillDisabled func(id string) bool
+	// AllowScriptNodes 由 application 层注入(设置页「允许执行 script 节点」)。
+	// script 节点以 /bin/sh -c 执行 DSL 里的任意命令,而工作流可以来自
+	// YAML 导入,默认关闭:钩子未注入时一律拒绝执行(fail closed)。
+	AllowScriptNodes func() bool
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc

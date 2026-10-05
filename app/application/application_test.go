@@ -302,6 +302,52 @@ func TestSkillEnableDisable(t *testing.T) {
 	}
 }
 
+// script 节点默认不放行,只有显式开启才允许执行(任意本地命令执行的门禁)。
+func TestScriptNodesGateDefaultsOff(t *testing.T) {
+	a := newTestApp(t)
+	if a.ScriptNodesAllowed() {
+		t.Error("新应用默认应关闭 script 节点")
+	}
+	if a.Engine.AllowScriptNodes == nil {
+		t.Fatal("引擎未注入 AllowScriptNodes 钩子")
+	}
+	if a.Engine.AllowScriptNodes() {
+		t.Error("引擎门禁应报告未放行")
+	}
+
+	// 显式放行:即时生效 + 落库
+	allow := true
+	info, err := a.Settings.Update("", "", &allow)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !info.AllowScriptNodes || !a.ScriptNodesAllowed() || !a.Engine.AllowScriptNodes() {
+		t.Errorf("放行未生效: info=%+v allowed=%v", info.AllowScriptNodes, a.ScriptNodesAllowed())
+	}
+
+	// 缺省(nil)不修改既有值
+	if _, err := a.Settings.Update("", "", nil); err != nil {
+		t.Fatalf("update nil: %v", err)
+	}
+	if !a.ScriptNodesAllowed() {
+		t.Error("nil 应表示不修改,放行状态被意外重置")
+	}
+
+	// 关闭后重新打开应用应保持关闭
+	deny := false
+	if _, err := a.Settings.Update("", "", &deny); err != nil {
+		t.Fatalf("update deny: %v", err)
+	}
+	reopened, err := NewApp(a.DataDir, nil)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Repo.Close() })
+	if reopened.ScriptNodesAllowed() {
+		t.Error("重启后应恢复为关闭")
+	}
+}
+
 // 嵌套工作流集成测试:父工作流的 subworkflow 节点同步等待子工作流完成。
 func TestSubworkflowEndToEnd(t *testing.T) {
 	a := newTestApp(t)
