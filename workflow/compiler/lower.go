@@ -785,6 +785,15 @@ func (l *lowerer) abortNoRoute(ctx agent.InvocationContext, actions *session.Eve
 	st.Set(KeyAbort, "FAILED:"+nodeID)
 	env.SetAbort("FAILED:" + nodeID)
 	st.Set("_error", msg)
+	// 必须同时写 StatusKey,不能只写 NodeStates:
+	//   - 决策节点自己已经把 StatusKey 写成 SUCCESS(它确实是成功的 ——
+	//     Agent 返回了决策,只是没有出口能走),不覆盖的话 StateData 里
+	//     留的是 SUCCESS;
+	//   - engine.collectResult 结束时用 StateData **整体替换** NodeStates,
+	//     于是只写 NodeStates 的那个 FAILED 会被覆盖回 SUCCESS —— UI 上
+	//     "决策点失败"就退化成了成功(实测)。
+	//   - merge 节点读的是 StatusKey,不双写则下游同样看不到失败。
+	st.Set(StatusKey(nodeID), string(model.NodeFailed))
 	env.SetNodeState(nodeID, string(model.NodeFailed))
 	env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, nodeID, map[string]any{
 		"node": nodeID, "error": msg,

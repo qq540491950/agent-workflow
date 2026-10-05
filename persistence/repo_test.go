@@ -325,3 +325,78 @@ func TestSetSettingFailureDoesNotFakeSuccess(t *testing.T) {
 		t.Fatal("写入失败必须报错,不能静默成功")
 	}
 }
+
+// TestStateJSONNumbersAreIntAfterRead 轮次 29 第 1 项:
+// state_json 读回后数值必须是 int,而不是 float64。
+//
+// 背景:StateData 执行期来自 ADK 内存(int),经 SQLite JSON 往返后
+// encoding/json 把数字全解成 float64 —— 同一字段的类型随生命周期变化,
+// 于是每个读取点都得写双类型兼容(compiler.IntOfOk 就是这么来的),
+// 漏掉一处就是静默 bug(轮次 10/24/25/27 都踩过循环计数回落)。
+// 现在在解码入口统一归一,类型在整个生命周期内稳定。
+func TestStateJSONNumbersAreIntAfterRead(t *testing.T) {
+	db := openTestDB(t)
+	exec := &model.Execution{
+		ID: "exec-1", WorkflowID: "wf", State: model.ExecutionRunning,
+		Task: "t", CreatedAt: "now",
+		Iterations: map[string]int{"loop": 1},
+		NodeStates: map[string]string{},
+		StateData: map[string]any{
+			"_loop_count":         3,
+			"node:review:attempt": 2,
+			"guard:history":       []any{"a", "b"},
+			"nested":              map[string]any{"n": 7},
+			"ratio":               1.5, // 真浮点应保持 float64
+			"text":                "hello",
+		},
+	}
+	if err := db.SaveExecution(exec); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := db.GetExecution("exec-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, ok := got.StateData["_loop_count"].(int); !ok {
+		t.Errorf("_loop_count 应为 int,实际 %T(%v)",
+			got.StateData["_loop_count"], got.StateData["_loop_count"])
+	}
+	if _, ok := got.StateData["node:review:attempt"].(int); !ok {
+		t.Errorf("attempt 应为 int,实际 %T", got.StateData["node:review:attempt"])
+	}
+	nested, _ := got.StateData["nested"].(map[string]any)
+	if _, ok := nested["n"].(int); !ok {
+		t.Errorf("嵌套 map 的数字应为 int,实际 %T", nested["n"])
+	}
+	// 真正的小数保持 float64 —— 归一不能误伤浮点语义
+	if r, ok := got.StateData["ratio"].(float64); !ok || r != 1.5 {
+		t.Errorf("1.5 应保持 float64,实际 %T(%v)", got.StateData["ratio"], got.StateData["ratio"])
+	}
+	if got.StateData["text"] != "hello" {
+		t.Errorf("字符串不应被改动: %v", got.StateData["text"])
+	}
+}
+
+// TestListExecutionsAlsoNormalizes 列表路径(Executions 页/Dashboard 走它)
+// 必须同样归一,不能只有 GetExecution 生效。
+func TestListExecutionsAlsoNormalizes(t *testing.T) {
+	db := openTestDB(t)
+	exec := &model.Execution{
+		ID: "exec-2", WorkflowID: "wf", State: model.ExecutionCompleted,
+		Task: "t", CreatedAt: "now", NodeStates: map[string]string{},
+		StateData: map[string]any{"_loop_count": 5},
+	}
+	if err := db.SaveExecution(exec); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	list, err := db.ListExecutions("", 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("list len = %d", len(list))
+	}
+	if _, ok := list[0].StateData["_loop_count"].(int); !ok {
+		t.Errorf("列表路径也应归一为 int,实际 %T", list[0].StateData["_loop_count"])
+	}
+}

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -317,5 +318,44 @@ func TestRunVariablesOverrideWorkflowVariables(t *testing.T) {
 	// 未被覆盖的键仍取 DSL 默认值
 	if final.Variables["tier"] != "gold" {
 		t.Errorf("未覆盖的键应保留 DSL 默认值, 实际 %v", final.Variables)
+	}
+}
+
+// TestAbortNoRouteKeepsStateDataConsistent 轮次 29(#S2):决策点"无匹配
+// 出口"时,abortNoRoute 只写 NodeStates 没写 StatusKey。
+//
+// 后果:StateData 里该节点的状态仍是决策节点自己写的 SUCCESS,而
+// NodeStates 是 FAILED —— 两份状态自相矛盾。merge 节点读的是 StatusKey
+// (executor.go 的 runMergeNode),UI 事件载荷读的是 NodeStates,于是
+// "决策点失败"这个原因在下游和展示上都会退化成成功。
+//
+// 这是"三处写入"里唯一真正的语义分歧点:两个旁路写入者方向相反。
+func TestAbortNoRouteKeepsStateDataConsistent(t *testing.T) {
+	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionRejected})
+	wf := loadWf(t, f.engine, noFallbackRouteYAML)
+
+	exec, err := f.engine.Start(context.Background(), wf, "无出口", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	final := waitForState(t, f.engine, exec.ID, model.ExecutionFailed, model.ExecutionCompleted)
+	if final.State != model.ExecutionFailed {
+		t.Fatalf("应 FAILED,实际 %s", final.State)
+	}
+
+	// NodeStates 记 FAILED
+	if got := final.NodeStates["review"]; got != string(model.NodeFailed) {
+		t.Errorf("NodeStates[review] 应为 FAILED,实际 %q", got)
+	}
+	// StateData 里的 StatusKey 也必须是 FAILED(两处必须一致)
+	statusKey := compiler.StatusKey("review")
+	v, ok := final.StateData[statusKey]
+	if !ok {
+		t.Fatalf("StateData 缺少 %s —— abortNoRoute 只写了 NodeStates", statusKey)
+	}
+	if got := fmt.Sprint(v); got != string(model.NodeFailed) {
+		t.Errorf("StateData[%s] = %q,应为 FAILED —— "+
+			"abortNoRoute 只写 NodeStates 不写 StatusKey,导致 merge 等"+
+			"读 StatusKey 的下游把失败当成成功", statusKey, got)
 	}
 }

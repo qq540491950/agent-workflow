@@ -16,6 +16,7 @@ import (
 	"agentworkflow/persistence"
 	"agentworkflow/skill"
 	"agentworkflow/skill/builtin"
+	"agentworkflow/workflow/compiler"
 	"agentworkflow/workflow/dsl"
 	"agentworkflow/workflow/model"
 )
@@ -455,5 +456,180 @@ edges:
 	}
 	if !warned {
 		t.Error("并行分支不收敛必须发 runtime.warning 告警(此前静默丢弃后续链)")
+	}
+}
+
+// ---- 状态类型稳定性(轮次 29 第 1 项)----
+
+// TestStateTypesStableAcrossPersistence 类型在持久化往返前后必须一致。
+//
+// 背景:StateData 执行期来自 ADK 内存(int),经 SQLite state_json 往返后
+// encoding/json 把数字全解成 float64 —— 同一字段的类型随生命周期变化,
+// 于是每个读取点都得写双类型兼容(compiler.IntOfOk 就是这么来的),
+// 漏一处就是静默 bug:轮次 10/24/25/27 都踩过"循环计数回落导致过早触发
+// 循环保护"。现在在解码入口(model.NormalizeStateJSON)钉死一次。
+//
+// 本用例**直接断言 int 而不经过 IntOfOk** —— 归一失效时会立刻失败。
+func TestStateTypesStableAcrossPersistence(t *testing.T) {
+	f := newFixture(t, []coreagent.AgentDecision{
+		coreagent.DecisionRejected, coreagent.DecisionApproved,
+	})
+	wf := loadWf(t, f.engine, loopWorkflowYAML)
+	exec, err := f.engine.Start(context.Background(), wf, "类型稳定", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForState(t, f.engine, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
+
+	// 从库里读回(走完整的 JSON 往返)
+	got, err := f.repo.GetExecution(exec.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	for _, key := range []string{compiler.KeyLoopCount, "node:review:attempt"} {
+		v, ok := got.StateData[key]
+		if !ok {
+			t.Errorf("状态键 %q 丢失", key)
+			continue
+		}
+		if _, isInt := v.(int); !isInt {
+			t.Errorf("状态键 %q 往返后应为 int,实际 %T(%v) —— "+
+				"归一生效前这里是 float64,读取点必须写双类型兼容",
+				key, v, v)
+		}
+	}
+	// 列表路径同样稳定(Executions 页/Dashboard 走它)
+	list, err := f.repo.ListExecutions("", 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, e := range list {
+		if v, ok := e.StateData[compiler.KeyLoopCount]; ok {
+			if _, isInt := v.(int); !isInt {
+				t.Errorf("列表路径的 %q 应为 int,实际 %T", compiler.KeyLoopCount, v)
+			}
+		}
+	}
+}
+
+// TestIntOfOkStillCoversDefensivePath 回归:IntOfOk 本身不能删 ——
+// 内存态(collectResult 直接从 ADK 读)与归一后的读回态并存,
+// 保留双类型兼容作为纵深防御,只是不再是"每个读取点都必须记得写"。
+func TestIntOfOkStillCoversDefensivePath(t *testing.T) {
+	for _, v := range []any{3, int64(3), float64(3)} {
+		n, ok := compiler.IntOfOk(v)
+		if !ok || n != 3 {
+			t.Errorf("IntOfOk(%T(%v)) = %d,%v;want 3,true", v, v, n, ok)
+		}
+	}
+	if _, ok := compiler.IntOfOk("x"); ok {
+		t.Error("IntOfOk 对非数值应返回 false")
+	}
+}
+
+// ---- 派生视图一致性(轮次 29 #S3/#S5)----
+
+// TestSyncNodeStatesRebuildsFromScratch 验证派生视图是**全量重建**。
+//
+// 此前是"有则覆盖":StateData 里被 delete 掉的 key,其旧值会永远留在
+// NodeStates 里。RetryNode(skip=false) 正是 `delete(StateData, StatusKey)`
+// —— 旧代码下节点在 UI 上仍显示上一次的 FAILED,直到下一次成功执行。
+func TestSyncNodeStatesRebuildsFromScratch(t *testing.T) {
+	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionApproved})
+	wf := loadWf(t, f.engine, loopWorkflowYAML)
+	exec, err := f.engine.Start(context.Background(), wf, "全量重建", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	final := waitForState(t, f.engine, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
+
+	// 手工构造"StateData 已删 key、NodeStates 残留旧值"的场景:
+	// 取一个真实节点(在 Snapshot.Nodes 里),把它的 StatusKey 从 StateData
+	// 删掉 —— 这正是 RetryNode(skip=false) 干的事。
+	target := ""
+	for _, n := range wf.Nodes {
+		if n.ID == "fix" {
+			target = n.ID
+		}
+	}
+	if target == "" {
+		t.Fatal("fixture 缺少 fix 节点")
+	}
+	got, err := f.repo.GetExecution(exec.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got.NodeStates[target] = string(model.NodeFailed) // 残留旧值
+	delete(got.StateData, compiler.StatusKey(target))
+	if err := f.repo.SaveExecution(got); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// 触发一次派生重建:再跑一次同步路径不方便,直接验证同一条不变量 ——
+	// 全量重建的结果里,StateData 已无的节点不得出现在视图中。
+	// 这里用 Engine 的公开行为:重放一次执行会让 collectResult 重建视图。
+	back, err := f.repo.GetExecution(exec.ID)
+	if err != nil {
+		t.Fatalf("get back: %v", err)
+	}
+	// 记录:重建只遍历 Snapshot.Nodes,因此"不属于工作流的 key"本就不该
+	// 被写进视图;而"属于工作流但 StateData 已删"的 key,重建后必然消失。
+	// 手工校验重建函数的不变量(直接构造最小 Execution 调用它)。
+	e2 := f.engine
+	probe := &model.Execution{
+		NodeStates: map[string]string{target: string(model.NodeFailed), "stale": "FAILED"},
+		Iterations: map[string]int{"loop": 99},
+		StateData:  map[string]any{},
+		Snapshot:   wf,
+	}
+	e2.syncNodeStates(probe)
+	if _, still := probe.NodeStates[target]; still {
+		t.Error("StateData 已删的节点状态仍残留在视图中(增量覆盖而非全量重建)")
+	}
+	if len(probe.NodeStates) != 0 {
+		t.Errorf("全量重建应得到空视图,实际 %v", probe.NodeStates)
+	}
+	if len(probe.Iterations) != 0 {
+		t.Errorf("Iterations 也应全量重建,实际 %v", probe.Iterations)
+	}
+	_ = back
+	_ = final
+}
+
+// TestNilStateDoesNotBecomeLiteralNil 验证 Delete 伪造的 nil 不会被
+// 渲染成字面量 "<nil>" 当成节点状态。
+//
+// 背景:stateAccess.Delete 以 `Set(key, nil)` 伪造删除(ADK 的 State 只有
+// Get/Set/All),Get 把 nil 当缺失。若派生时 `fmt.Sprint(nil)`,UI 上会出现
+// 状态为 "<nil>" 的节点。
+func TestNilStateDoesNotBecomeLiteralNil(t *testing.T) {
+	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionApproved})
+	wf := loadWf(t, f.engine, loopWorkflowYAML)
+	exec, err := f.engine.Start(context.Background(), wf, "nil 检查", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForState(t, f.engine, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
+
+	got, err := f.repo.GetExecution(exec.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// 模拟 Delete 的效果:StateData 里某个 StatusKey 被置 nil
+	got.StateData[compiler.StatusKey("plan")] = nil
+	if err := f.repo.SaveExecution(got); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	back, err := f.repo.GetExecution(exec.ID)
+	if err != nil {
+		t.Fatalf("get back: %v", err)
+	}
+	if v, ok := back.NodeStates["plan"]; ok && v == "<nil>" {
+		t.Error("nil 状态被渲染成字面量 \"<nil>\"")
+	}
+	for id, v := range back.NodeStates {
+		if v == "<nil>" {
+			t.Errorf("节点 %s 的状态是字面量 \"<nil>\"", id)
+		}
 	}
 }

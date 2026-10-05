@@ -212,3 +212,45 @@ func (w *Workflow) IncomingEdges(nodeID string) []Edge {
 	}
 	return out
 }
+
+// NormalizeStateJSON 在**读取边界**把 state_json 还原出的数值统一成 int。
+//
+// 背景(轮次 29):`StateData` 来自 ADK 会话状态快照,执行期内存里是 int,
+// 经 SQLite `state_json` 持久化往返后 encoding/json 把它解成 float64。
+// 也就是说**同一个字段的类型随生命周期变化** —— 执行期 int、恢复期
+// float64。结果是每个读取点都得写双类型兼容(compiler.IntOfOk 就是
+// 这么来的),而漏掉一处就是一个静默 bug:轮次 10/24/25/27 都踩过
+// "循环计数回落导致过早触发循环保护"这一类。
+//
+// 与其在每个读取点防守,不如在唯一的解码入口把类型钉死一次:
+//   - 之后所有消费者拿到的都是 int,IntOfOk 的双类型分支成为纯冗余;
+//   - 数值语义(计数、attempt、下标)在整个生命周期内稳定;
+//   - 未来新增读取点不会再踩同一个坑。
+//
+// 只转换"JSON 数字且无小数部分"的值 —— 带小数的确实是浮点语义
+// (如有),保持 float64 不动。无法识别的值原样保留。
+func NormalizeStateJSON(data map[string]any) map[string]any {
+	if data == nil {
+		return nil
+	}
+	for k, v := range data {
+		switch n := v.(type) {
+		case float64:
+			// JSON 无 int/float 之分,所有数字都解成 float64。
+			// 整数值的转成 int,让类型在往返前后一致。
+			if n == float64(int64(n)) {
+				data[k] = int(n)
+			}
+		case []any:
+			// 嵌套数组(如 guard 的 history)同样归一
+			for i, item := range n {
+				if f, ok := item.(float64); ok && f == float64(int64(f)) {
+					n[i] = int(f)
+				}
+			}
+		case map[string]any:
+			NormalizeStateJSON(n)
+		}
+	}
+	return data
+}

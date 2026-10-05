@@ -236,7 +236,12 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 		}
 		return nil, wrap(err)
 	}
+	// 读回即归一数值类型:state_json 里的数字经 JSON 解码全是 float64,
+	// 而执行期内存里是 int。类型随生命周期变化会让每个读取点都得写
+	// 双类型兼容(漏一处就是静默 bug)。在唯一的解码入口钉死一次。
+	// 见 model.NormalizeStateJSON。
 	_ = json.Unmarshal([]byte(stateData), &e.StateData)
+	e.StateData = model.NormalizeStateJSON(e.StateData)
 	_ = json.Unmarshal([]byte(variables), &e.Variables)
 	_ = json.Unmarshal([]byte(iterations), &e.Iterations)
 	_ = json.Unmarshal([]byte(nodeStates), &e.NodeStates)
@@ -274,7 +279,12 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 			&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData); err != nil {
 			return nil, wrap(err)
 		}
+		// 读回即归一数值类型:state_json 里的数字经 JSON 解码全是 float64,
+		// 而执行期内存里是 int。类型随生命周期变化会让每个读取点都得写
+		// 双类型兼容(漏一处就是静默 bug)。在唯一的解码入口钉死一次。
+		// 见 model.NormalizeStateJSON。
 		_ = json.Unmarshal([]byte(stateData), &e.StateData)
+		e.StateData = model.NormalizeStateJSON(e.StateData)
 		_ = json.Unmarshal([]byte(variables), &e.Variables)
 		_ = json.Unmarshal([]byte(iterations), &e.Iterations)
 		_ = json.Unmarshal([]byte(nodeStates), &e.NodeStates)

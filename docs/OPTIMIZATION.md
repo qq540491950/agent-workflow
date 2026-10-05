@@ -90,20 +90,85 @@
 | C4 | 无故障注入,DB 故障只能靠"关掉 DB"粗略模拟 | `persistence.DB` 增加 `SetQueryFault` 语句级注入点,接在 `SaveWorkflow` 存在性查询与 `SaveSetting` |
 | C5 | 备份三个 API 方法零 UI 消费 —— "看起来有能力实则不可达" | Settings 页新增「备份」卡片(导出 + 从文件恢复,带确认与恢复/跳过/拒绝三组计数) |
 
-## 三、仍未覆盖与后续方向
+## 三、轮次 29:结构性风险的处理结果
 
-以下为本轮之后仍然成立的结构性风险,不属于已登记缺陷,需单独立项:
+第 1-3 项已在本轮处理(第 4 项在轮次 28 已完成)。
 
-1. **状态三处写入**。`exec.StateData` / `Exec.NodeStates` / ADK session
-   state 各写一份,"JSON 往返 int 变 float64"这一类缺陷反复出现
-   (`IntOfOk` 存在本身就是症状)。建议节点状态只以 ADK session state
-   为准,`NodeStates` 改为派生视图。
-2. **ADK 升级**。`parallelagent` / `loopagent` / `session` 的行为直接
-   决定失败级联、循环上限与恢复语义;升级 ADK 时这三处必须重测
-   (现有 `cascadeCtx` 依赖 `InvocationContext` 内嵌 `context.Context`)。
-3. **真实 Agent 端到端**。本轮全部回归基于 mock 与 Skill;`claude`/
-   `pi` 的真实 CLI 路径(超时、ErrWaitDelay、stderr 脱敏、大输出截断)
-   只有单元测试覆盖,建议补一次真机冒烟。
-4. **`docs/api.md` 契约同步**。本轮改了 `enable` 的参数校验、
-   `retry` 的 body 语义、`restore` 的响应字段,需同步该文档。
+### 1. 状态三处写入 —— 已按"中间方案"收敛(未做大重构)
+
+先澄清一个事实:**不是"三处都写"**。运行期 `exec.StateData` 完全不被写,
+唯一真权威是 ADK session state;`StateData` 只在 `collectResult` 末尾整体
+快照一次。真正的问题是**两个旁路写入者方向相反**。
+
+- **float64 症状的根源已定位并消除**:`StateData` 执行期是 int,经 SQLite
+  `state_json` 往返后 `encoding/json` 把数字全解成 float64 —— 同一字段的
+  类型随生命周期变化,于是每个读取点都得写双类型兼容(`IntOfOk` 就是这么
+  来的),漏一处就是静默 bug。新增 `model.NormalizeStateJSON`,在**唯一的
+  解码入口**(`GetExecution` / `ListExecutions`)把整数值的数字统一转回 int。
+  类型在整个生命周期内稳定,`IntOfOk` 退化为纵深防御而不再是必需品。
+  1.5 小数等真浮点值不受影响。
+- **#81 `abortNoRoute` 只写 `NodeStates` 不写 `StatusKey`(P0)**:决策节点
+  自身已把 StatusKey 写成 SUCCESS(它确实成功了,只是没有出口能走),
+  而 `collectResult` 结束时用 StateData **整体替换** NodeStates ——
+  结果那个 FAILED 被覆盖回 SUCCESS。实测确认 UI 上"决策点失败"退化成
+  成功;且 merge 读的是 StatusKey,下游同样看不到失败。改为双写。
+- **#82 `syncNodeStates` 是增量覆盖,派生视图必须全量重建(P1)**:StateData
+  里被 `delete` 的 key,其旧值永远留在 NodeStates 里 —— `RetryNode(skip=false)`
+  正是 `delete(StateData, StatusKey)`,于是节点在 UI 上仍显示上一次的 FAILED。
+  `loopResetter` 的空串哨兵也会被 `fmt.Sprint("")` 复制成空状态。
+  改为新建表 + 整体替换,视图与真值同生共死。
+- **#83 nil 被渲染成字面量 `"<nil>"`(P1)**:`stateAccess.Delete` 以
+  `Set(key, nil)` 伪造删除(ADK 的 State 只有 Get/Set/All),`Get` 把 nil
+  当缺失,但 `fmt.Sprint(nil)` 会写出 `"<nil>"` 当成节点状态。归一时跳过 nil。
+
+**为什么不做"NodeStates 完全变派生视图"的大重构**:收益有限而风险明确 ——
+`NodeStates` 的非测试消费者只有 2 处(子工作流返回值、完成事件载荷),
+前端**无任何页面读取**它;而 `StateData` 有独立用途(Resume 整体回放、
+RetryNode 打补丁、执行详情页的上下文面板),不能删。真正的收益(消除
+float64 陷阱)已经用解码归一拿到了。
+
+### 2. ADK 语义依赖 —— 已用契约测试钉死
+
+新增 `workflow/compiler/adk_contract_test.go`,把本项目赖以成立的 ADK 语义
+写成断言。ADK 升级**不会**让代码编译失败,只会让语义静默改变;而现有业务
+测试测的是本项目自己的逻辑,不会报警。
+
+- `parallelagent` 只在**分支返回 Go error** 时取消兄弟(errgroup 语义)——
+  这正是 `parallelCascadeAgent` 存在的全部理由(节点失败走
+  `yield(escalateEvent, nil)`,err 为 nil)。实测两条都确认。
+- `InvocationContext` 内嵌 `context.Context` —— `cascadeCtx` 依赖这一形态。
+  **重要发现:ADK 自己在接口注释里写明这是临时方案**("will be removed
+  later... we plan to stop embedding go context in adk context types")。
+  即级联层依赖的是 ADK 明示要移除的形态,升级时必须改为 `WithContext`
+  或由本项目自管取消信号。
+- `loopagent` 的 `MaxIterations` 上限语义 —— 循环保护完全依赖它。
+- Agent 名字唯一性 —— 实测 ADK 当前**不拒绝**重名(会硬报错,不是静默),
+  但 parentmap 按名字索引,重名会让事件路由到错误父节点,故 `uniqueName`
+  仍必须保持。
+
+### 3. 真实 Agent 端到端 —— 已补真机冒烟
+
+新增 `agent/claude/real_smoke_test.go`。本机实测(claude 2.1.286):
+真实调用返回 `OK\n\n{"decision": "DONE", "summary": "ok"}`,
+`STATUS=SUCCESS` / `DECISION=DONE` / `SUMMARY=ok` 全部正确解析
+—— **在真实 CLI 上验证了 A7 的尾部 JSON 提取**;1 秒超时的真实进程正确
+返回 `CLAUDE_TIMEOUT` 且不挂死(验证进程组击杀 + WaitDelay)。
+无 CLI / 无凭据 / 无网络时全部 skip,不阻塞 CI。
+
+### 仍然开放(需单独立项,不属于已登记缺陷)
+
+1. **分支 goroutine 的 panic 没有兜底(P0 候选)**:ADK 的
+   `parallelagent` 在**自己的** goroutine 里跑分支,而 `grep recover()`
+   在 `adk/agent/` 与 `adk/runner/` 生产代码中零命中。本项目的
+   `defer recover()` 在 `engine.execute`,只对执行协程生效 ——
+   分支内 panic(第三方适配器、模板渲染)会绕过它直接杀进程。
+   建议在 `nodeAgent` 的 Run 内层加同款兜底。
+2. **执行全程无持久化**:运行中崩溃时 DB 里的 `current_node_id` 仍是
+   Start 时的值(空),`RecoverPending` 标 FAILED 后 `RetryNode` 恒返回
+   `NO_FAILED_NODE`("无法定位失败节点")。现有崩溃模拟用例先把执行跑完
+   再改库状态,覆盖不到真实场景。
+3. **`ADK 契约`待补**:`loopagent` 恰好 N 轮(现有断言只是"至多")、
+   `yield` 返回 false 的消费者提前停止语义、分支错误是否回传消费者、
+   `session.State` 的 Set(nil)/Get 缺失键/StateDelta 提交路径、
+   `temp:` 前缀语义(用了会在恢复时静默丢状态)。
 

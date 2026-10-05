@@ -701,15 +701,64 @@
 - 新增回归测试计数:runtime 10 组、compiler 2 组、agent 13 组、
   persistence 4 组、api 22 组、前端 16 组。✅
 
-### 仍未覆盖(结构性风险,非登记缺陷)
+## 轮次 29:结构性风险的收敛(OPTIMIZATION 第三节)
 
-- `exec.StateData` / `Exec.NodeStates` / ADK session state 三处各写一份
-  状态,"JSON 往返 int 变 float64"反复出现(`IntOfOk` 存在即症状);
-  建议节点状态只以 session state 为准,`NodeStates` 改派生视图。
-- `claude`/`pi` 真实 CLI 路径(超时、ErrWaitDelay、stderr 脱敏、大输出
-  截断)只有单元测试,建议补一次真机冒烟。
-- ADK 升级时 `cascadeCtx`(依赖 `InvocationContext` 内嵌 `context.Context`)、
-  失败级联、循环上限、恢复语义四必须重测。
+> 承接轮次 28:处理方案里登记的 3 项结构性风险。先只读审计两个主题
+> (状态三处写入 / ADK 依赖点),逐条复核后按"中间方案"落地,不做高风险
+> 大重构。2 个提交。
+
+### 状态一致性(#81-#83)
+
+- **#81 `abortNoRoute` 只写 `NodeStates` 不写 `StatusKey`(P0)**:决策节点
+  自身已把 StatusKey 写成 SUCCESS(它确实成功了,只是没有出口能走),而
+  `collectResult` 末尾用 StateData **整体替换** NodeStates —— 那个 FAILED
+  被覆盖回 SUCCESS。**实测:UI 上"决策点失败"退化成成功**,且 merge 读的是
+  StatusKey,下游同样看不到失败。改为双写。
+  `TestAbortNoRouteKeepsStateDataConsistent`。
+- **#82 `syncNodeStates` 增量覆盖(P1)**:StateData 里被 `delete` 的 key,
+  旧值永远留在 NodeStates —— `RetryNode(skip=false)` 正是
+  `delete(StateData, StatusKey)`,节点在 UI 上仍显示上一次的 FAILED;
+  `loopResetter` 的空串哨兵也被 `fmt.Sprint("")` 复制成空状态。
+  改为全量重建。**实测有效性**:回退成增量覆盖后
+  `TestSyncNodeStatesRebuildsFromScratch` 3 处断言同时 FAIL。
+- **#83 nil 被渲染成字面量 `"<nil>"`(P1)**:`stateAccess.Delete` 以
+  `Set(key, nil)` 伪造删除(ADK 的 State 只有 Get/Set/All),`Get` 把 nil
+  当缺失,但 `fmt.Sprint(nil)` 会写出 `"<nil>"` 当节点状态。
+  `TestNilStateDoesNotBecomeLiteralNil`。
+- **float64 症状根治**:定位到 `StateData` 执行期是 int、经 SQLite
+  `state_json` 往返后变 float64(实测确认)—— 同一字段类型随生命周期变化,
+  于是每个读取点都得写双类型兼容(`IntOfOk` 的由来),漏一处就是静默 bug。
+  新增 `model.NormalizeStateJSON`,在唯一的解码入口
+  (`GetExecution` / `ListExecutions`)把整数值数字转回 int;1.5 等真浮点
+  不受影响。`TestStateJSONNumbersAreIntAfterRead` /
+  `TestListExecutionsAlsoNormalizes` / `TestStateTypesStableAcrossPersistence`
+  **直接断言 int 而不经过 IntOfOk**,归一失效会立刻失败。
+
+### ADK 契约测试与真实 CLI 冒烟
+
+见上一提交(6597dc2):4 条 ADK 行为契约 + claude 真实 CLI 端到端。
+其中一条重要发现:**ADK 自己在 interface 注释里写明
+"InvocationContext 内嵌 context.Context" 是临时方案
+("will be removed later... we plan to stop embedding go context in adk
+context types")** —— 即 `cascadeCtx` 依赖的是 ADK 明示要移除的形态。
+
+### 回归汇总(轮次 29)
+
+- `gofmt`/`go vet` 干净;`go test -count=1 -race ./...` 全部通过。✅
+- 新增回归:runtime 6 组(含状态一致性 3 组 + 类型稳定 2 组 + IntOfOk
+  纵深防御)、persistence 2 组、compiler 4 组(ADK 契约)、claude 2 组(真机)。✅
+
+### 仍然开放(结构性风险,非登记缺陷)
+
+- **分支 goroutine 的 panic 没有兜底(P0 候选)**:`parallelagent` 在 ADK
+  自己的 goroutine 里跑分支,而 `recover()` 在 adk 生产代码中零命中;
+  本项目的兜底只对执行协程生效,分支内 panic 会直接杀进程。
+- **执行全程无持久化**:运行中崩溃时 `current_node_id` 仍是 Start 时的
+  值(空),`RecoverPending` 标 FAILED 后 `RetryNode` 恒返回
+  `NO_FAILED_NODE`("无法定位失败节点")。现有崩溃模拟用例覆盖不到。
+- **ADK 契约待补**:`loopagent` 恰好 N 轮(现有断言只是"至多")、
+  `yield` 返回 false 的提前停止语义、`session.State` 的 Set(nil)/
+  Get 缺失键/StateDelta 提交路径、`temp:` 前缀语义。
 
 ## 汇总
 

@@ -517,25 +517,51 @@ func (e *Engine) collectResult(exec *model.Execution, sess session.Session) {
 	e.syncNodeStates(exec)
 }
 
-// syncNodeStates 从 StateData 恢复节点状态(会话不可读时的兜底)。
+// syncNodeStates 从 StateData 重建节点级视图(会话不可读时的兜端,
+// 以及 collectResult 之后的统一派生)。
+//
+// **全量重建**而非"有则覆盖":此前只覆盖 StateData 里存在的 key,于是
+//   - RetryNode 的 `delete(exec.StateData, StatusKey)` 不会让 NodeStates
+//     里的旧 FAILED 消失 → 视图与真值长期不一致;
+//   - loopResetter 用空串当哨兵(`Set(StatusKey(id), "")`),会被
+//     `fmt.Sprint("")` 忠实复制成 `NodeStates[id] = ""` → UI 出现空状态。
+//
+// 新建表只收"非空且非 nil"的值,再整体替换,派生视图与真值同生共死。
+//
+// nil 判定:stateAccess.Delete 以 `Set(key, nil)` 伪造删除(ADK 的 State
+// 只有 Get/Set/All),而 Get 把 nil 当缺失。若这里 `fmt.Sprint(nil)` 会写出
+// 字面量 "<nil>" 当成节点状态。
 func (e *Engine) syncNodeStates(exec *model.Execution) {
-	if exec.StateData == nil {
+	if exec.StateData == nil || exec.Snapshot == nil {
 		return
 	}
+	ns := make(map[string]string, len(exec.Snapshot.Nodes))
 	for _, n := range exec.Snapshot.Nodes {
-		if v, ok := exec.StateData[compiler.StatusKey(n.ID)]; ok {
-			exec.NodeStates[n.ID] = fmt.Sprint(v)
+		v, ok := exec.StateData[compiler.StatusKey(n.ID)]
+		if !ok || v == nil {
+			continue
+		}
+		if s := fmt.Sprint(v); s != "" {
+			ns[n.ID] = s
 		}
 	}
-	if v, ok := exec.StateData[compiler.KeyCurrentNode]; ok {
-		exec.CurrentNodeID = fmt.Sprint(v)
+	exec.NodeStates = ns
+
+	if v, ok := exec.StateData[compiler.KeyCurrentNode]; ok && v != nil {
+		if s := fmt.Sprint(v); s != "" {
+			exec.CurrentNodeID = s
+		}
 	}
+	// Iterations 同理全量重建(全程只有 "loop" 一个 key)
+	its := map[string]int{}
 	if v, ok := exec.StateData[compiler.KeyLoopCount]; ok {
 		// 状态经 JSON 持久化往返,int 已变 float64
+		// (读取侧已在 model.NormalizeStateJSON 归一,这里是纵深防御)
 		if i, ok := compiler.IntOfOk(v); ok {
-			exec.Iterations["loop"] = i
+			its["loop"] = i
 		}
 	}
+	exec.Iterations = its
 }
 
 func (e *Engine) failExecution(exec *model.Execution, msg string) {
