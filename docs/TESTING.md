@@ -586,6 +586,131 @@
 - `WAIT_USER` 恢复时 Agent/Skill 节点被原样重跑、用户答复丢失。
 - 备份三个 API 方法零 UI 消费(能力看起来存在但不可达)。
 
+## 轮次 28:收敛 OPTIMIZATION.md 的全部登记项(批次 A / B / C)
+
+> 承接轮次 27:把方案里登记但未处理的缺陷全部落地。分 4 个提交,
+> 每项修复与回归测试同 commit。全部缺陷在**修复前先用测试暴露**。
+
+### 批次 A:运行时语义补齐(#66-#73)
+
+- **#66 `WAIT_USER` 恢复时用户答复被丢弃**:lower.go 只把 `_user_input`
+  塞回状态就放行,runAgentNode/runSkillNode **从不读它** → 用户答复
+  完全丢失、Agent 被第二次真实调用。execute/fix 模式下等于重复写文件、
+  重复跑测试、重复 git 操作;reject 更是被静默吞成 COMPLETED。
+  **语义已与产品确认**:复用 WAIT_USER 那次的响应,答复作为上下文注入,
+  节点按"已答复"完成,不再重复调 Agent。新增 `AnsweredKey` 存上次快照 +
+  `answeredOutcome` 消费。`waituser_test.go` 4 个用例(approve /
+  instruction / reject / Skill 节点),含副作用计数断言。
+  **实测有效性**:回退修复后 4 个用例全 FAIL,分别报出"Agent 被重复调用
+  1→2""副作用发生 2 次""用户答复未写入上下文""reject 应 FAILED 实际
+  COMPLETED""Skill 被重复执行 1→2"。
+- **#67 模板缺失变量静默为空串**:`rendered, _ :=` 丢弃 missing 列表 ——
+  `{{revwie}}` 拼错时 Agent 收到残缺 prompt 照常返回 SUCCESS,无任何
+  告警。改为发 `node.warning` + `logx.Warn`(只告警不让节点失败)。
+  `TestMissingTemplateVarEmitsWarning` / `TestNoWarningWhenTemplateComplete`。
+- **#68 节点级状态机从未接线**:`CanTransitionNode` 只在测试里被调用。
+  写回 `StatusKey` 前校验,违反记 `runtime.error`。
+- **#69 并行分支失败不级联**:失败走 `yield(escalateEvent, nil)`,
+  ADK errgroup 只在 Go error 时 cancel → 兄弟分支继续跑完(继续烧 token、
+  继续改文件)。给并行区包一层共享可取消 ctx + abort 监视协程,任一分支
+  `FAILED:` 即取消其余分支;用 `cascadeCtx` 包装 InvocationContext 只替换
+  取消语义(ADK 的 Run 收的是 InvocationContext 而非 context.Context)。
+  只认 FAILED 前缀,WAIT_USER 不会误杀兄弟分支。
+  **实测有效性**:关闭级联后 `TestParallelFailureCancelsSiblings` FAIL ——
+  慢分支(30s)不被取消,执行 10s 内一直 RUNNING;恢复后 PASS。
+- **#70 merge 汇总失真**:①按入边统计而入边 ≠ 并行区分支(分支内嵌路由时,
+  条件不成立的分支本就不该跑,却是 merge 的一条入边);②"查不到状态"
+  一律算成功(分支被跳过/根本没跑到时输出"全部成功")。改为从 parallel
+  节点取分支清单,并区分「无条件扇出无状态=被截断(失败)」「条件分支
+  无状态=正常路由」「显式 SKIPPED」。`TestMergeReportsSkippedBranch`。
+  *注:首版实现把"无状态"一律判失败,被
+  `TestRouteInsideParallelBranch` 抓出条件分支不跑是正常路由,据此重写。*
+- **#71 mock 并发执行决策错位**:`Start` 调 `ResetMock()` 清空共享计数,
+  同工作流并发两次时第二次清掉第一次的序列。新增 `AgentRequest.ExecutionID`,
+  mock 按执行隔离;`ResetMock` 只清共享空间。
+  `TestMockIsolatedPerExecution` / `TestMockSharedSpaceStillResets`。
+- **#72 pi 适配器嵌套 JSON 解析失败致决策丢失**:`LastIndex("{")` 命中内层
+  `{` 时片段不配平,Unmarshal 必失败 → decision 静默丢失、路由恒走默认
+  分支。新增 `coreagent.TrailingJSONObject` 做括号配平(跳过字符串字面量
+  与转义引号);claude 侧同问题一并改用 `FirstJSONObject`。
+- **#73 Agent stdout 无上限捕获**:`cmd.Output()` 全量读进内存,截断只发生
+  在落库层。新增 `coreagent.BoundedBuffer`(8MB,超限计数 + `String()`
+  追加显式截断标记)。`agent/output_test.go` 13 个用例。
+
+### 批次 B:并行编译正确性(#74-#75)
+
+- **#74 并行分支越过汇合点**:`irBuilder.stopped` 是共享字段,且
+  `parallel()` 给内层分支的停止集合**不含外层的** → 分支一路走到汇合点
+  及其后所有节点。后果不是"多跑一次":并行分支由 ADK 并发执行,等于多
+  goroutine 并发写同一批状态。停止集合改为显式沿调用链传递,
+  `parallel`/`route` 把外层 stop 合并进内层
+  (`copySet(outerStop) ∪ {innerJoin}`),删掉共享字段。
+  `TestNestedParallelKeepsOuterStopSet`:修复前 merge/after 各出现 2 次。
+- **#75 并行分支不收敛时静默丢弃后续链**:`join == ""` 时塞合成的
+  `<parID>.merge` 占位节点(工作流里并不存在,落到 lower 变 noop),
+  后续链一个都没进 Plan 而执行报成功。新增 `KindWarning` IR 节点
+  (只发告警不执行),标记 `Plan.Unconverged` 并发 `runtime.warning`。
+  `TestNonConvergingParallelIsReported` / `TestNonConvergingParallelWarns`。
+
+### 批次 C:测试基建(#76-#80)
+
+- **#76 组件层交互行为零测试**:新增 `interaction.test.tsx` 11 个用例 ——
+  乐观更新成功/失败回滚、busy 期间连点只提交一次、Git commit 二次确认
+  (回车同样走确认)、重试/跳过按钮互斥、四种异常列表返回不崩。
+- **#77 REST 契约测试补齐 + 顺带修掉 4 处契约偏差**:`api/server_test.go`
+  新增 22 个 `TestContract_*`,覆盖 30+ 端点中此前零覆盖的部分;4xx 一律
+  断言错误体同时含 `error` 与 `code`。补测试时暴露出 4 处后端契约偏差,
+  一并修复:
+  1. `GET/PUT /api/agents/{id}/config` + `reset` + `permission` 对未知
+     Agent 返回 200(零值配置);**PUT 还会为不存在的 ID 凭空落库一行配置**,
+     而 `applyAgentConfig` 对未知 ID 静默返回 —— 配置永远不生效。
+     新增 `App.requireAgent`,四个端点统一 404 NOT_FOUND。
+  2. `GET /api/executions/{id}/{nodes,events,artifacts}` 对不存在的执行返回
+     200 + `[]`,前端无法区分"这个执行没有节点明细"与"执行 ID 打错了"。
+     三个子资源端点先确认父执行存在。
+  3. `GET /api/workflows/{id}/versions` 空结果返回 `null` 而非 `[]` ——
+     违反 AGENTS.md 约定 #7(列表端点一律返回数组)。`ListWorkflowVersions`
+     改为非 nil 初始化,并加 `TestContract_EmptyListIsArrayNotNull` 覆盖
+     7 个列表端点。
+  4. `POST /api/agents/{id}/test` 与 `POST /api/skills/{id}/enable` 对未知
+     ID 返回 400 且 body 无 `code` —— registry 抛的是裸 `fmt.Errorf`,
+     wrap() 只能映射成 400。两个 registry 的 `Get` 改为结构化
+     `model.NewError(..., "NOT_FOUND", ...)`,与 404 语义约定对齐。
+- **#78 绑定桩形同虚设**:`api.test.ts` 把 `@bindings/*` mock 成 `{}`,
+  依赖它的用例**静默失败而非报错**,绑定漂移测不出来。改为 Proxy 桩:
+  未声明导出立刻抛错,`then/catch/finally` 协议属性放行(踩到:`Promise.all`
+  会把每个桩当 thenable)。清单与 `frontend/bindings/` 下 wails 生成的
+  真实文件对齐,并加一条直接比对的用例防手写清单漂移。
+- **#79 无故障注入**:`persistence.DB` 新增 `SetQueryFault` 语句级注入点
+  (仅测试用),接在 `SaveWorkflow` 存在性查询与 `SaveSetting`。
+  **实测有效性**:回退 `SaveWorkflow` 的错误上抛后
+  `TestSaveWorkflowSurfacesExistenceQueryError` FAIL,恢复后 PASS。
+- **#80 备份功能"看起来有实则不可达"**:后端 REST 与 Wails 绑定都就绪、
+  前端也有封装,但 **UI 零入口**。Settings 页新增「备份」卡片(导出 +
+  从文件恢复,带确认与恢复/跳过/拒绝三组计数)。
+
+### 回归汇总(轮次 28 收尾)
+
+- `gofmt`/`go vet` 干净;`go test -count=1 -race ./...` 全部通过。✅
+- 前端 `tsc --noEmit` + `eslint --max-warnings=0` + `vite build` 通过;
+  vitest 46/46(新增 16 个:绑定守卫 3 + 交互行为 11 + 契约 2)。✅
+- `./scripts/verify.sh` 7 步全绿。✅
+- `docs/api.md` 同步本轮契约变化:`enable` 只接受显式 true/false、
+  `retry` 的 body 语义、`restore` 的六个计数字段、1MB 请求体上限、
+  新增事件类型与事件脱敏说明。✅
+- 新增回归测试计数:runtime 10 组、compiler 2 组、agent 13 组、
+  persistence 4 组、api 22 组、前端 16 组。✅
+
+### 仍未覆盖(结构性风险,非登记缺陷)
+
+- `exec.StateData` / `Exec.NodeStates` / ADK session state 三处各写一份
+  状态,"JSON 往返 int 变 float64"反复出现(`IntOfOk` 存在即症状);
+  建议节点状态只以 session state 为准,`NodeStates` 改派生视图。
+- `claude`/`pi` 真实 CLI 路径(超时、ErrWaitDelay、stderr 脱敏、大输出
+  截断)只有单元测试,建议补一次真机冒烟。
+- ADK 升级时 `cascadeCtx`(依赖 `InvocationContext` 内嵌 `context.Context`)、
+  失败级联、循环上限、恢复语义四必须重测。
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
@@ -601,6 +726,7 @@
 | 24 | 官方资料对照审计 + 可靠性强化(见上) | ✅ | #9 孤儿进程 #10 循环计数 #11 取消 ctx #12 并行竞态 #13 桌面下载断链 #14 双开 #15 种子路径 #16 备份恢复 |
 | 25 | 持续审计迭代:并发/资源/实时流 | ✅ | #17 SSE 未接通 #18 git 钩子阻塞 #19 ErrWaitDelay #20 Skill WAIT_USER #21 Bus 内存增长 #22 logx 竞争 |
 | 26 | 静态审计收敛:P0 正确性/安全 + P1 数据与体验 | ✅ | #29 git add_all 不提交 #30 reject 等同 continue #31 第二个闸门被跳过 #32 script 节点无权限门 #33 执行 panic 杀进程 #34 logx args 不脱敏 #35 SSE 背压反压引擎 #36 属性面板重挂载 #37 节点 ID 冲突 #38 保存无视校验 #39 吞错清空权限/设置假成功 #40 404 语义不齐 #41 script 配置失效 |
+| 28 | 收敛 OPTIMIZATION.md 全部登记项:批次 A 运行时语义 / B 并行编译 / C 测试基建 | ✅ | #66 WAIT_USER 答复被丢弃且 Agent 重跑 #67 模板缺失变量无告警 #68 节点状态机未接线 #69 并行失败不级联 #70 merge 报假成功 #71 mock 并发决策错位 #72 pi 嵌套 JSON 解析失败 #73 stdout 无上限 #74 分支越过汇合点 #75 不收敛丢链 #76 组件交互零测试 #77 REST 契约缺口(+4 处契约偏差) #78 绑定桩形同虚设 #79 无故障注入 #80 备份能力不可达 |
 | 27 | 三轮并行全面审计(运行时/持久化+API/前端):P0 静默成功 + P1 数据/契约 | ✅ | #42 无出口静默 COMPLETED #43 多回边丢弃 #44 DSL variables 失效 #45 校验器拒绝合法表达式 #46 节点明细按 exec:node 覆盖 #47 DisabledSkills 并发 fatal #48 版本号越权 #49 吞存在性查询错 #50 事件流泄密 #51 retry 吞 body 错 #52 enable fail open #53 请求体无上限 #54 备份绕过校验 #55 缺索引 #56-#65 前端 10 项 |
 
 **需求第四十五条(第一阶段完成标准)逐条核对**见 `docs/index.html` 使用说明附录。

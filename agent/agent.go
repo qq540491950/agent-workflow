@@ -4,6 +4,8 @@
 package agent
 
 import (
+	"agentworkflow/workflow/model"
+
 	"context"
 	"fmt"
 	"sort"
@@ -116,7 +118,11 @@ func (r *registry) Get(id string) (Agent, error) {
 	defer r.mu.RUnlock()
 	a, ok := r.agents[id]
 	if !ok {
-		return nil, fmt.Errorf("agent: %q not registered", id)
+		// 结构化错误:REST 层据此映射 404 + code=NOT_FOUND。此前是裸
+		// fmt.Errorf,wrap() 只能映射成 400 且 body 里没有 code,前端
+		// 分不清"资源不存在"与"参数错误"。
+		return nil, model.NewError(model.KindValidationError, "NOT_FOUND",
+			fmt.Sprintf("Agent %q 不存在", id))
 	}
 	return a, nil
 }

@@ -157,7 +157,9 @@ func (d *DB) ListWorkflowVersions(workflowID string) ([]int, error) {
 		return nil, wrap(err)
 	}
 	defer rows.Close()
-	var out []int
+	// 非 nil 初始化:Go 把 nil slice 编码成 JSON null,前端 asArray 能兜住,
+	// 但 REST 契约要求列表端点一律返回数组(见 AGENTS.md 约定 #7)。
+	out := []int{}
 	for rows.Next() {
 		var v int
 		if err := rows.Scan(&v); err != nil {

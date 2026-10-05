@@ -609,15 +609,26 @@ func (s *ExecutionService) Get(id string) (*model.Execution, error) {
 	return s.app.Repo.GetExecution(id)
 }
 
+// 三个子资源端点先确认执行存在:此前直接查子表,不存在的执行 ID 返回
+// 200 + 空数组,前端无法区分"这个执行没有节点明细"与"执行 ID 打错了"。
 func (s *ExecutionService) Nodes(id string) ([]*model.ExecutionNode, error) {
+	if _, err := s.app.Repo.GetExecution(id); err != nil {
+		return nil, err
+	}
 	return s.app.Repo.ListExecutionNodes(id)
 }
 
 func (s *ExecutionService) Events(id string) ([]map[string]any, error) {
+	if _, err := s.app.Repo.GetExecution(id); err != nil {
+		return nil, err
+	}
 	return s.app.Repo.ListEvents(id, 0)
 }
 
 func (s *ExecutionService) Artifacts(id string) ([]*model.Artifact, error) {
+	if _, err := s.app.Repo.GetExecution(id); err != nil {
+		return nil, err
+	}
 	return s.app.Repo.ListArtifacts(id)
 }
 
@@ -705,6 +716,9 @@ func (s *AgentService) List() []map[string]any {
 
 // SetPermission 更新某 Agent 的权限策略。
 func (s *AgentService) SetPermission(id string, policy permission.Policy) error {
+	if err := s.app.requireAgent(id); err != nil {
+		return err
+	}
 	// 注意:读失败必须上抛。此前吞掉错误后 configs 为 nil → 重建空 map,
 	// 随后的整表写会把其他 Agent 已配置的权限策略全部清空。
 	var configs map[string]map[string]any
@@ -732,8 +746,23 @@ func (s *AgentService) SetPermission(id string, policy permission.Policy) error 
 	return nil
 }
 
+// requireAgent 校验 Agent 是否在注册表中,不存在则返回 404 NOT_FOUND。
+func (a *App) requireAgent(id string) error {
+	if _, err := a.Agents.Get(id); err != nil {
+		return model.NewError(model.KindValidationError, "NOT_FOUND",
+			fmt.Sprintf("Agent %q 不存在", id))
+	}
+	return nil
+}
+
 // GetConfig 返回某 Agent 的运行配置(环境变量值已掩码为 ***)。
 func (s *AgentService) GetConfig(id string) (agent.AgentConfig, error) {
+	// 未知 Agent 必须 404 NOT_FOUND:此前直接读配置行,不存在的 ID 返回
+	// 200 + 空配置,前端看不出"这个 Agent 不存在"还是"它没配过" ——
+	// 而 PUT/reset 更糟,会凭空为不存在的 ID 落库一行配置。
+	if err := s.app.requireAgent(id); err != nil {
+		return agent.AgentConfig{}, err
+	}
 	cfg, err := s.app.loadAgentConfig(id)
 	if err != nil {
 		return agent.AgentConfig{}, err
@@ -745,6 +774,9 @@ func (s *AgentService) GetConfig(id string) (agent.AgentConfig, error) {
 // 隔离原则:配置只影响本应用对该 Agent 的调用(CLI 参数 + 子进程环境变量),
 // 不会修改用户的本地配置文件;环境变量值为 "***" 表示保留原值,空串表示删除。
 func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
+	if err := s.app.requireAgent(id); err != nil {
+		return err
+	}
 	// 合并掩码值:*** → 沿用已存值
 	stored, err := s.app.loadAgentConfig(id)
 	if err != nil {
@@ -779,6 +811,9 @@ func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
 
 // ResetConfig 清空某 Agent 的运行配置,恢复适配器内置默认。
 func (s *AgentService) ResetConfig(id string) error {
+	if err := s.app.requireAgent(id); err != nil {
+		return err
+	}
 	cfg := agent.AgentConfig{}
 	return s.UpdateConfig(id, cfg)
 }

@@ -1,15 +1,18 @@
 # 优化修改方案 — 轮次 27 全面审计
 
 > 方法:三轮并行只读审计(workflow 运行时+编译器 / 持久化+API+应用层 /
-> 前端+双模式契约),共提出 41 条,逐条人工复核源码后定级。本轮**已修复
-> 22 条**(6 P0 + 6 后端 P1 + 10 前端),每个修复与回归测试同 commit。
-> 剩余 8 条列入下方"分批落地路线"。
+> 前端+双模式契约),共提出 41 条,逐条人工复核源码后定级。
 >
-> 与前几轮的关键差别:轮次 24-26 的缺陷多数是**崩溃/挂起**;本轮 6 个 P0
-> 里有 4 个属于**静默成功**——工作流语义上没走完,系统却报告成功。这类缺陷
-> 不会触发任何异常路径,是此前"门禁全绿"却仍有 P0 的根本原因。
+> **轮次 27 完成**:22 条当场修复并提交(6 P0 + 8 后端 P1 + 10 前端)。
+> **轮次 28 完成剩余全部登记项**:批次 A(A1-A8 运行时语义)、
+> B(B1-B2 并行编译正确性)、C(C1-C5 测试基建)。
+> 缺陷编号与回归用例见 `docs/TESTING.md` 轮次 27/28。
+>
+> 与前几轮的关键差别:轮次 24-26 的缺陷多数是**崩溃/挂起**;轮次 27 的
+> 6 个 P0 里有 4 个属于**静默成功**——工作流语义上没走完,系统却报告成功。
+> 这类缺陷不会触发任何异常路径,是此前"门禁全绿"却仍有 P0 的根本原因。
 
-## 一、已修复清单
+## 一、已修复清单(轮次 27)
 
 ### P0 — 静默成功 / 静默丢数据(危害最高的四类)
 
@@ -32,7 +35,7 @@
 | 编号 | 缺陷 | 修复 |
 | --- | --- | --- |
 | P1-1 | 工作流版本号由客户端请求体决定(伪造 `version:99` 落库成 v100;唯一约束被 `INSERT OR REPLACE` 静默覆盖,版本历史失真) | 版本号以库中 `MAX(version)` 为准(事务内读取),快照改普通 `INSERT` 让唯一冲突显式报错 |
-| P1-2 | `SaveWorkflow` 吞掉存在性查询错误 | DB 故障时对已存在工作流走 INSERT 分支,真实根因被主键冲突掩盖;改为上抛 |
+| P1-2 | `SaveWorkflow` 吞掉存在性查询错误 | DB 故障时对已存在工作流走 INSERT 分支,真实根因被主键冲突掩盖;改为上抛(并加故障注入测试) |
 | P1-3 | 事件流三个出口(落库 / SSE / Wails IPC)不脱敏 | 在 `Bus.Emit` 分发点统一脱敏一次,三条出口同时生效,新增订阅者不会漏 |
 | P1-4 | `retry` 端点吞请求体解析错误 | `{"skip":"yes"}` 被吞后 skip 静默变 false,「跳过失败节点」实际重跑失败 Agent(可能重复写文件/重复外部调用)还返回 200 |
 | P1-5 | `enable` 端点 fail open | `value != "false"` 让缺参、?value=0、?value=no 全部判为"启用"——禁用开关缺参数反而打开工作流 |
@@ -55,64 +58,52 @@
 | F13 | 重试/跳过按钮无 busy 态 | 连点并发打多次 /retry,多个 toast 混杂 |
 | F14 | layout 用 `?? []` 而非 `asArray` | 挡不住"被解析成 HTML 兜底页的对象",Layout 崩溃影响所有页面 |
 
-## 二、剩余缺陷与落地路线(按批次)
+## 二、已修复清单(轮次 28:批次 A/B/C)
 
-### 批次 A:运行时语义补齐(建议下一轮)
+### 批次 A:运行时语义补齐
 
-| 项 | 缺陷 | 建议 | 风险 |
-| --- | --- | --- | --- |
-| A1 | `WAIT_USER` 恢复时,Agent/Skill 节点被原样重跑,用户答复丢失 | 在 `runAgentNode`/`runSkillNode` 消费 `_user_input` 并置 `answered` 标记;已答复则不再调 Agent(避免 execute/fix 模式重复写文件) | 中。需先定义"答复后是否重跑"的产品语义 |
-| A2 | 模板缺失变量静默渲染空串,`missing` 列表被丢弃 | 汇总进节点 outcome 与 `runtime.error` 事件;关键变量缺失是否让节点 FAILED 需产品决策 | 低(先只告警) |
-| A3 | 节点级状态机 `CanTransitionNode` 从未接线 | 在 `nodeAgent` 写 `StatusKey` 前校验,非法转换记 `runtime.error`;或直接删除该死代码 | 低 |
-| A4 | 并行分支失败不级联兄弟分支 | 失败分支 `yield(nil, err)` 让 ADK errgroup 取消兄弟;或入口加 abort 守卫 | 中。真实 Agent 场景下省 token,但会改变并行语义 |
-| A5 | merge 汇总失真:按入边统计,缺失状态一律算成功 | 读取并行区分支清单,`StatusKey` 缺失即计入 skipped 并在摘要标注 | 低 |
-| A6 | `Start` 重置 Mock 会打断同工作流的并发执行 | mock 计数按 executionID 隔离,或只在显式开启时重置 | 低 |
-| A7 | `pi` 适配器用 `LastIndex("{")` 定位尾部 JSON | 含嵌套对象时 Unmarshal 失败 → 决策静默丢失、路由恒走默认分支。改为从第一个能配平到末尾的 `{` 起解析 | 低 |
-| A8 | Agent stdout 无上限捕获,截断只发生在落库层 | 用 `io.LimitReader` 限制内存缓冲并在超限时显式报错 | 低 |
-
-### 批次 B:并行编译正确性(需先补测试)
-
-| 项 | 缺陷 | 建议 |
+| 项 | 缺陷 | 修复 |
 | --- | --- | --- |
-| B1 | `irBuilder.stopped` 是共享字段,嵌套并行时内层 `chainStop` 会清掉外层 stop 集合,分支越过汇合点执行后置节点 | 把 stop 集合改为沿调用链显式传参,彻底去掉共享字段。**注意**:目前无"并行套并行"的测试用例,需先补一个能暴露该行为的用例再重构 |
-| B2 | 并行分支不收敛时后续节点被静默丢弃(`join == ""` 时直接丢链) | 兜底改为在 `Plan` 里保留分支信息并在执行后发告警事件;或校验期拒绝不收敛拓扑 |
+| A1 | Agent/Skill 返回 WAIT_USER 后,用户答复被完全丢弃,Agent 被**第二次真实调用**(execute/fix 模式重复写文件、重复跑测试);reject 更是被静默吞成 COMPLETED | 语义定为「复用已有响应」:恢复时把上次结果快照存入 `AnsweredKey`,节点入口消费 `_user_input` 后直接按已答复完成,不再调 Agent;reject 仍走 FAILED |
+| A2 | 模板缺失变量静默渲染空串,`missing` 列表被 `rendered, _ :=` 丢弃 | 去重排序后发 `node.warning` 事件 + `logx.Warn`。只告警不让节点失败(部分变量确实可选);刻意不用 `node.waiting`(语义是"暂停等人工",会误导前端渲染 HITL 面板) |
+| A3 | 节点级状态机 `CanTransitionNode` 从未接线(只在测试里被调用) | 写回 `StatusKey` 前校验,违反记 `runtime.error` 让问题可见(不阻断执行:状态已是既成事实) |
+| A4 | 并行分支失败不级联:失败走 `yield(escalateEvent, nil)`,ADK errgroup 只在 Go error 时 cancel,兄弟分支继续跑完 | 给并行区包一层共享可取消 ctx + abort 监视协程,任一分支 `FAILED:` 即取消其余分支;用 `cascadeCtx` 包装 InvocationContext 只替换取消语义。只认 FAILED 前缀,WAIT_USER 不会误杀 |
+| A5 | merge 汇总失真两处:①按入边统计而入边 ≠ 并行区分支(分支内嵌路由时条件不成立的分支本就不该跑);②"查不到状态"一律算成功 | 从"喂给 merge 的 parallel 节点"取分支清单;区分「无条件扇出无状态=被截断(失败)」「条件分支无状态=正常路由(标注)」「显式 SKIPPED(标注)」。失败或必跑分支未完成时 merge 落 FAILED |
+| A6 | `Start` 重置 Mock 打断同工作流并发执行 | `AgentRequest` 带 `ExecutionID`,mock 按执行隔离计数空间;`ResetMock` 只清无执行上下文的共享空间 |
+| A7 | pi 适配器 `LastIndex("{")` 命中内层 `{` 时片段不配平 → decision 静默丢失、路由恒走默认分支 | 新增 `coreagent.TrailingJSONObject` 做括号配平(跳过字符串字面量与转义引号);claude 侧同问题一并改用 `FirstJSONObject` 统一 |
+| A8 | Agent stdout 无上限捕获,截断只发生在落库层 | 新增 `coreagent.BoundedBuffer`(8MB 上限,超限计数并在 `String()` 追加显式截断标记);claude/pi 双方接入 |
 
-### 批次 C:测试基建(投入产出比最高的一项)
+### 批次 B:并行编译正确性
 
-当前最大的系统性风险是**测试只覆盖正常路径**:
-
-| 项 | 缺口 | 建议 |
+| 项 | 缺陷 | 修复 |
 | --- | --- | --- |
-| C1 | 组件层无交互行为测试(焦点保持、危险操作二次确认、双击防护) | 补 jsdom 组件测试,优先覆盖本轮新增的 confirm/busy/乐观回滚逻辑 |
-| C2 | REST 契约测试仅覆盖少量端点 | 按"每个端点至少一条契约测试"补齐,含状态码语义与错误体形状 |
-| C3 | `api.test.ts` 把 `@bindings/*` 整个 mock 成空对象 | 依赖它的用例会静默失败而非报错;改为部分 mock,缺导出即抛错 |
-| C4 | 无故障注入测试 | `SaveWorkflow` 的查询失败、`SetEnabled` 的落库失败等只能靠人工构造;建议引入可注入的 DB 接口 |
-| C5 | 备份三个 API 方法(`backupURL`/`exportBackupText`/`restoreBackup`)零 UI 消费 | 要么补 Settings 页备份/恢复入口,要么删除死代码——"看起来有能力实则不可达"最容易误导 |
+| B1 | `irBuilder.stopped` 是共享字段,且 `parallel()` 给内层分支的停止集合**不含外层的** → 分支一路走到并行区汇合点及其后所有节点。后果不是"多跑一次":并行分支由 ADK 并发执行,等于多 goroutine 并发写同一批状态 | 停止集合显式沿调用链传递(`chain`/`chainStop` 合并),`parallel`/`route` 把外层 stop 合并进内层分支(`copySet(outerStop) ∪ {innerJoin}`),彻底删掉共享字段 |
+| B2 | 并行分支不收敛时塞一个合成的 `<parID>.merge` 占位节点(工作流里并不存在,落到 lower 变 noop),后续链被静默丢弃而执行报成功 | 新增 `KindWarning` IR 节点(只发告警不执行):标记 `Plan.Unconverged`,各分支照常跑完并发 `runtime.warning`,明确告知"没有公共汇合点,分支之后的链不会执行" |
 
-## 三、架构层面的中期建议
+### 批次 C:测试基建
 
-1. **状态收敛到单一写入点**。当前 `exec.StateData` / `Exec.NodeStates` /
-   ADK session state 三处各写一份,已导致"JSON 往返 int 变 float64"这一类
-   反复出现的缺陷(`IntOfOk` 存在本身就是症状)。建议:节点状态只以 ADK
-   session state 为准,`NodeStates` 改为派生视图。
+| 项 | 缺陷 | 修复 |
+| --- | --- | --- |
+| C1 | 组件层交互行为零测试(二次确认、busy 防连点、乐观回滚都只有"看起来对"的代码) | 新增 `interaction.test.tsx` 11 个用例,覆盖上述三类语义 + 四种异常列表返回 |
+| C2 | REST 契约测试仅覆盖少量端点 | 补齐至"每端点至少一条契约测试",4xx 一律断言错误体同时含 `error` 与 `code` |
+| C3 | `api.test.ts` 把 `@bindings/*` 整个 mock 成 `{}` → 依赖它的用例**静默失败而非报错**,绑定漂移测不出来 | Proxy 桩:访问未声明导出立刻抛错;清单与 `frontend/bindings/` 下真实生成文件对齐,并加一条直接比对的用例 |
+| C4 | 无故障注入,DB 故障只能靠"关掉 DB"粗略模拟 | `persistence.DB` 增加 `SetQueryFault` 语句级注入点,接在 `SaveWorkflow` 存在性查询与 `SaveSetting` |
+| C5 | 备份三个 API 方法零 UI 消费 —— "看起来有能力实则不可达" | Settings 页新增「备份」卡片(导出 + 从文件恢复,带确认与恢复/跳过/拒绝三组计数) |
 
-2. **"静默成功"要当成 P0 级别的设计约束**。本轮 4 个 P0 都是"该失败却
-   成功"。建议在 `nodeAgent`/`routeAgent` 收尾处加一条不变式:执行结束前若
-   仍有未执行的可达节点,必须显式失败或显式标记为设计意图,不允许默认收尾。
+## 三、仍未覆盖与后续方向
 
-3. **校验期与运行期必须同源**。P0-4 与 P0-3 都是"两份实现各自演化"导致的
-   分裂。建议把条件表达式环境、节点类型配置结构各抽成单一来源
-   (`compiler` 与 `validator` 共用),从结构上消除漂移。
+以下为本轮之后仍然成立的结构性风险,不属于已登记缺陷,需单独立项:
 
-4. **错误信息即 UI 契约**。后端已返回 `code`/`kind`,前端此前丢弃。
-   建议定义错误码枚举 + 前端按码分类渲染(权限类引导去设置页、校验类定位
-   到画布节点),避免所有错误都退化成一句裸消息。
+1. **状态三处写入**。`exec.StateData` / `Exec.NodeStates` / ADK session
+   state 各写一份,"JSON 往返 int 变 float64"这一类缺陷反复出现
+   (`IntOfOk` 存在本身就是症状)。建议节点状态只以 ADK session state
+   为准,`NodeStates` 改为派生视图。
+2. **ADK 升级**。`parallelagent` / `loopagent` / `session` 的行为直接
+   决定失败级联、循环上限与恢复语义;升级 ADK 时这三处必须重测
+   (现有 `cascadeCtx` 依赖 `InvocationContext` 内嵌 `context.Context`)。
+3. **真实 Agent 端到端**。本轮全部回归基于 mock 与 Skill;`claude`/
+   `pi` 的真实 CLI 路径(超时、ErrWaitDelay、stderr 脱敏、大输出截断)
+   只有单元测试覆盖,建议补一次真机冒烟。
+4. **`docs/api.md` 契约同步**。本轮改了 `enable` 的参数校验、
+   `retry` 的 body 语义、`restore` 的响应字段,需同步该文档。
 
-## 四、验证方式
-
-每项修复与回归测试同 commit,`./scripts/verify.sh` 7 步全绿作为门禁
-(gofmt / vet / `go test -race ./...` / 前端 lint+build+vitest / 双冒烟)。
-
-其中并发缺陷的回归测试已实测有效性:回退 `DisabledSkills` 的锁后,
-`-race` 报 3 处 DATA RACE 并 FAIL;SSE 背压用例也从 0.6s 涨到 2.3s 暴露了
-事件脱敏正则的性能问题(已用廉价子串预筛解决)。

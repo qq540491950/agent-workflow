@@ -18,7 +18,7 @@
 | POST | `/api/workflows` | 创建/更新(保存前强制校验;更新版本 +1) |
 | DELETE | `/api/workflows/{id}` | 删除工作流(执行记录保留) |
 | POST | `/api/workflows/{id}/duplicate` | 复制 |
-| POST | `/api/workflows/{id}/enable?value=true\|false` | 启用/禁用 |
+| POST | `/api/workflows/{id}/enable?value=true\|false` | 启用/禁用。**只接受显式的 `true`/`false`**,缺失或其它取值返回 400(fail closed:禁用开关缺参数不能反而打开工作流) |
 | POST | `/api/workflows/validate` | 校验(返回结构化 errors/warnings) |
 | GET | `/api/workflows/{id}/export` | 导出 YAML |
 | GET | `/api/workflows/{id}/versions` | 版本号列表(降序) |
@@ -37,7 +37,7 @@
 | GET | `/api/executions/{id}/artifacts` | 制品(如 git-diff) |
 | GET | `/api/executions/{id}/export` | 导出完整记录 JSON(附件下载) |
 | POST | `/api/executions/{id}/input` | 人工输入并恢复 `{response, instruction}` |
-| POST | `/api/executions/{id}/retry` | 失败执行恢复 `{skip: bool}` |
+| POST | `/api/executions/{id}/retry` | 失败执行恢复 `{skip: bool}`。空 body 合法(等价 `skip=false`);body 非空而解析失败返回 400(此前静默变 `skip=false`,「跳过失败节点」实际会重跑失败 Agent) |
 | POST | `/api/executions/{id}/cancel` | 取消执行 |
 | DELETE | `/api/executions/{id}` | 删除记录(级联) |
 
@@ -52,7 +52,7 @@
 | POST | `/api/agents/{id}/reset` | 清空运行配置,恢复适配器内置默认 |
 | POST | `/api/agents/{id}/permission` | 更新权限策略 |
 | GET | `/api/skills` | Skill 注册表(含启用状态) |
-| POST | `/api/skills/{id}/enable` | 启用/禁用 `{enabled}` |
+| POST | `/api/skills/{id}/enable` | 启用/禁用 `{enabled}`(缺该字段返回 400) |
 | POST | `/api/skills/{id}/test` | 测试执行 |
 
 ## Git
@@ -71,7 +71,7 @@
 | GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关 |
 | POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改) |
 | GET | `/api/backup` | 导出备份(工作流 + Agent 配置,含明文敏感环境变量) |
-| POST | `/api/backup/restore` | 恢复备份(已存在工作流跳过) |
+| POST | `/api/backup/restore` | 恢复备份。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` |
 | GET | `/api/events` | **SSE** 实时事件流(UIEvent;连接即达响应头,15s keepalive) |
 | GET | `/api/events/all?type=&limit=` | 跨执行审计事件(支持类型前缀过滤) |
 | GET | `/api/stats` | 每工作流执行统计 |
@@ -95,6 +95,13 @@ HTTP 状态码语义:
 | 404 | 资源不存在(NOT_FOUND) |
 | 200 | DELETE 为幂等语义:删除不存在的资源同样返回 200 |
 
+所有 JSON 请求体上限 1MB(`http.MaxBytesReader`):超限直接拒绝,不会把
+整个 body 读进内存。服务器模式监听 `127.0.0.1` 且**无鉴权**,本机任意
+进程都能打这些端点,故该上限是必要的。
+
+文本类端点(`/export`、`/versions/{n}`)失败时同样返回上述 JSON 错误体,
+客户端应按状态码判断而非直接使用响应内容。
+
 ## SSE 实时事件流(GET /api/events)
 
 - 连接建立立即返回 `text/event-stream` 响应头与注释行(`: connected`),
@@ -111,3 +118,9 @@ HTTP 状态码语义:
 `review.approved / review.rejected`
 `human.input_required / human.input_received`
 `skill.executed / git.executed / merge.completed`
+`node.warning`(模板变量缺失,渲染为空串)/ `runtime.error` / `runtime.warning`
+(如并行分支不收敛:各分支终点互不相同,分支之后的链不会执行)
+
+所有事件的 `data` 在分发点统一脱敏(键名为 token/api_key/password 等
+时整值替换为 `***`,值含 `key=value` 形态时就地替换),落库 / SSE /
+Wails IPC 三条出口一致。

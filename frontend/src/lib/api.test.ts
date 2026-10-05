@@ -25,12 +25,15 @@ vi.mock("@bindings/agentworkflow/app/application/executionservice.js", () => ({
 //
 // exports 列表取自 frontend/bindings/ 下 wails 生成的真实文件,改动后端
 // 导出名时这两个列表会与真实绑定对不上,测试即刻失败。
-function bindingStub(name: string, exports: string[]) {
+function bindingStub(
+  name: string,
+  exports: string[],
+): Record<string, unknown> {
   const known = new Set(exports);
   // Promise.all 会把每个桩当 thenable 处理并读 .then,这类协议属性
   // 不能当成"未知导出"抛错
   const protocol = new Set(["then", "catch", "finally"]);
-  return new Proxy(
+  return new Proxy<Record<string, unknown>>(
     {},
     {
       get(_t, prop) {

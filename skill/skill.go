@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"agentworkflow/workflow/model"
 )
 
 // SkillRequest 是一次 Skill 调用请求。
@@ -70,7 +72,10 @@ func (r *registry) Get(id string) (Skill, error) {
 	defer r.mu.RUnlock()
 	s, ok := r.skills[id]
 	if !ok {
-		return nil, fmt.Errorf("skill: %q not registered", id)
+		// 结构化错误:与 agent 注册表同源,让 REST 层能映射 404 +
+		// code=NOT_FOUND,而不是裸 fmt.Errorf 只能映射成 400 且无 code。
+		return nil, model.NewError(model.KindValidationError, "NOT_FOUND",
+			fmt.Sprintf("Skill %q 不存在", id))
 	}
 	return s, nil
 }
