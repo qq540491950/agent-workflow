@@ -7,6 +7,7 @@ import (
 	crypto_rand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -604,9 +605,19 @@ func (s *ExecutionService) Export(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	nodes, _ := s.app.Repo.ListExecutionNodes(id)
-	events, _ := s.app.Repo.ListEvents(id, 0)
-	artifacts, _ := s.app.Repo.ListArtifacts(id)
+	// 审计归档必须完整:此前吞掉三次查询错误,导出静默缺项
+	nodes, err := s.app.Repo.ListExecutionNodes(id)
+	if err != nil {
+		return nil, err
+	}
+	events, err := s.app.Repo.ListEvents(id, 0)
+	if err != nil {
+		return nil, err
+	}
+	artifacts, err := s.app.Repo.ListArtifacts(id)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"execution": exec,
 		"nodes":     nodes,
@@ -653,8 +664,16 @@ func (s *AgentService) List() []map[string]any {
 
 // SetPermission 更新某 Agent 的权限策略。
 func (s *AgentService) SetPermission(id string, policy permission.Policy) error {
+	// 注意:读失败必须上抛。此前吞掉错误后 configs 为 nil → 重建空 map,
+	// 随后的整表写会把其他 Agent 已配置的权限策略全部清空。
 	var configs map[string]map[string]any
-	_ = s.app.Repo.GetSetting("agent_policies", &configs)
+	if err := s.app.Repo.GetSetting("agent_policies", &configs); err != nil {
+		var se *model.Error
+		// 设置项尚未创建属于正常初始状态;其余错误上抛
+		if !errors.As(err, &se) || se.Code != "NOT_FOUND" {
+			return err
+		}
+	}
 	if configs == nil {
 		configs = map[string]map[string]any{}
 	}
@@ -934,18 +953,26 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 }
 
 func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNodes *bool) (*SettingsInfo, error) {
+	// 先落库再改内存:此前先改内存、持久化错误被忽略,界面提示"已保存"
+	// 但重启即丢失。
 	if gitWorkingDir != "" {
+		if err := s.Set("git_working_dir", gitWorkingDir); err != nil {
+			return nil, err
+		}
 		s.app.GitSvc.WorkingDir = gitWorkingDir
-		_ = s.Set("git_working_dir", gitWorkingDir)
 	}
 	if logLevel != "" {
+		if err := s.Set("log_level", logLevel); err != nil {
+			return nil, err
+		}
 		s.app.LogLevel = logLevel
 		logx.SetLevel(logLevel)
-		_ = s.Set("log_level", logLevel)
 	}
 	if allowScriptNodes != nil {
+		if err := s.Set("allow_script_nodes", *allowScriptNodes); err != nil {
+			return nil, err
+		}
 		s.app.scriptNodes.Store(*allowScriptNodes)
-		_ = s.Set("allow_script_nodes", *allowScriptNodes)
 		logx.Warn("script 节点放行开关已变更", "allow_script_nodes", *allowScriptNodes)
 	}
 	return s.Info(), nil

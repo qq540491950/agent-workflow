@@ -291,3 +291,40 @@ edges:
 	}
 	t.Fatalf("请求结束后执行未完成,最终 state=%s", state)
 }
+
+// 回归:POST /api/workflows 的请求体若字段类型不符(合法 JSON、非法结构),
+// 此前 parseWorkflow 丢弃 Unmarshal 错误,会静默落库一个空白/残缺工作流。
+// 现必须 400 且不落库。
+func TestPostWorkflowRejectsWrongTypedFields(t *testing.T) {
+	s := newTestServer(t)
+	for _, body := range []string{
+		`{"id":"wf-bad-1","name":123}`,           // name 应为 string
+		`{"id":"wf-bad-2","nodes":"not-a-list"}`, // nodes 应为数组
+		`{"id":"wf-bad-3","version":"abc"}`,      // version 应为整数
+	} {
+		code, resp, raw := doReq(t, s, http.MethodPost, "/api/workflows", body)
+		if code != http.StatusBadRequest {
+			t.Errorf("POST %s → %d, want 400 (resp=%v)", body, code, resp)
+		}
+		if !strings.Contains(string(raw), "工作流结构非法") {
+			t.Errorf("错误信息不可读: %s", raw)
+		}
+		// 不得落库
+		if list, _ := s.app.Workflows.List(); len(list) != 0 {
+			t.Errorf("非法请求不应落库,现有 %d 个工作流", len(list))
+		}
+	}
+}
+
+// 回归:不存在的版本快照此前走 wrap() → DB_ERROR → 400,与其他"资源缺失"
+// 端点的 404 语义不一致(wrapNotFound 此前是无人调用的死代码)。
+func TestGetWorkflowVersionMissingIs404(t *testing.T) {
+	s := newTestServer(t)
+	code, resp, _ := doReq(t, s, http.MethodGet, "/api/workflows/ghost/versions/3", "")
+	if code != http.StatusNotFound {
+		t.Fatalf("→ %d, want 404 (resp=%v)", code, resp)
+	}
+	if resp["code"] != "NOT_FOUND" {
+		t.Errorf("code = %v, want NOT_FOUND", resp["code"])
+	}
+}

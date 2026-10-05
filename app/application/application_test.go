@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"agentworkflow/agent"
+	"agentworkflow/permission"
 	"agentworkflow/workflow/model"
 )
 
@@ -530,4 +531,65 @@ edges: []
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("子工作流未被级联取消")
+}
+
+// 回归:设置持久化失败此前被忽略 —— 内存已改、界面提示"已保存",重启即丢。
+// 现必须上抛,且不改动内存态。
+func TestSettingsUpdatePropagatesPersistError(t *testing.T) {
+	a := newTestApp(t)
+	// 先造一个可观测的旧值
+	if err := a.Settings.Set("git_working_dir", "/tmp/before"); err != nil {
+		t.Fatal(err)
+	}
+	before := a.GitSvc.WorkingDir
+	levelBefore := a.LogLevel
+	_ = a.Repo.Close() // 之后所有写入都会失败
+
+	if _, err := a.Settings.Update("/tmp/after", "", nil); err == nil {
+		t.Error("git_working_dir 持久化失败应上抛")
+	}
+	if a.GitSvc.WorkingDir != before {
+		t.Errorf("内存态不应在落库失败后被改动: %q → %q", before, a.GitSvc.WorkingDir)
+	}
+	if _, err := a.Settings.Update("", "debug", nil); err == nil {
+		t.Error("log_level 持久化失败应上抛")
+	}
+	if a.LogLevel != levelBefore {
+		t.Errorf("日志级别不应在落库失败后被改动: %q → %q", levelBefore, a.LogLevel)
+	}
+	allow := true
+	if _, err := a.Settings.Update("", "", &allow); err == nil {
+		t.Error("allow_script_nodes 持久化失败应上抛")
+	}
+	if a.ScriptNodesAllowed() {
+		t.Error("放行开关不应在落库失败后被打开")
+	}
+}
+
+// 回归:SetPermission 读取 agent_policies 失败时,此前吞掉错误后重建空 map,
+// 整表写会把其他 Agent 已配置的权限策略全部清空。现读失败必须上抛。
+func TestSetPermissionPropagatesReadError(t *testing.T) {
+	a := newTestApp(t)
+	// 先给两个 Agent 配好权限
+	seedPolicies := map[string]permission.Policy{
+		"claude-code": {FilesystemRead: true, GitRead: true},
+		"pi-agent":    {FilesystemRead: true, FilesystemWrite: true, GitRead: true, GitCommit: true},
+	}
+	for _, id := range []string{"claude-code", "pi-agent"} {
+		if err := a.AgentSvc.SetPermission(id, seedPolicies[id]); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	var policies map[string]map[string]any
+	if err := a.Repo.GetSetting("agent_policies", &policies); err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 2 {
+		t.Fatalf("种子策略 = %v", policies)
+	}
+
+	_ = a.Repo.Close() // 读失败
+	if err := a.AgentSvc.SetPermission("mock-claude", permission.Policy{FilesystemRead: true}); err == nil {
+		t.Error("读失败时 SetPermission 应上抛,否则会清空其他 Agent 的权限策略")
+	}
 }

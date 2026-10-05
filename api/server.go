@@ -78,7 +78,11 @@ func (s *Server) routes() {
 		if err := json.NewDecoder(r.Body).Decode(&wf); err != nil {
 			return badRequest(err.Error())
 		}
-		created, err := s.app.Workflows.Save(parseWorkflow(wf))
+		parsed, err := parseWorkflow(wf)
+		if err != nil {
+			return err
+		}
+		created, err := s.app.Workflows.Save(parsed)
 		return writeJSON(w, created, err)
 	}))
 	s.mux.HandleFunc("DELETE /api/workflows/{id}", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
@@ -98,7 +102,11 @@ func (s *Server) routes() {
 		if err := json.NewDecoder(r.Body).Decode(&wf); err != nil {
 			return badRequest(err.Error())
 		}
-		return writeJSON(w, s.app.Workflows.Validate(parseWorkflow(wf)), nil)
+		parsed, err := parseWorkflow(wf)
+		if err != nil {
+			return err
+		}
+		return writeJSON(w, s.app.Workflows.Validate(parsed), nil)
 	}))
 	s.mux.HandleFunc("GET /api/workflows/{id}/versions", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		vers, err := s.app.Workflows.Versions(r.PathValue("id"))
@@ -480,9 +488,17 @@ func queryInt(r *http.Request, key string, def int) int {
 	return n
 }
 
-func parseWorkflow(m map[string]any) *model.Workflow {
-	raw, _ := json.Marshal(m)
+// parseWorkflow 把请求体(map)转为 Workflow。
+// 结构非法(字段类型不符等)必须报错:此前丢弃 Unmarshal 错误,
+// 错类型字段会静默变成零值,产出空白/残缺工作流。
+func parseWorkflow(m map[string]any) (*model.Workflow, error) {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return nil, badRequest("工作流结构非法: " + err.Error())
+	}
 	var wf model.Workflow
-	_ = json.Unmarshal(raw, &wf)
-	return &wf
+	if err := json.Unmarshal(raw, &wf); err != nil {
+		return nil, badRequest("工作流结构非法: " + err.Error())
+	}
+	return &wf, nil
 }

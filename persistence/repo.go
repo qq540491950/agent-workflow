@@ -113,7 +113,8 @@ func (d *DB) GetWorkflowVersion(workflowID string, version int) (*model.Workflow
 	row := d.sql.QueryRow(`SELECT snapshot_json FROM workflow_versions WHERE workflow_id=? AND version=?`, workflowID, version)
 	var snap string
 	if err := row.Scan(&snap); err != nil {
-		return nil, wrap(err)
+		// 版本不存在是正常的"资源缺失",应映射为 NOT_FOUND(404)而非 DB_ERROR
+		return nil, wrapNotFound(err, "工作流版本", fmt.Sprintf("%s@%d", workflowID, version))
 	}
 	wf := &model.Workflow{}
 	if err := json.Unmarshal([]byte(snap), wf); err != nil {
@@ -536,7 +537,9 @@ func (d *DB) GetSetting(key string, out any) error {
 	var raw string
 	err := d.sql.QueryRow(`SELECT value_json FROM settings WHERE key=?`, key).Scan(&raw)
 	if err != nil {
-		return wrap(err)
+		// 设置项不存在是正常初始状态,映射为 NOT_FOUND 让调用方能区分
+		// "尚未设置"与"读取失败"(此前一律 DB_ERROR,掩盖真实故障)
+		return wrapNotFound(err, "设置项", key)
 	}
 	return json.Unmarshal([]byte(raw), out)
 }
