@@ -73,7 +73,7 @@ export default function Executions() {
           <TableBody>
             {shown.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
                   暂无执行
                 </TableCell>
               </TableRow>
@@ -84,27 +84,6 @@ export default function Executions() {
                   <Link className="hover:underline" to={`/executions/${e.id}`}>
                     {e.id}
                   </Link>
-                </TableCell>
-                <TableCell className="text-right">
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    title="删除记录"
-                    className="text-muted-foreground hover:text-red-500"
-                    onClick={async (ev) => {
-                      ev.stopPropagation();
-                      if (!confirm(`删除执行记录 ${e.id}?`)) return;
-                      try {
-                        await api.deleteExecution(e.id);
-                        toast.success("已删除");
-                        refresh();
-                      } catch (err) {
-                        toast.error((err as Error).message);
-                      }
-                    }}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
                 </TableCell>
                 <TableCell className="text-sm">
                   <Link className="hover:underline" to={`/workflows/${e.workflow_id}/history`}>
@@ -128,6 +107,27 @@ export default function Executions() {
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
                   {(e.finished_at ?? "").slice(0, 19).replace("T", " ") || "-"}
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    title="删除记录"
+                    className="text-muted-foreground hover:text-red-500"
+                    onClick={async (ev) => {
+                      ev.stopPropagation();
+                      if (!confirm(`删除执行记录 ${e.id}?`)) return;
+                      try {
+                        await api.deleteExecution(e.id);
+                        toast.success("已删除");
+                        refresh();
+                      } catch (err) {
+                        toast.error((err as Error).message);
+                      }
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </TableCell>
               </TableRow>
             ))}

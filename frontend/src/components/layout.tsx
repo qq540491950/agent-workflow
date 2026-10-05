@@ -12,7 +12,7 @@ import {
   ScrollText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { api, detectMode, subscribeEvents } from "@/lib/api";
+import { api, asArray, detectMode, subscribeEvents } from "@/lib/api";
 import type { Execution } from "@/lib/types";
 
 const nav = [
@@ -41,8 +41,11 @@ export default function Layout() {
       api
         .listExecutions("", 50)
         .then((execs: Execution[] | null) => {
-          execs = execs ?? [];
-          runningCount = execs.filter(
+          // asArray 而非 `?? []`:后者挡不住"被解析成 HTML 兜底页的对象"
+          // 这一异常返回,execs.filter 会抛 TypeError 让整个 Layout 崩溃
+          // (影响面是所有页面,比单页列表更严重)。
+          const list = asArray<Execution>(execs);
+          runningCount = list.filter(
             (e) => e.state === "RUNNING" || e.state === "WAITING_USER",
           ).length;
           setRunning(runningCount);

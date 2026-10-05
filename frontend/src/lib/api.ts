@@ -55,6 +55,45 @@ export function asArray<T>(v: unknown): T[] {
   return Array.isArray(v) ? (v as T[]) : [];
 }
 
+// ApiError 携带后端的结构化错误信息(code/kind/status)。
+// 此前 http() 只取 error 文本,把 code/kind 丢掉:403 权限不足与 400
+// 参数错误在 UI 上无法区分,用户只能看到一句裸消息。
+export class ApiError extends Error {
+  readonly code?: string;
+  readonly kind?: string;
+  readonly status: number;
+
+  constructor(message: string, status: number, code?: string, kind?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.kind = kind;
+  }
+}
+
+// text 端点(DSL 导出/下载)用:后端在错误时写的是 JSON 错误体,
+// 直接 res.text() 会把 {"error":...,"code":"NOT_FOUND"} 当成 DSL 内容
+// 弹进对话框或写进 .yaml 文件(fix: 绕过 http() 且不检查 res.ok)。
+async function httpText(path: string): Promise<string> {
+  const res = await fetch(path);
+  const text = await res.text();
+  if (!res.ok) {
+    // 错误体是 JSON(见 api/server.go wrap),解析出可读消息与 code;
+    // 解析不出(纯文本/HTML)时回退原始 body 与状态码。
+    try {
+      const parsed = JSON.parse(text) as { error?: string; code?: string };
+      if (parsed && typeof parsed.error === "string" && parsed.error) {
+        throw new ApiError(parsed.error, res.status, parsed.code);
+      }
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+    }
+    throw new ApiError(text || `HTTP ${res.status}`, res.status);
+  }
+  return text;
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -68,9 +107,9 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     data = text;
   }
   if (!res.ok) {
-    const msg =
-      (data as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new Error(msg);
+    const d = data as { error?: string; code?: string; kind?: string } | undefined;
+    const msg = d?.error ?? `HTTP ${res.status}`;
+    throw new ApiError(msg, res.status, d?.code, d?.kind);
   }
   return data as T;
 }
@@ -125,8 +164,7 @@ export const api = {
     if ((await detectMode()) === "desktop") {
       return (await wailsBindings()).wf.VersionDSL(id, version);
     }
-    const res = await fetch(`/api/workflows/${id}/versions/${version}`);
-    return res.text();
+    return httpText(`/api/workflows/${id}/versions/${version}`);
   },
   async importYAML(content: string): Promise<Workflow> {
     if ((await detectMode()) === "desktop") {
@@ -151,8 +189,7 @@ export const api = {
   },
   async exportYAML(id: string): Promise<string> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).wf.ExportYAML(id);
-    const res = await fetch(`/api/workflows/${id}/export`);
-    return res.text();
+    return httpText(`/api/workflows/${id}/export`);
   },
 
   // ---- Executions ----
@@ -248,6 +285,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(cfg),
     });
+  },
+  async resetAgentConfig(id: string): Promise<AgentConfig> {
+    // 后端 ResetConfig 与 POST /api/agents/{id}/reset 都已存在,但两个模式
+    // 都没封装、UI 也没入口 —— 能力空洞(配错配置后无法恢复默认)。
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).ag.ResetConfig(id));
+    }
+    return http(`/api/agents/${id}/reset`, { method: "POST" });
   },
   async testAgent(id: string): Promise<string> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).ag.Test(id);

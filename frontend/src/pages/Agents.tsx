@@ -30,19 +30,36 @@ export default function Agents() {
   const [configTarget, setConfigTarget] = useState<AgentInfo | null>(null);
   const [cfg, setCfg] = useState<AgentConfig | null>(null);
   const [savingCfg, setSavingCfg] = useState(false);
+  const [testingAgent, setTestingAgent] = useState<string | null>(null);
 
   const refresh = () => api.listAgents().then((x) => setAgents(asArray<AgentInfo>(x))).catch((e) => toast.error(e.message));
   useEffect(() => {
     refresh();
   }, []);
 
+  // toggle 权限:以最新 state 为基准 + 失败回滚。
+  // 此前用渲染闭包里的 a.permissions 算新值并直接整表提交:快速连点
+  // 同一个 Switch 时两次都基于同一份陈旧快照,第二次写入的值与用户
+  // 意图相反(开了又关却停在开),且失败路径没有回滚,UI 与后端分裂。
+  const [pendingAgent, setPendingAgent] = useState<string | null>(null);
   const toggle = async (a: AgentInfo, key: keyof AgentInfo["permissions"]) => {
-    const p = { ...a.permissions, [key]: !a.permissions[key] };
+    if (pendingAgent === a.id) return; // 同一行 in-flight 加锁
+    const current = agents.find((x) => x.id === a.id);
+    const base = current?.permissions ?? a.permissions;
+    const p = { ...base, [key]: !base[key] };
     if (key === "git_commit" && !p.git_commit) p.git_push = false;
+    const prev = current ?? a;
+    // 乐观更新,失败回滚
+    setAgents((list) => list.map((x) => (x.id === a.id ? { ...x, permissions: p } : x)));
+    setPendingAgent(a.id);
     try {
       await api.setAgentPermission(a.id, p);
     } catch (e) {
+      setAgents((list) => list.map((x) => (x.id === a.id ? prev : x)));
       toast.error((e as Error).message);
+      return;
+    } finally {
+      setPendingAgent(null);
     }
     refresh();
   };
@@ -65,6 +82,29 @@ export default function Agents() {
       await api.updateAgentConfig(configTarget.id, cfg);
       toast.success(`${configTarget.name} 配置已保存(仅作用于本应用调用,不影响本地配置)`);
       setConfigTarget(null);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSavingCfg(false);
+    }
+  };
+
+  // resetConfig 恢复适配器内置默认:配错模型/端点/环境变量后唯一的逃生口。
+  // 后端能力此前就绪(REST 端点 + Wails 绑定),但前端两个分支都没封装,
+  // UI 也没有入口 —— 属于"能力空洞"而非崩溃,更隐蔽。
+  const resetConfig = async () => {
+    if (!configTarget || !cfg) return;
+    if (
+      !window.confirm(
+        `恢复 ${configTarget.name} 的默认配置?\n\n将清空模型、端点、超时、环境变量与额外参数。`,
+      )
+    )
+      return;
+    setSavingCfg(true);
+    try {
+      const c = await api.resetAgentConfig(configTarget.id);
+      setCfg({ ...c, env: c.env ?? {} });
+      toast.success("已恢复默认配置");
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -132,12 +172,23 @@ export default function Agents() {
                   <Button
                     size="sm"
                     variant="ghost"
+                    disabled={testingAgent === a.id}
                     onClick={async () => {
-                      const msg = await api.testAgent(a.id);
-                      toast.success(msg);
+                      if (testingAgent) return;
+                      setTestingAgent(a.id);
+                      try {
+                        const msg = await api.testAgent(a.id);
+                        toast.success(msg);
+                      } catch (e) {
+                        // 此前没有 catch:失败时是 unhandled rejection,
+                        // 用户点了按钮完全没有反馈,看起来像按钮坏了
+                        toast.error((e as Error).message);
+                      } finally {
+                        setTestingAgent(null);
+                      }
                     }}
                   >
-                    Test
+                    {testingAgent === a.id ? "测试中…" : "Test"}
                   </Button>
                 </TableCell>
               </TableRow>
@@ -282,6 +333,13 @@ export default function Agents() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfigTarget(null)}>
               取消
+            </Button>
+            <Button
+              variant="outline"
+              onClick={resetConfig}
+              disabled={savingCfg || !cfg}
+            >
+              恢复默认
             </Button>
             <Button onClick={saveConfig} disabled={savingCfg || !cfg}>
               保存

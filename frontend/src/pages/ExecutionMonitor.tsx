@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CheckCircle2, XCircle, Circle, PauseCircle, Ban } from "lucide-react";
-import { api, subscribeEvents } from "@/lib/api";
+import { api, asArray, subscribeEvents } from "@/lib/api";
 import type { Artifact, Execution, ExecutionNode, UIEvent } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -97,6 +97,9 @@ export default function ExecutionMonitor() {
   const [instruction, setInstruction] = useState("");
   // 提交互斥:防止双击重复提交(后端另有 CAS 兜底)
   const [busy, setBusy] = useState(false);
+  // 重试/跳过互斥:此前这两个按钮无 disabled,连点会并发打多次
+  // /retry —— 后端 CAS 只让一路成功,用户却看到多个 toast 混杂。
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -107,9 +110,12 @@ export default function ExecutionMonitor() {
         api.executionArtifacts(id),
       ]);
       setExec(e);
-      setNodes(ns);
+      // 一律过 asArray:桌面 IPC 与 SPA fallback 异常路径下可能返回
+      // null 或被解析成 HTML 兜底页的对象,直接 setNodes(ns) 会在
+      // nodes.length / nodes.map 处抛 TypeError 导致整页白屏。
+      setNodes(asArray<ExecutionNode>(ns));
       setEvents(
-        evs.map((x) => ({
+        asArray<Record<string, unknown>>(evs).map((x) => ({
           type: String(x.type),
           execution_id: String(x.execution_id),
           node_id: String(x.node_id ?? ""),
@@ -117,7 +123,7 @@ export default function ExecutionMonitor() {
           data: (x.data as Record<string, unknown>) ?? {},
         })),
       );
-      setArtifacts(arts);
+      setArtifacts(asArray<Artifact>(arts));
     } catch (err) {
       toast.error((err as Error).message);
     }
@@ -229,28 +235,38 @@ export default function ExecutionMonitor() {
             <Button
               size="sm"
               variant="outline"
+              disabled={recoveryBusy}
               onClick={async () => {
+                if (recoveryBusy) return;
+                setRecoveryBusy(true);
                 try {
                   await api.retryExecution(exec.id, false);
                   toast.success("重试失败节点");
                   setTimeout(refresh, 300);
                 } catch (e) {
                   toast.error((e as Error).message);
+                } finally {
+                  setRecoveryBusy(false);
                 }
               }}
             >
-              重试失败节点
+              {recoveryBusy ? "处理中…" : "重试失败节点"}
             </Button>
             <Button
               size="sm"
               variant="ghost"
+              disabled={recoveryBusy}
               onClick={async () => {
+                if (recoveryBusy) return;
+                setRecoveryBusy(true);
                 try {
                   await api.retryExecution(exec.id, true);
                   toast.success("已跳过失败节点");
                   setTimeout(refresh, 300);
                 } catch (e) {
                   toast.error((e as Error).message);
+                } finally {
+                  setRecoveryBusy(false);
                 }
               }}
             >

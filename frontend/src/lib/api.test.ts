@@ -224,3 +224,85 @@ describe("PROBE_BINDING_ID 与生成代码同步", () => {
     expect(probe![1]).toBe(generated![1]);
   });
 });
+
+// ---- 轮次 27:文本端点错误处理与结构化错误 ----
+
+describe("文本端点(版本 DSL / YAML 导出)", () => {
+  it("成功时返回原始文本", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, text: async () => "workflow:\n  id: wf1\n" }),
+    );
+    const { api } = await freshApi();
+    await expect(api.versionDSL("wf1", 2)).resolves.toContain("id: wf1");
+    await expect(api.exportYAML("wf1")).resolves.toContain("id: wf1");
+  });
+
+  it("后端 404 的 JSON 错误体不得被当成 DSL 内容返回", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: async () =>
+          JSON.stringify({
+            error: '工作流版本 "wf1/9" 不存在',
+            code: "NOT_FOUND",
+            kind: "validation_error",
+          }),
+      }),
+    );
+    const { api } = await freshApi();
+    // 关键:抛错而不是把 {"error":...} 当成 DSL 弹进对话框
+    await expect(api.versionDSL("wf1", 9)).rejects.toThrow("不存在");
+    // 导出同样不能把错误 JSON 写进 .yaml 文件
+    await expect(api.exportYAML("wf1")).rejects.toThrow("不存在");
+  });
+
+  it("非 JSON 错误体回退为状态码消息", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 502, text: async () => "bad gateway" }),
+    );
+    const { api } = await freshApi();
+    await expect(api.versionDSL("wf1", 1)).rejects.toThrow(/502|bad gateway/);
+  });
+});
+
+describe("ApiError 保留后端 code/kind/status", () => {
+  it("JSON 错误响应携带结构化字段", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () =>
+          JSON.stringify({ error: "权限不足", code: "FORBIDDEN", kind: "permission_error" }),
+      }),
+    );
+    const { api, ApiError } = await freshApi();
+    const err = await api.listAgents().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const e = err as InstanceType<typeof ApiError>;
+    expect(e.status).toBe(403);
+    expect(e.code).toBe("FORBIDDEN");
+    expect(e.kind).toBe("permission_error");
+    expect(e.message).toBe("权限不足");
+  });
+
+  it("非 JSON 错误响应 status 仍可读", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => "<html/>" }),
+    );
+    const { api, ApiError } = await freshApi();
+    const err = await api.getWorkflow("x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as InstanceType<typeof ApiError>).status).toBe(500);
+  });
+});

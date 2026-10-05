@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { RefreshCw, GitCommitHorizontal } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, asArray } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -44,14 +44,24 @@ export default function GitPanel() {
 
   const refresh = useCallback(async () => {
     try {
-      const [st, d, lg] = await Promise.all([
+      const [raw, d, lg] = await Promise.all([
         api.gitStatus(),
         api.gitDiff(false),
         api.gitLog(20),
       ]);
-      setStatus(st);
+      // 形状防御:桌面 IPC 与 SPA fallback 异常路径下可能返回 null 或
+      // 被解析成 HTML 兜底页的对象。setStatus(st) 无防御时,渲染处的
+      // status.staged.length 会抛 TypeError 让整页崩(fileChips 内部的
+      // `files ?? []` 挡不住 —— 防御位置在调用点之后才生效)。
+      const st = raw as Partial<GitStatus> | null;
+      setStatus({
+        branch: st?.branch ?? "",
+        staged: asArray<string>(st?.staged),
+        modified: asArray<string>(st?.modified),
+        untracked: asArray<string>(st?.untracked),
+      });
       setDiff(d);
-      setLog(lg ?? []);
+      setLog(asArray<LogEntry>(lg));
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -62,10 +72,18 @@ export default function GitPanel() {
   }, [refresh]);
 
   const commit = async () => {
-    if (!message.trim()) return;
+    const msg = message.trim();
+    if (!msg) return;
+    // 二次确认:commit 走的是 git add -A + commit,会把工作目录
+    // 全部改动(含未跟踪文件)一次性提交,不可逆。此前输入框回车即提交、
+    // 按钮也无确认 —— 误按一次回车就产生一个不该有的提交。
+    // 与项目其它危险操作(删工作流/删执行)保持一致。
+    const n = pendingCount;
+    const detail = n > 0 ? `即将提交 ${n} 个文件的全部改动(含未跟踪文件)。` : "即将提交当前全部改动。";
+    if (!window.confirm(`${detail}\n\n提交信息:${msg}\n\n确认提交?`)) return;
     setBusy(true);
     try {
-      const out = await api.gitCommit(message.trim());
+      const out = await api.gitCommit(msg);
       toast.success("已提交: " + out.split("\n")[0]);
       setMessage("");
       refresh();
@@ -75,6 +93,12 @@ export default function GitPanel() {
       setBusy(false);
     }
   };
+
+  // pendingCount = 已暂存 + 已修改 + 未跟踪,即本次 commit 会带入的文件数
+  // (后端 add_all 走的是 git add -A)。
+  const pendingCount = status
+    ? status.staged.length + status.modified.length + status.untracked.length
+    : 0;
 
   const fileChips = (files: string[], tone: string) =>
     (files ?? []).map((f) => (
