@@ -84,6 +84,8 @@ func (d *DB) migrate() error {
 			state_json TEXT DEFAULT '{}'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_executions_workflow ON executions(workflow_id)`,
+		// 执行列表按 created_at DESC 排序(列表页与 Dashboard 都走它)
+		`CREATE INDEX IF NOT EXISTS idx_executions_created ON executions(created_at)`,
 		`CREATE TABLE IF NOT EXISTS execution_nodes (
 			id TEXT PRIMARY KEY,
 			execution_id TEXT NOT NULL,
@@ -109,6 +111,9 @@ func (d *DB) migrate() error {
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_exec ON events(execution_id)`,
+		// 审计页按 type 前缀过滤(events 是唯一无上限增长的表,长期运行后
+		// 无索引即全表扫描 + ORDER BY seq DESC)
+		`CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)`,
 		`CREATE TABLE IF NOT EXISTS artifacts (
 			id TEXT PRIMARY KEY,
 			execution_id TEXT NOT NULL,

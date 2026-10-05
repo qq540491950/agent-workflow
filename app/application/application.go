@@ -963,14 +963,25 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 		return nil, fmt.Errorf("备份格式无效: %w", err)
 	}
 
-	restoredWf, skipped := 0, 0
+	restoredWf, skipped, invalid := 0, 0, 0
+	invalidIDs := []string{}
 	for _, raw := range norm.Workflows {
 		wf := model.Workflow{}
 		if err := json.Unmarshal(raw, &wf); err != nil || wf.ID == "" {
+			invalid++
 			continue
 		}
 		if existing, err := s.app.Repo.GetWorkflow(wf.ID); err == nil && existing != nil {
 			skipped++
+			continue
+		}
+		// 恢复也要过校验:此前直接 Repo.SaveWorkflow 绕过 WorkflowService.Save
+		// 与 Engine.Validate,悬空边/空图/未知节点的非法定义会落库并在列表里
+		// 正常可见,直到运行时才炸(与 ImportYAML 的严格度不一致)。
+		// 备份是不可信输入,这里按"跳过并计数"处理,不阻断其余条目。
+		if res := s.app.Engine.Validate(&wf); !res.Valid {
+			invalid++
+			invalidIDs = append(invalidIDs, wf.ID)
 			continue
 		}
 		wf.Version = 0
@@ -980,17 +991,29 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 		restoredWf++
 	}
 	restoredCfg := 0
+	invalidCfg := 0
 	for id, raw := range norm.AgentConfigs {
+		cfg := agent.AgentConfig{}
+		// 配置解不出结构就不能落库:此前无条件写入,解不出时静默跳过应用,
+		// 结果是"库里有配置但运行不生效",排查时看不出是哪一步坏的。
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			invalidCfg++
+			continue
+		}
 		if err := s.app.Repo.SaveAgentConfig(id, raw); err != nil {
 			return nil, err
 		}
-		cfg := agent.AgentConfig{}
-		if json.Unmarshal(raw, &cfg) == nil {
-			_ = s.app.applyAgentConfig(id, cfg)
-		}
+		_ = s.app.applyAgentConfig(id, cfg)
 		restoredCfg++
 	}
-	return map[string]any{"workflows_restored": restoredWf, "workflows_skipped": skipped, "agent_configs_restored": restoredCfg}, nil
+	return map[string]any{
+		"workflows_restored":     restoredWf,
+		"workflows_skipped":      skipped,
+		"workflows_invalid":      invalid,
+		"workflows_invalid_ids":  invalidIDs,
+		"agent_configs_restored": restoredCfg,
+		"agent_configs_invalid":  invalidCfg,
+	}, nil
 }
 
 func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNodes *bool) (*SettingsInfo, error) {

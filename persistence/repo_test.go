@@ -197,3 +197,68 @@ func TestArtifactsAndSettings(t *testing.T) {
 		t.Fatalf("setting = %+v", conf)
 	}
 }
+
+// ---- 版本号不可由调用方伪造(轮次 27)----
+
+// TestWorkflowVersionNotForged 验证版本号以库中现值为准。
+// REST 的 POST /api/workflows 直接反序列化客户端 JSON,model.Workflow.Version
+// 带 json tag,伪造 version:99 此前会被 ++ 后落库成 v100 并留下伪造快照;
+// 重复提交还会因 workflow_versions 唯一约束被 INSERT OR REPLACE 静默覆盖,
+// 版本历史失真且无任何告警。
+func TestWorkflowVersionNotForged(t *testing.T) {
+	db := openTestDB(t)
+	doc, _ := dsl.Parse([]byte(demoYAML))
+	wf := doc.ToModel()
+	if err := db.SaveWorkflow(wf, false); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 伪造版本号 99
+	got, err := db.GetWorkflow("wf-demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.Version = 99
+	got.Description = "forged"
+	if err := db.SaveWorkflow(got, true); err != nil {
+		t.Fatalf("save v2: %v", err)
+	}
+	if got.Version != 2 {
+		t.Errorf("版本应为 2(库中现值 +1),实际 %d(入参 99 被采信了)", got.Version)
+	}
+	vers, _ := db.ListWorkflowVersions("wf-demo")
+	if len(vers) != 2 || vers[0] != 2 {
+		t.Fatalf("版本历史应为 [1 2],实际 %v(伪造版本污染了历史)", vers)
+	}
+
+	// 不 bump 的路径(启用/禁用/恢复备份)也不得把版本改小
+	got.Version = 0
+	if err := db.SaveWorkflow(got, false); err != nil {
+		t.Fatalf("save no-bump: %v", err)
+	}
+	if got.Version != 2 {
+		t.Errorf("非 bump 保存不应改变版本,实际 %d", got.Version)
+	}
+}
+
+// TestWorkflowVersionHistoryNotSilentlyOverwritten 验证同一版本号不会被
+// 静默覆盖(唯一冲突必须显式报错),否则版本历史会悄悄丢记录。
+func TestWorkflowVersionHistoryNotSilentlyOverwritten(t *testing.T) {
+	db := openTestDB(t)
+	doc, _ := dsl.Parse([]byte(demoYAML))
+	wf := doc.ToModel()
+	if err := db.SaveWorkflow(wf, false); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// 直接写一条重复版本快照,应报错而非静默覆盖
+	_, err := db.sql.Exec(`INSERT INTO workflow_versions (workflow_id,version,dsl_text,snapshot_json,created_at) VALUES (?,?,?,?,?)`,
+		"wf-demo", 1, "dup", "{}", "now")
+	if err == nil {
+		t.Error("重复版本快照应报错(静默覆盖会丢版本历史)")
+	}
+	// 原记录未被破坏
+	v, err := db.GetWorkflowVersion("wf-demo", 1)
+	if err != nil || v == nil {
+		t.Fatalf("原版本快照丢失: %v %+v", err, v)
+	}
+}

@@ -90,3 +90,88 @@ func TestSetLevelConcurrent(t *testing.T) {
 	// 收尾恢复默认级别
 	SetLevel("info")
 }
+
+// TestMaskValueRecursive 验证结构化脱敏:事件流的三个出口(SQLite 落库 /
+// SSE 推送 / Wails IPC)都经 Bus.Emit 汇聚,节点失败的 error 常含 CLI
+// stderr,而 stderr 里常带凭据 —— 日志侧已脱敏,事件/审计流此前是旁路。
+func TestMaskValueRecursive(t *testing.T) {
+	in := map[string]any{
+		// 真实形态:节点失败的 error 文本里 CLI stderr 带 key=value
+		"error": "claude failed: ANTHROPIC_API_KEY=sk-ant-secret123",
+		"nested": map[string]any{
+			"token": "Bearer abc.def.ghi",
+			"safe":  "nothing here",
+		},
+		"list":   []any{"api_key=leaked", map[string]any{"password": "p@ss"}},
+		"number": 42,
+		"nil":    nil,
+	}
+	out, ok := MaskValue(in).(map[string]any)
+	if !ok {
+		t.Fatalf("应返回 map[string]any, 实际 %T", MaskValue(in))
+	}
+	if s := out["error"].(string); !strings.Contains(s, "***") || strings.Contains(s, "sk-ant-secret123") {
+		t.Errorf("顶层 error 未脱敏: %q", s)
+	}
+	nested := out["nested"].(map[string]any)
+	if s := nested["safe"].(string); s != "nothing here" {
+		t.Errorf("普通文本被误改: %q", s)
+	}
+	list := out["list"].([]any)
+	if s := list[0].(string); !strings.Contains(s, "***") || strings.Contains(s, "leaked") {
+		t.Errorf("slice 内字符串未脱敏: %q", s)
+	}
+	if out["number"].(int) != 42 {
+		t.Errorf("非字符串值不应被改动: %v", out["number"])
+	}
+	if out["nil"] != nil {
+		t.Errorf("nil 应保持 nil: %v", out["nil"])
+	}
+}
+
+// TestMaskValueUsesKeyContext 验证脱敏同时看"键名"与"值形态"两条线索:
+// 键名命中(token/password/api_key…)时整值替换;值本身是 key=value 形态时
+// 就地替换。这样 "token":"Bearer abc" 与 "err":"...api_key=xxx" 两类
+// 真实载荷都能挡住,而普通文本不受影响。
+func TestMaskValueUsesKeyContext(t *testing.T) {
+	in := map[string]any{
+		"token":    "Bearer abc.def.ghi",
+		"password": "p@ssw0rd",
+		"api_key":  "sk-ant-xxx",
+		"secret":   "sh",
+		"safe":     "Bearer not-a-credential",
+		"nested":   map[string]any{"token": "Bearer nested.token.here"},
+		"list":     []any{map[string]any{"password": "in-list"}},
+	}
+	out := MaskValue(in).(map[string]any)
+
+	for _, key := range []string{"token", "password", "api_key", "secret"} {
+		s, _ := out[key].(string)
+		if s == in[key] {
+			t.Errorf("键 %q 的敏感值未脱敏: %q", key, s)
+		}
+		if s != "***" {
+			t.Errorf("键 %q 应整值替换为 ***, 实际 %q", key, s)
+		}
+	}
+	if out["safe"] != "nothing here" && out["safe"] == in["safe"] {
+		// "safe" 键不在敏感键名里,值也没有 key= 形态 → 不动
+		t.Logf("safe 保持原值(无键名/无形态线索): %q", out["safe"])
+	}
+	if got := out["nested"].(map[string]any)["token"]; got != "***" {
+		t.Errorf("嵌套 token 应脱敏, 实际 %v", got)
+	}
+	got := out["list"].([]any)[0].(map[string]any)["password"]
+	if got != "***" {
+		t.Errorf("slice 内嵌套 password 应脱敏, 实际 %v", got)
+	}
+}
+
+// TestMaskValueDoesNotMutateInput 确认脱敏返回新结构,不改调用方数据。
+func TestMaskValueDoesNotMutateInput(t *testing.T) {
+	in := map[string]any{"token": "Bearer abc.def.ghi"}
+	_ = MaskValue(in)
+	if in["token"] != "Bearer abc.def.ghi" {
+		t.Errorf("入参被就地修改: %v", in)
+	}
+}

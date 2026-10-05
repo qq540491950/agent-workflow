@@ -75,7 +75,7 @@ func (s *Server) routes() {
 	}))
 	s.mux.HandleFunc("POST /api/workflows", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var wf map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&wf); err != nil {
+		if err := decodeJSON(r, &wf); err != nil {
 			return badRequest(err.Error())
 		}
 		parsed, err := parseWorkflow(wf)
@@ -93,13 +93,25 @@ func (s *Server) routes() {
 		return writeJSON(w, wf, err)
 	}))
 	s.mux.HandleFunc("POST /api/workflows/{id}/enable", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		enabled := r.URL.Query().Get("value") != "false"
+		// 显式布尔,fail closed:此前 `value != "false"` 让缺失参数、?value=0、
+		// ?value=no、?value=False 全部判为"启用" —— 一个禁用开关缺参数
+		// 反而打开工作流。只接受显式 true/false,其余一律 400。
+		raw := r.URL.Query().Get("value")
+		var enabled bool
+		switch raw {
+		case "true":
+			enabled = true
+		case "false":
+			enabled = false
+		default:
+			return badRequest("需要 value=true|false 参数")
+		}
 		wf, err := s.app.Workflows.SetEnabled(r.PathValue("id"), enabled)
 		return writeJSON(w, wf, err)
 	}))
 	s.mux.HandleFunc("POST /api/workflows/validate", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var wf map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&wf); err != nil {
+		if err := decodeJSON(r, &wf); err != nil {
 			return badRequest(err.Error())
 		}
 		parsed, err := parseWorkflow(wf)
@@ -182,7 +194,8 @@ func (s *Server) routes() {
 			Task      string         `json:"task"`
 			Variables map[string]any `json:"variables"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		// 空 body 合法(等价于空任务 + 无变量),非空则必须能解析
+		if err := decodeOptionalJSON(r, &body); err != nil {
 			return badRequest(err.Error())
 		}
 		exec, err := s.app.Executions.Run(r.Context(), r.PathValue("id"), body.Task, body.Variables)
@@ -190,7 +203,7 @@ func (s *Server) routes() {
 	}))
 	s.mux.HandleFunc("POST /api/executions/{id}/input", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var response map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&response); err != nil {
+		if err := decodeJSON(r, &response); err != nil {
 			return badRequest(err.Error())
 		}
 		exec, err := s.app.Executions.ProvideInput(r.Context(), r.PathValue("id"), response)
@@ -210,7 +223,7 @@ func (s *Server) routes() {
 	}))
 	s.mux.HandleFunc("POST /api/backup/restore", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var backup map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&backup); err != nil {
+		if err := decodeJSON(r, &backup); err != nil {
 			return badRequest(err.Error())
 		}
 		result, err := s.app.Settings.RestoreBackup(backup)
@@ -224,11 +237,17 @@ func (s *Server) routes() {
 		return s.app.Executions.Delete(r.PathValue("id"))
 	}))
 	s.mux.HandleFunc("POST /api/executions/{id}/retry", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		// 空 body 合法(等价 skip=false 重试),但 body 存在且解析失败必须
+		// 上抛:此前错误被吞,skip 静默变 false —— 用户点「跳过失败节点」
+		// 却重跑了那个失败的 Agent(可能重复写文件/重复发 PR),还返回 200。
 		var body struct {
-			Skip bool `json:"skip"`
+			Skip *bool `json:"skip"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		exec, err := s.app.Executions.RetryNode(r.PathValue("id"), body.Skip)
+		if err := decodeOptionalJSON(r, &body); err != nil {
+			return badRequest(err.Error())
+		}
+		skip := body.Skip != nil && *body.Skip
+		exec, err := s.app.Executions.RetryNode(r.PathValue("id"), skip)
 		return writeJSON(w, exec, err)
 	}))
 	s.mux.HandleFunc("POST /api/executions/{id}/cancel", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
@@ -244,7 +263,7 @@ func (s *Server) routes() {
 	}))
 	s.mux.HandleFunc("POST /api/agents/{id}/permission", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var p map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		if err := decodeJSON(r, &p); err != nil {
 			return badRequest(err.Error())
 		}
 		err := s.app.AgentSvc.SetPermission(r.PathValue("id"), policyOf(p))
@@ -256,7 +275,7 @@ func (s *Server) routes() {
 	}))
 	s.mux.HandleFunc("PUT /api/agents/{id}/config", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var raw map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		if err := decodeJSON(r, &raw); err != nil {
 			return badRequest(err.Error())
 		}
 		rawJSON, _ := json.Marshal(raw)
@@ -288,7 +307,7 @@ func (s *Server) routes() {
 		var body struct {
 			Enabled *bool `json:"enabled"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Enabled == nil {
+		if err := decodeJSON(r, &body); err != nil || body.Enabled == nil {
 			return badRequest("需要 enabled 字段")
 		}
 		if err := s.app.SkillSvc.SetEnabled(r.PathValue("id"), *body.Enabled); err != nil {
@@ -312,7 +331,7 @@ func (s *Server) routes() {
 		var body struct {
 			Message string `json:"message"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSON(r, &body); err != nil {
 			return badRequest(err.Error())
 		}
 		if strings.TrimSpace(body.Message) == "" {
@@ -337,7 +356,7 @@ func (s *Server) routes() {
 			// 缺省(nil)表示不修改,保持既有值
 			AllowScriptNodes *bool `json:"allow_script_nodes"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSON(r, &body); err != nil {
 			return badRequest(err.Error())
 		}
 		info, err := s.app.Settings.Update(body.GitWorkingDir, body.LogLevel, body.AllowScriptNodes)
@@ -460,6 +479,30 @@ func (h *AssetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- helpers ----
+
+// maxJSONBody 是所有 JSON 请求体的上限。服务器模式监听 127.0.0.1 且
+// 无鉴权,本机任意进程都能打这些端点;此前只有 import 端点有 1MB 限制,
+// /api/backup/restore、/api/workflows、/input、config 等直接 json.Decode
+// 全量读进内存,一个大 body 即可把应用 OOM 掉。
+const maxJSONBody = 1 << 20 // 1MB
+
+// decodeJSON 解析受上限保护的 JSON 请求体(超限返回 413 语义的错误)。
+func decodeJSON(r *http.Request, out any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
+	return json.NewDecoder(r.Body).Decode(out)
+}
+
+// decodeOptionalJSON 允许空 body(等价于零值),但 body 非空且非法时报错。
+func decodeOptionalJSON(r *http.Request, out any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
+	if err := decodeJSON(r, out); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil // 空 body:用零值
+		}
+		return err
+	}
+	return nil
+}
 
 func writeJSON(w http.ResponseWriter, data any, err error) error {
 	if err != nil {

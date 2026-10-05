@@ -1,6 +1,8 @@
 package event
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,5 +91,61 @@ func TestConcurrentEmit(t *testing.T) {
 	wg.Wait()
 	if got := atomic.LoadInt32(&count); got != 800 {
 		t.Errorf("handler calls = %d, want 800", got)
+	}
+}
+
+// TestEmitMasksSensitivePayload 验证事件出口统一脱敏。
+// 事件有三个下游:SQLite 落库(审计/回放)、SSE 推送、Wails IPC,三者都在
+// Emit 汇聚。在分发点脱敏一次,三条出口同时生效,新增订阅者也不会漏。
+// 真实载荷:agent CLI 失败时 stderr 带凭据,被拼进 node.failed 的 error。
+func TestEmitMasksSensitivePayload(t *testing.T) {
+	b := NewBus()
+	b.KeepHistory = true
+	var got UIEvent
+	b.Subscribe(func(ev UIEvent) { got = ev })
+
+	b.Emit(New(NodeFailed, "exec-1", "claude", map[string]any{
+		"error": "claude exited 1: ANTHROPIC_API_KEY=sk-ant-leak123",
+		"env":   map[string]any{"token": "Bearer raw.token.value"},
+	}))
+
+	errText, _ := got.Data["error"].(string)
+	if strings.Contains(errText, "sk-ant-leak123") {
+		t.Errorf("订阅者收到的 error 未脱敏: %q", errText)
+	}
+	if !strings.Contains(errText, "***") {
+		t.Errorf("脱敏后应保留 *** 标记: %q", errText)
+	}
+	env, _ := got.Data["env"].(map[string]any)
+	if env["token"] == "Bearer raw.token.value" {
+		t.Errorf("嵌套 token 未脱敏: %v", env)
+	}
+	// 历史副本同样脱敏(测试模式下 KeepHistory 打开)
+	hist := b.History()
+	if len(hist) != 1 {
+		t.Fatalf("history len = %d", len(hist))
+	}
+	if strings.Contains(fmt.Sprint(hist[0].Data), "sk-ant-leak123") {
+		t.Errorf("历史副本未脱敏: %v", hist[0].Data)
+	}
+}
+
+// TestEmitLeavesNormalPayloadIntact 回归:普通事件 payload 不受影响。
+func TestEmitLeavesNormalPayloadIntact(t *testing.T) {
+	b := NewBus()
+	var got UIEvent
+	b.Subscribe(func(ev UIEvent) { got = ev })
+
+	b.Emit(New(NodeCompleted, "exec-2", "review", map[string]any{
+		"node": "review", "summary": "review call=2", "attempt": 3,
+	}))
+	if got.Data["summary"] != "review call=2" || got.Data["node"] != "review" {
+		t.Errorf("正常 payload 被改动: %v", got.Data)
+	}
+	if got.Data["attempt"].(int) != 3 {
+		t.Errorf("非字符串值被改动: %v", got.Data["attempt"])
+	}
+	if got.NodeID != "review" || got.ExecutionID != "exec-2" {
+		t.Errorf("事件元数据被改动: %+v", got)
 	}
 }

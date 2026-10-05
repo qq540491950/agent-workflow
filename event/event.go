@@ -6,6 +6,8 @@ package event
 import (
 	"sync"
 	"time"
+
+	"agentworkflow/logx"
 )
 
 // 预定义事件类型。
@@ -79,9 +81,20 @@ func (b *Bus) Subscribe(h Handler) func() {
 }
 
 // Emit 同步分发事件给全部订阅者。
+//
+// 出口统一脱敏:节点失败的 error / agent 输出常含 CLI stderr,而 stderr 里
+// 经常带 "ANTHROPIC_API_KEY=sk-..." 这类凭据。日志侧已由 logx.Mask 覆盖
+// (见 logx.maskArgs),但事件有三个出口 —— SQLite 落库(审计/回放)、
+// SSE 推送、Wails IPC —— 都在这里汇聚。在分发点收敛一次,三条出口同时
+// 生效,新增订阅者也不会漏(与 AGENTS.md 硬性约定 #8 一致)。
 func (b *Bus) Emit(ev UIEvent) {
 	if ev.Timestamp.IsZero() {
 		ev.Timestamp = time.Now()
+	}
+	if ev.Data != nil {
+		if masked, ok := logx.MaskValue(ev.Data).(map[string]any); ok {
+			ev.Data = masked
+		}
 	}
 	b.mu.Lock()
 	if b.KeepHistory {

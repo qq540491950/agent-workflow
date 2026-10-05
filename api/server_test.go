@@ -328,3 +328,91 @@ func TestGetWorkflowVersionMissingIs404(t *testing.T) {
 		t.Errorf("code = %v, want NOT_FOUND", resp["code"])
 	}
 }
+
+// ---- REST 契约健壮性(轮次 27)----
+
+// TestRetryRejectsMalformedBody:retry 的 skip 语义不得因解析失败而静默
+// 变 false(那会把「跳过失败节点」变成「重跑失败节点」——可能重复写文件、
+// 重复发外部调用),且必须返回 4xx 而不是 200 假装成功。
+func TestRetryRejectsMalformedBody(t *testing.T) {
+	s := newTestServer(t)
+
+	for _, body := range []string{`{"skip": "yes"}`, `{"skip": 1}`, `not-json`} {
+		code, m, _ := doReq(t, s, http.MethodPost, "/api/executions/none/retry", body)
+		if code < 400 {
+			t.Errorf("body=%q 期望 4xx,实际 %d (%v)", body, code, m)
+		}
+	}
+	// 合法 body 与空 body 都要走到业务层(404 证明解析没被拦)
+	for _, body := range []string{`{"skip":true}`, `{}`, ``} {
+		code, m, _ := doReq(t, s, http.MethodPost, "/api/executions/none/retry", body)
+		if code != http.StatusNotFound {
+			t.Errorf("body=%q 期望解析通过后返回 404,实际 %d (%v)", body, code, m)
+		}
+	}
+}
+
+// TestEnableRequiresExplicitValue:禁用开关缺参数必须 fail closed。
+// 此前 `value != "false"` 让缺参/?value=0/?value=no 全部判为「启用」。
+func TestEnableRequiresExplicitValue(t *testing.T) {
+	s := newTestServer(t)
+	wf := seedWorkflow(t, s, "wf-enable")
+
+	for _, q := range []string{"", "?value=", "?value=0", "?value=no", "?value=False", "?value=TRUE"} {
+		code, _, _ := doReq(t, s, http.MethodPost, "/api/workflows/"+wf+"/enable"+q, "")
+		if code < 400 {
+			t.Errorf("query=%q 期望 4xx(fail closed),实际 %d", q, code)
+		}
+	}
+	// 合法取值照旧工作,且真正改变状态
+	code, m, _ := doReq(t, s, http.MethodPost, "/api/workflows/"+wf+"/enable?value=false", "")
+	if code != 200 {
+		t.Fatalf("value=false 应成功,实际 %d (%v)", code, m)
+	}
+	if en, _ := m["enabled"].(bool); en {
+		t.Error("value=false 后工作流应为禁用")
+	}
+	code, m, _ = doReq(t, s, http.MethodPost, "/api/workflows/"+wf+"/enable?value=true", "")
+	if code != 200 {
+		t.Fatalf("value=true 应成功,实际 %d (%v)", code, m)
+	}
+	if en, _ := m["enabled"].(bool); !en {
+		t.Error("value=true 后工作流应为启用")
+	}
+}
+
+// TestJSONBodySizeLimit:所有 JSON 端点都有 1MB 上限。此前只有 import 端点
+// 有,backup/restore 等直接 json.Decode 全量读进内存,可被一个大 body 打爆。
+func TestJSONBodySizeLimit(t *testing.T) {
+	s := newTestServer(t)
+	huge := `{"task":"` + strings.Repeat("x", 2<<20) + `"}`
+
+	cases := []struct{ method, path string }{
+		{http.MethodPost, "/api/workflows"},
+		{http.MethodPost, "/api/backup/restore"},
+		{http.MethodPost, "/api/workflows/wf-x/run"},
+		{http.MethodPost, "/api/workflows/validate"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(c.method, c.path, strings.NewReader(huge))
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code == http.StatusOK {
+			t.Errorf("%s %s 超大 body 应被拒绝,实际 200", c.method, c.path)
+		}
+	}
+}
+
+// seedWorkflow 通过 REST 创建一个工作流并返回其 ID。
+func seedWorkflow(t *testing.T, s *Server, id string) string {
+	t.Helper()
+	body := `{"id":"` + id + `","name":"Seed","nodes":[
+		{"id":"a","name":"A","type":"agent","config":{"agent":"mock-claude","mode":"plan"}},
+		{"id":"b","name":"B","type":"agent","config":{"agent":"mock-claude","mode":"review"}}],
+		"edges":[{"from":"a","to":"b"}],"enabled":true}`
+	code, m, _ := doReq(t, s, http.MethodPost, "/api/workflows", body)
+	if code != 200 {
+		t.Fatalf("seed workflow: %d %v", code, m)
+	}
+	return id
+}

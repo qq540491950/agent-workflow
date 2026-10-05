@@ -16,9 +16,79 @@ import (
 var sensitivePattern = regexp.MustCompile(
 	`(?i)((?:api[_-]?key|token|password|secret|authorization|credential)s?"?\s*[:=]\s*"?(?:bearer\s+)?)([^",\s}&]+)`)
 
+// sensitiveKeyPattern 匹配"作为键名"的敏感词(token / api_key / password …)。
+// 值形态(key=value)由 sensitivePattern 负责;键名形态需要单独一条规则:
+// 事件 payload 里最常见的正是 {"token":"Bearer abc"} 这种裸值。
+var sensitiveKeyPattern = regexp.MustCompile(
+	`(?i)^(api[_-]?key|token|password|secret|authorization|credential|access[_-]?key|private[_-]?key)s?$`)
+
+// sensitiveHint 是敏感词的公共子串。正则很贵,而事件总线的热路径上
+// 每个 payload 都要过一遍(Emit 是每节点每次执行都调用的),所以先用
+// 廉价的 strings.Contains 预筛:绝大多数正常文本(node 名、summary、
+// 状态名)根本不含这些子串,可直接跳过正则。
+var sensitiveHint = []string{"key", "token", "password", "secret", "authorization", "credential"}
+
+// maybeSensitive 是 mayContainSensitive 的别名(语义更直白)。
+func mayContainSensitive(s string) bool {
+	for _, h := range sensitiveHint {
+		if strings.Contains(strings.ToLower(s), h) {
+			return true
+		}
+	}
+	return false
+}
+
 // Mask 脱敏文本中的敏感键值对(含 Bearer 前缀形式)。
 func Mask(s string) string {
+	if !mayContainSensitive(s) {
+		return s
+	}
 	return sensitivePattern.ReplaceAllString(s, `${1}***`)
+}
+
+// MaskValue 递归脱敏任意结构(字符串/嵌套 map/slice)里的敏感值。
+// 事件流的三个出口(SQLite 落库 / SSE 推送 / Wails IPC)都经这里:
+// 节点失败的 error 文本常带 CLI stderr,而 stderr 里常有
+// "ANTHROPIC_API_KEY=sk-..." 这类凭据 —— 日志侧此前已脱敏(见 maskArgs),
+// 但事件/审计流是旁路,同一份敏感值照样落库并推给前端。
+//
+// 两条线索都认:键名是敏感词 → 整值替换为 ***;值本身含 key=value 形态
+// → 就地替换(保持上下文可读)。非字符串值原样返回。
+func MaskValue(v any) any { return maskRecursive("", v) }
+
+// MaskMap 是 MaskValue 的 map 入口(事件 payload 用)。
+func maskRecursive(key string, v any) any {
+	// 键名即线索:整个值都是凭据,直接替换(键名短,正则代价可忽略)
+	if v != nil && mayContainSensitive(key) && sensitiveKeyPattern.MatchString(key) {
+		return "***"
+	}
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case string:
+		return Mask(t)
+	case error:
+		if t == nil {
+			return v
+		}
+		return Mask(t.Error())
+	case fmt.Stringer:
+		return Mask(t.String())
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = maskRecursive(k, val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = maskRecursive("", val)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 var logger atomic.Pointer[slog.Logger]

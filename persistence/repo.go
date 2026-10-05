@@ -15,11 +15,13 @@ import (
 
 // SaveWorkflow 插入或更新 Workflow 定义(bump 版本并写版本快照)。
 // bumpVersion=true 时版本+1 并记录版本历史;false 时仅更新元数据(不产生新版本)。
+//
+// 版本号以库中现值为准,不采信入参 wf.Version:REST 的请求体可任意伪造
+// version(POST /api/workflows 直接反序列化客户端 JSON),伪造 99 会写出
+// v100 并留下伪造的版本快照,重复提交还会因 workflow_versions 的唯一
+// 约束被 INSERT OR REPLACE 静默覆盖,版本历史失真且无任何告警。
 func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 	now := nowStr()
-	if bumpVersion {
-		wf.Version++
-	}
 	wf.UpdatedAt = now
 
 	variables, _ := json.Marshal(orEmpty(wf.Variables))
@@ -38,8 +40,17 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 	}
 	defer tx.Rollback()
 
+	// 当前版本号(不存在则为 0)。查询错误必须上抛:吞掉后 existing 保持 0
+	// 会对已存在的工作流走 INSERT 分支,真实根因被一句主键冲突掩盖。
+	var current int
+	err = tx.QueryRow(`SELECT COALESCE(MAX(version),0) FROM workflow_versions WHERE workflow_id=?`, wf.ID).Scan(&current)
+	if err != nil {
+		return wrap(err)
+	}
 	var existing int
-	_ = tx.QueryRow(`SELECT COUNT(1) FROM workflows WHERE id=?`, wf.ID).Scan(&existing)
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM workflows WHERE id=?`, wf.ID).Scan(&existing); err != nil {
+		return wrap(err)
+	}
 	if existing == 0 {
 		wf.Version = 1
 		wf.CreatedAt = now
@@ -49,6 +60,14 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 			wf.ID, wf.Name, wf.Description, wf.Version, enabled,
 			string(variables), string(nodes), string(edges), string(settings), string(permData), now, now)
 	} else {
+		if bumpVersion {
+			current++
+		}
+		if current > 0 {
+			// 版本号以库中现值为准:不采信入参(可被 REST 请求体伪造),
+			// 也不允许在非 bump 路径被改小(否则快照表撞唯一约束)。
+			wf.Version = current
+		}
 		_, err = tx.Exec(`UPDATE workflows SET name=?,description=?,version=?,enabled=?,variables_json=?,nodes_json=?,edges_json=?,settings_json=?,permission_json=?,updated_at=? WHERE id=?`,
 			wf.Name, wf.Description, wf.Version, enabled,
 			string(variables), string(nodes), string(edges), string(settings), string(permData), now, wf.ID)
@@ -57,12 +76,14 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 		return wrap(err)
 	}
 
-	// 版本快照:每次产生新版本时写入 DSL 文本与完整快照
+	// 版本快照:每次产生新版本时写入 DSL 文本与完整快照。
+	// 用普通 INSERT(唯一冲突即错误)而非 INSERT OR REPLACE:同一版本号
+	// 被写两次说明版本推进逻辑出了问题,静默覆盖会丢历史。
 	if bumpVersion || existing == 0 {
 		doc := dsl.FromModel(wf)
 		dslText, _ := doc.EncodeYAML()
 		snapshot, _ := json.Marshal(wf)
-		_, err = tx.Exec(`INSERT OR REPLACE INTO workflow_versions (workflow_id,version,dsl_text,snapshot_json,created_at) VALUES (?,?,?,?,?)`,
+		_, err = tx.Exec(`INSERT INTO workflow_versions (workflow_id,version,dsl_text,snapshot_json,created_at) VALUES (?,?,?,?,?)`,
 			wf.ID, wf.Version, string(dslText), string(snapshot), now)
 		if err != nil {
 			return wrap(err)

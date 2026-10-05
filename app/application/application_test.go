@@ -688,3 +688,82 @@ func TestLogLevelConcurrentAccess(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestRestoreBackupRejectsInvalidWorkflow 验证备份恢复也过校验。
+// 备份是不可信输入(可来自他人分享的 JSON),此前直接 Repo.SaveWorkflow
+// 绕过 WorkflowService.Save 与 Engine.Validate,悬空边/空图这类非法
+// 定义会落库、在列表里正常可见,直到运行时才炸 —— 与 ImportYAML 的
+// 严格度不一致。恢复时必须跳过并如实计数。
+func TestRestoreBackupRejectsInvalidWorkflow(t *testing.T) {
+	a := newTestApp(t)
+	res, err := a.Settings.RestoreBackup(map[string]any{
+		"workflows": []any{
+			// 合法
+			map[string]any{
+				"id": "ok-wf", "name": "OK", "enabled": true,
+				"nodes": []any{
+					map[string]any{"id": "a", "name": "A", "type": "agent",
+						"config": map[string]any{"agent": "mock-claude", "mode": "plan"}},
+					map[string]any{"id": "b", "name": "B", "type": "agent",
+						"config": map[string]any{"agent": "mock-claude", "mode": "review"}},
+				},
+				"edges": []any{map[string]any{"from": "a", "to": "b"}},
+			},
+			// 非法:边指向不存在的节点
+			map[string]any{
+				"id": "dangling-wf", "name": "Bad", "enabled": true,
+				"nodes": []any{map[string]any{"id": "a", "name": "A", "type": "agent",
+					"config": map[string]any{"agent": "mock-claude", "mode": "plan"}}},
+				"edges": []any{map[string]any{"from": "a", "to": "ghost"}},
+			},
+			// 非法:无节点
+			map[string]any{"id": "empty-wf", "name": "Empty", "nodes": []any{}, "edges": []any{}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := res["workflows_restored"].(int); got != 1 {
+		t.Errorf("合法工作流应恢复 1 个,实际 %d (%v)", got, res)
+	}
+	if got := res["workflows_invalid"].(int); got != 2 {
+		t.Errorf("非法工作流应被拒 2 个,实际 %d (%v)", got, res)
+	}
+	// 非法定义不得进库
+	if _, err := a.Repo.GetWorkflow("dangling-wf"); err == nil {
+		t.Error("悬空边的工作流不应落库")
+	}
+	if _, err := a.Repo.GetWorkflow("empty-wf"); err == nil {
+		t.Error("空工作流不应落库")
+	}
+	ids, _ := res["workflows_invalid_ids"].([]string)
+	if len(ids) != 2 {
+		t.Errorf("应回报非法工作流 ID 便于用户定位,实际 %v", res["workflows_invalid_ids"])
+	}
+}
+
+// TestRestoreBackupRejectsBrokenAgentConfig 验证解不出结构的 Agent 配置
+// 不落库(此前无条件写入,却跳过应用,形成"库里有、运行不生效"的分裂态)。
+func TestRestoreBackupRejectsBrokenAgentConfig(t *testing.T) {
+	a := newTestApp(t)
+	res, err := a.Settings.RestoreBackup(map[string]any{
+		"workflows": []any{},
+		"agent_configs": map[string]any{
+			// timeout_seconds 是 int,给字符串 → 结构非法
+			"claude-code": map[string]any{"timeout_seconds": "三百秒"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := res["agent_configs_invalid"].(int); got != 1 {
+		t.Errorf("结构非法的配置应计 1,实际 %d (%v)", got, res)
+	}
+	if got := res["agent_configs_restored"].(int); got != 0 {
+		t.Errorf("非法配置不应计入已恢复,实际 %d", got)
+	}
+	raw, err := a.Repo.GetAgentConfig("claude-code")
+	if err == nil && raw != nil {
+		t.Error("非法配置不应落库")
+	}
+}
