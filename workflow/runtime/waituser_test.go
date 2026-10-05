@@ -169,7 +169,7 @@ func TestAgentWaitUserResumeReusesResponse(t *testing.T) {
 	}
 
 	if _, err := eng.Resume(context.Background(), exec.ID, map[string]any{
-		"response":   "instruction",
+		"response":    "instruction",
 		"instruction": "改用方案 B",
 	}); err != nil {
 		t.Fatalf("resume: %v", err)
