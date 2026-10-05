@@ -88,6 +88,52 @@ func TestCommit(t *testing.T) {
 	}
 }
 
+// 回归:工作流 git 节点走 Service.Run("commit", {add_all:true})。
+// 此前 add 分支把 gitArgs 覆盖成 ["add","-A"],commit 从未执行,
+// 却返回成功(工作区脏、后续 diff/review 读到未提交状态)。
+func TestRunCommitWithAddAll(t *testing.T) {
+	dir := newTempRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(dir)
+	if _, err := s.Run(context.Background(), "commit", map[string]any{
+		"message": "feat: node commit", "add_all": true,
+	}); err != nil {
+		t.Fatalf("Run commit: %v", err)
+	}
+	log, err := s.Log(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("log: %v", err)
+	}
+	if len(log) != 2 || log[0].Subject != "feat: node commit" {
+		t.Fatalf("commit 未发生: log = %+v", log)
+	}
+	st, err := s.Status(context.Background())
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if len(st.Modified) != 0 || len(st.Untracked) != 0 || len(st.Staged) != 0 {
+		t.Fatalf("工作区应干净: %+v", st)
+	}
+}
+
+// 回归:DSL args 里的分支名不得被 git 当作选项解析。
+func TestRunRejectsOptionLikeRefName(t *testing.T) {
+	dir := newTempRepo(t)
+	s := New(dir)
+	for _, args := range []map[string]any{
+		{"name": "--delete"},
+	} {
+		if _, err := s.Run(context.Background(), "branch", args); err == nil {
+			t.Fatalf("branch %v 应被拒绝", args)
+		}
+	}
+	if _, err := s.Run(context.Background(), "checkout", map[string]any{"branch": "-f"}); err == nil {
+		t.Fatal("checkout -f 应被拒绝")
+	}
+}
+
 func TestUnsupportedOperation(t *testing.T) {
 	s := New(t.TempDir())
 	_, err := s.Run(context.Background(), "push", nil)

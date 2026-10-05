@@ -74,6 +74,9 @@ func (s *Service) Run(ctx context.Context, operation string, args map[string]any
 	case "branch":
 		gitArgs = []string{"branch"}
 		if create, _ := args["name"].(string); create != "" {
+			if err := checkRefName(create); err != nil {
+				return "", err
+			}
 			gitArgs = []string{"branch", create}
 		}
 	case "checkout":
@@ -81,20 +84,24 @@ func (s *Service) Run(ctx context.Context, operation string, args map[string]any
 		if branch == "" {
 			return "", model.NewError(model.KindGitError, "GIT_MISSING_ARG", "checkout 需要 branch 参数")
 		}
+		if err := checkRefName(branch); err != nil {
+			return "", err
+		}
 		gitArgs = []string{"checkout", branch}
 	case "commit":
 		msg, _ := args["message"].(string)
 		if msg == "" {
 			return "", model.NewError(model.KindGitError, "GIT_MISSING_ARG", "commit 需要 message 参数")
 		}
-		gitArgs = []string{"commit", "-m", msg}
+		// 分两步:add_all 先暂存,再提交。
+		// 注意:此前 add 分支把 gitArgs 整体覆盖成 ["add","-A"],导致
+		// 随后的 exec 执行的是第二次 add,commit 从未发生却返回成功。
 		if addAll, _ := args["add_all"].(bool); addAll {
-			gitArgs = []string{"add", "-A"}
-			// 分两步:add 先执行
 			if _, err := s.exec(ctx, dir, []string{"add", "-A"}); err != nil {
 				return "", err
 			}
 		}
+		gitArgs = []string{"commit", "-m", msg}
 	default:
 		return "", model.NewError(model.KindGitError, "GIT_UNSUPPORTED_OP",
 			fmt.Sprintf("不支持的 git 操作 %q", operation))
@@ -105,6 +112,18 @@ func (s *Service) Run(ctx context.Context, operation string, args map[string]any
 		return "", err
 	}
 	return out, nil
+}
+
+// checkRefName 拒绝以 "-" 开头的引用名(分支名)。
+// git 会把这种参数当作选项解析(如 git branch --delete),DSL 的 args
+// 来自工作流定义,不能让节点参数注入 git 选项;checkout 也不能简单加
+// "--" 分隔(那会被解释为 pathspec 而非分支)。
+func checkRefName(name string) error {
+	if strings.HasPrefix(name, "-") {
+		return model.NewError(model.KindGitError, "GIT_INVALID_REF",
+			fmt.Sprintf("分支名 %q 非法:不能以 - 开头", name))
+	}
+	return nil
 }
 
 // Status 返回结构化状态。
