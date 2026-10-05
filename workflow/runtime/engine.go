@@ -10,15 +10,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
-
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	coreagent "agentworkflow/agent"
 	"agentworkflow/contextx"
@@ -337,6 +337,24 @@ func (e *Engine) RecoverPending() error {
 func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string, userInput map[string]any) {
 	e.running.Add(1)
 	defer e.running.Add(-1)
+	// 兜底:执行在独立 goroutine 里跑,节点适配器/模板/ADK 内部任意 panic
+	// 都会带走整个进程(桌面模式即整应用退出,且该执行在库中永久停留
+	// RUNNING)。统一捕获后落库为 FAILED 并发事件,便于诊断与重试。
+	// 注册在 running 之后 → panic 时先恢复,再递减运行计数。
+	defer func() {
+		if r := recover(); r != nil {
+			logx.Error("执行 panic(已兜底)", "execution", exec.ID,
+				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			e.failExecution(exec, fmt.Sprintf("执行 panic: %v", r))
+		}
+	}()
+
+	// snapshot_json 为空/损坏时 GetExecution 会静默留 nil(历史数据或
+	// 写入中断),此处显式失败而不是在下面解引用时 panic。
+	if exec.Snapshot == nil {
+		e.failExecution(exec, "执行缺少工作流快照(snapshot 损坏),无法继续;请重新运行该工作流")
+		return
+	}
 
 	// 工作流级单轮执行超时
 	if ts := exec.Snapshot.Settings.TimeoutSeconds; ts > 0 {
