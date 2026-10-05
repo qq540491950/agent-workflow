@@ -165,6 +165,10 @@ go build -tags server -o bin/agent-workflow-server .
   可用 <code>--data</code> 指定;首次启动自动导入 <code>workflows/examples/</code> 中的两个示例工作流,
   并注册 Agent(claude-code、pi-agent、mock-claude、mock-pi)与内置 Skill。
   前端自动探测传输方式:桌面内嵌走 Wails IPC,浏览器走 HTTP + SSE,页面代码完全一致。</p>
+<p><b>设置页</b>可改 Git 工作目录与日志级别、开关「允许执行 script 节点」
+  (该节点等价于执行任意本地命令,默认关闭),并在<b>备份</b>卡片导出/恢复工作流与
+  Agent 配置。恢复时已存在同 ID 的工作流会被跳过(不覆盖你的修改),
+  校验不通过的定义会被拒绝并计数 —— 备份可来自他人分享,属不可信输入。</p>
 
 <!-- ================= Dashboard ================= -->
 <h2 id="dashboard"><span class="no">03</span>Dashboard — 总览</h2>
@@ -204,7 +208,7 @@ go build -tags server -o bin/agent-workflow-server .
   <tr><td>Skill</td><td>Skill ID(submit / run-test / log…)、Arguments(JSON)</td></tr>
   <tr><td>Condition</td><td>表达式,如 <code>decision == "APPROVED"</code>;可用变量 decision / status / output / iteration / variables.*</td></tr>
   <tr><td>Human</td><td>提示语 + 可选响应(approve / reject / continue / instruction)</td></tr>
-  <tr><td>Parallel / Merge</td><td>多分支并行执行,在汇合节点合并后继续</td></tr>
+  <tr><td>Parallel / Merge</td><td>多分支并行执行,在汇合节点合并后继续。任一分支失败会<b>取消其余分支</b>(不再让已注定失败的执行继续消耗);各分支终点互不相同时发出告警并说明「分支之后的链不会执行」</td></tr>
   <tr><td>Git</td><td>status / diff / log / branch / checkout / commit(受权限策略控制)</td></tr>
   <tr><td>Script</td><td>本地 shell 命令(120s 超时)</td></tr>
   <tr><td>Sub Workflow</td><td>引用另一个工作流,阻塞执行</td></tr>
@@ -215,6 +219,15 @@ go build -tags server -o bin/agent-workflow-server .
   保存时编译器自动识别为<b>循环</b>,由 ADK LoopAgent 执行并以 <code>settings.max_iterations</code> 保护。
   连续两轮 Review 结果相同(停滞)也会触发保护。达到上限后按设置进入
   <span class="warn">等待人工处理(wait_user)</span> 或直接失败(fail),绝不无限执行。</p>
+
+<h3>运行时提示</h3>
+<p>执行过程中有两类<b>只告警、不中断</b>的提示,可在实时事件里看到:
+  <ul>
+    <li><b>模板变量缺失</b> — prompt 里 <code>{{xxx}}</code> 拼错或引用了上游尚未产出的变量时,
+        该变量渲染为空串并发出 <code>node.warning</code>,列出具体是哪个变量。</li>
+    <li><b>并行分支不收敛</b> — 各分支终点互不相同时,发出 <code>runtime.warning</code>
+        并说明「分支之后的链不会执行,请把分支连到同一个 merge 节点」。</li>
+  </ul>
 
 <h3>校验</h3>
 <p>保存与运行前都会校验。点击「校验」查看结构化错误(<code>code + node + message</code>),
@@ -251,6 +264,10 @@ go build -tags server -o bin/agent-workflow-server .
 <p>内置示例 <b>Approval Demo</b> 即为完整演示:方案制定 → 人工审批(可提供补充指令,指令通过
   <code>{{user_instruction}}</code> 注入执行上下文)→ 执行 → 完成。</p>
 <p>提交后通过 SSE / Wails 事件实时刷新,执行从暂停点恢复(已完成的节点自动跳过)。
+  你的答复被视为「对那个提示的回应」而非「把同样的活再干一遍」:Agent / Skill
+  节点<b>不会因恢复而被重复调用</b>,指令通过 <code>{{user_instruction}}</code>
+  注入上下文供后续节点使用;Reject 仍然中止整条工作流并标记失败。</p>
+<p>
   下图为 Approve 后并行评审流完整跑通的最终状态:</p>
 <img class="screenshot" src="screenshots/07-parallel-completed.png" alt="并行评审完成" />
 <p class="shot-caption">▲ Parallel Review 全部 SUCCESS:安全评审 / 代码评审 / 测试 三分支并行后汇合</p>
