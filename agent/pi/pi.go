@@ -14,6 +14,7 @@ import (
 	"time"
 
 	coreagent "agentworkflow/agent"
+	"agentworkflow/logx"
 	"agentworkflow/permission"
 	"agentworkflow/workflow/model"
 )
@@ -110,15 +111,21 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 		Env:     a.cfg.AgentEnv,
 	}.MergeEnv(req.Environment)...)
 	cmd.Env = env
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
+	stderr := coreagent.NewBoundedBuffer(0)
+	cmd.Stderr = stderr
 
-	out, err := cmd.Output()
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
-		return parseOutput(out), nil
+	// stdout 走带上限的缓冲区,不再无界读进内存(见 coreagent.BoundedBuffer)
+	stdout := coreagent.NewBoundedBuffer(0)
+	cmd.Stdout = stdout
+	runErr := cmd.Run()
+	if stdout.Truncated() {
+		logx.Warn("pi-agent 输出超出上限,已截断", "limit", coreagent.MaxOutputBytes)
 	}
-	if err != nil {
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
+		return parseOutput([]byte(stdout.String())), nil
+	}
+	if runErr != nil {
 		switch {
 		case cctx.Err() == context.DeadlineExceeded:
 			return nil, model.NewError(model.KindTimeoutError, "PI_TIMEOUT",
@@ -127,9 +134,9 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 			return nil, model.NewError(model.KindCancelledError, "PI_CANCELLED", "执行被取消")
 		}
 		return nil, model.NewError(model.KindProcessError, "PI_PROCESS_ERROR",
-			fmt.Sprintf("pi-agent 执行失败: %v; stderr: %s", err, truncate(stderr.String(), 2000)))
+			fmt.Sprintf("pi-agent 执行失败: %v; stderr: %s", runErr, truncate(stderr.String(), 2000)))
 	}
-	return parseOutput(out), nil
+	return parseOutput([]byte(stdout.String())), nil
 }
 
 // parseOutput 解析 pi-agent 输出。
@@ -137,14 +144,14 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 func parseOutput(out []byte) *coreagent.AgentResponse {
 	text := string(out)
 	resp := &coreagent.AgentResponse{Status: coreagent.StatusSuccess, Output: text}
-	if idx := strings.LastIndex(text, "{"); idx >= 0 {
+	if js := trailingJSONObject(text); js != "" {
 		var structured struct {
 			Status   string `json:"status"`
 			Decision string `json:"decision"`
 			Summary  string `json:"summary"`
 			Error    string `json:"error"`
 		}
-		if err := json.Unmarshal([]byte(text[idx:]), &structured); err == nil {
+		if err := json.Unmarshal([]byte(js), &structured); err == nil {
 			if structured.Summary != "" {
 				resp.Summary = structured.Summary
 			}
@@ -162,6 +169,9 @@ func parseOutput(out []byte) *coreagent.AgentResponse {
 	}
 	return resp
 }
+
+// trailingJSONObject 从文本末尾取配平的 JSON 对象(见 coreagent 实现)。
+func trailingJSONObject(text string) string { return coreagent.TrailingJSONObject(text) }
 
 func firstLines(s string, n int) string {
 	lines := strings.SplitN(strings.TrimSpace(s), "\n", n+1)

@@ -43,6 +43,10 @@ type AgentRequest struct {
 	WorkingDir   string
 	Environment  map[string]string
 	Timeout      int // seconds, 0 = default
+	// ExecutionID 标识调用方所在的执行。有状态的适配器(如 mock)据此
+	// 隔离每次执行的内部状态:同一个 Agent 实例被多个执行并发使用时
+	// 不会互相清零/错位。适配器不需要它时忽略即可。
+	ExecutionID string
 }
 
 // AgentResponse 是 Agent 返回的结构化结果。

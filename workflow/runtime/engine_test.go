@@ -180,16 +180,16 @@ func TestFullLoop(t *testing.T) {
 	exec = waitForState(t, f.engine, exec.ID, model.ExecutionCompleted)
 
 	// 断言调用序列
-	if got := f.planAgt.Calls("plan"); got != 1 {
+	if got := f.planAgt.CallsFor(exec.ID, "plan"); got != 1 {
 		t.Errorf("plan calls = %d, want 1", got)
 	}
-	if got := f.pagt.Calls("execute"); got != 1 {
+	if got := f.pagt.CallsFor(exec.ID, "execute"); got != 1 {
 		t.Errorf("execute calls = %d, want 1", got)
 	}
-	if got := f.planAgt.Calls("review"); got != 2 {
+	if got := f.planAgt.CallsFor(exec.ID, "review"); got != 2 {
 		t.Errorf("review calls = %d, want 2 (REJECTED→APPROVED)", got)
 	}
-	if got := f.pagt.Calls("fix"); got != 1 {
+	if got := f.pagt.CallsFor(exec.ID, "fix"); got != 1 {
 		t.Errorf("fix calls = %d, want 1", got)
 	}
 
@@ -262,10 +262,10 @@ func TestLoopProtectionAlwaysRejected(t *testing.T) {
 	exec = waitForState(t, f.engine, exec.ID, model.ExecutionWaitingUser)
 
 	// review 被调用的次数应受 max_iterations 限制(5 + 首次 = 至多 6)
-	if got := f.planAgt.Calls("review"); got > 7 {
+	if got := f.planAgt.CallsFor(exec.ID, "review"); got > 7 {
 		t.Errorf("review calls = %d, expected loop protection at ~6", got)
 	}
-	if got := f.pagt.Calls("fix"); got > 6 {
+	if got := f.pagt.CallsFor(exec.ID, "fix"); got > 6 {
 		t.Errorf("fix calls = %d, expected loop protection", got)
 	}
 }
@@ -438,7 +438,7 @@ edges:
 			t.Errorf("node %s state = %s, want success", id, got)
 		}
 	}
-	if got := shared.Calls("plan") + shared.Calls("review") + shared.Calls("execute"); got != 3 {
+	if got := shared.CallsFor(exec.ID, "plan") + shared.CallsFor(exec.ID, "review") + shared.CallsFor(exec.ID, "execute"); got != 3 {
 		t.Errorf("branch calls = %d, want 3", got)
 	}
 }

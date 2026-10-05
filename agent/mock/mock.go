@@ -44,8 +44,19 @@ type Agent struct {
 	opt Options
 
 	mu        sync.Mutex
-	calls     map[string]int // mode -> 已调用次数
+	calls     map[string]int // mode -> 已调用次数(无 ExecutionID 的共享空间)
 	summaries map[string][]string
+	// runs 按 ExecutionID 隔离的计数空间。同一个 Mock 实例被多个执行
+	// 并发使用时(同一工作流跑两次、嵌套工作流),决策序列互不干扰。
+	runs map[string]*runState
+}
+
+// runState 是一次执行(或无执行上下文的直接调用)的计数空间。
+type runState struct {
+	calls     map[string]int
+	summaries map[string][]string
+	// shared 为真时 maps 由 Agent 自身持有(Calls/Summaries 能读到)
+	shared bool
 }
 
 // New 创建 MockAgent。
@@ -60,6 +71,7 @@ func New(opt Options) *Agent {
 		opt:       opt,
 		calls:     map[string]int{},
 		summaries: map[string][]string{},
+		runs:      map[string]*runState{},
 	}
 }
 
@@ -70,10 +82,34 @@ func (a *Agent) ID() string { return a.opt.ID }
 func (a *Agent) Name() string { return a.opt.Name }
 
 // Calls 返回指定 mode 的调用次数(测试断言用)。
+// 注意:只统计无 ExecutionID 的共享空间;工作流执行中的调用按
+// executionID 隔离,需用 CallsFor(execID, mode) 断言。
 func (a *Agent) Calls(mode string) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.calls[mode]
+}
+
+// CallsFor 返回某次执行内指定 mode 的调用次数(测试断言用)。
+func (a *Agent) CallsFor(executionID, mode string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if rs, ok := a.runs[executionID]; ok {
+		return rs.calls[mode]
+	}
+	return 0
+}
+
+// SummariesFor 返回某次执行内指定 mode 的历次摘要(测试断言用)。
+func (a *Agent) SummariesFor(executionID, mode string) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if rs, ok := a.runs[executionID]; ok {
+		out := make([]string, len(rs.summaries[mode]))
+		copy(out, rs.summaries[mode])
+		return out
+	}
+	return nil
 }
 
 // Summaries 返回指定 mode 的历次摘要(测试断言用)。
@@ -87,6 +123,11 @@ func (a *Agent) Summaries(mode string) []string {
 
 // ResetMock 清空调用计数与历史,使决策序列从头开始。
 // 每次工作流执行前由 runtime 调用,保证多次运行行为一致。
+//
+// 只清共享空间(无 ExecutionID 的直接调用,如单测与 Agents 页 Test),
+// **不动按执行隔离的空间**:同一工作流并发启动两次时,第二次执行
+// 若把第一次正在跑的序列清零,会出现"第二次运行的第 N 次调用拿到
+// 第 1 次的决策"。带 ExecutionID 的调用天然从零开始,无需重置。
 func (a *Agent) ResetMock() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -94,11 +135,26 @@ func (a *Agent) ResetMock() {
 	a.summaries = map[string][]string{}
 }
 
+// stateFor 返回本次调用应使用的计数空间。
+func (a *Agent) stateFor(executionID string) *runState {
+	if executionID == "" {
+		// 共享空间:直接复用 Agent 自身的两个 map(保持既有 API 行为)
+		return &runState{calls: a.calls, summaries: a.summaries, shared: true}
+	}
+	if rs, ok := a.runs[executionID]; ok {
+		return rs
+	}
+	rs := &runState{calls: map[string]int{}, summaries: map[string][]string{}}
+	a.runs[executionID] = rs
+	return rs
+}
+
 // Execute 实现 agent.Agent:按脚本生成结构化响应。
 func (a *Agent) Execute(ctx context.Context, req agent.AgentRequest) (*agent.AgentResponse, error) {
 	a.mu.Lock()
-	call := a.calls[req.Mode]
-	a.calls[req.Mode] = call + 1
+	rs := a.stateFor(req.ExecutionID)
+	call := rs.calls[req.Mode]
+	rs.calls[req.Mode] = call + 1
 	a.mu.Unlock()
 
 	script := a.opt.Scripts[req.Mode]
@@ -129,7 +185,7 @@ func (a *Agent) Execute(ctx context.Context, req agent.AgentRequest) (*agent.Age
 		resp.Error = script.FailWith
 		resp.Decision = agent.DecisionError
 		resp.Summary = "mock failure: " + script.FailWith
-		a.record(req.Mode, resp)
+		a.record(rs, req.Mode, resp)
 		return resp, nil
 	}
 
@@ -161,14 +217,14 @@ func (a *Agent) Execute(ctx context.Context, req agent.AgentRequest) (*agent.Age
 	if len(script.Issues) > 0 {
 		resp.Data["issues"] = script.Issues
 	}
-	a.record(req.Mode, resp)
+	a.record(rs, req.Mode, resp)
 	return resp, nil
 }
 
-func (a *Agent) record(mode string, resp *agent.AgentResponse) {
+func (a *Agent) record(rs *runState, mode string, resp *agent.AgentResponse) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.summaries[mode] = append(a.summaries[mode], resp.Summary)
+	rs.summaries[mode] = append(rs.summaries[mode], resp.Summary)
 }
 
 func render(tpl, task string, iteration, call int) string {

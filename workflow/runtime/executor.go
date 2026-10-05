@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
 	coreagent "agentworkflow/agent"
 	"agentworkflow/contextx"
 	"agentworkflow/event"
+	"agentworkflow/logx"
 	"agentworkflow/permission"
 	"agentworkflow/skill"
 	"agentworkflow/workflow/compiler"
@@ -217,12 +219,18 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 			prompt, _ = tplRaw["template"].(string)
 		}
 	}
-	rendered, _ := e.Tpl.Render(prompt, data)
+	rendered, missing := e.Tpl.Render(prompt, data)
 	instructions := rendered
 	if extra := cfgStr(node, "instructions"); extra != "" {
-		r2, _ := e.Tpl.Render(extra, data)
+		r2, m2 := e.Tpl.Render(extra, data)
+		missing = append(missing, m2...)
 		instructions = strings.TrimSpace(rendered + "\n\n" + r2)
 	}
+	// 缺失变量必须可见:此前 `rendered, _ :=` 把 missing 列表直接丢掉 ——
+	// prompt 里 {{revwie}} 拼错、或引用了上游尚未产出的 {{git_diff}} 时,
+	// Agent 收到残缺 prompt 并照常返回 SUCCESS/decision,没有任何告警。
+	// 不让节点失败(可能是合法的可选变量),但要发事件 + 写日志。
+	e.reportMissingVars(env, node, missing)
 
 	// 节点级 model 覆盖(DSL config.model)> Agent 默认模型
 	nodeModel := cfgStr(node, "model")
@@ -236,6 +244,9 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		WorkingDir:   cfgStr(node, "working_dir"),
 		Environment:  nil,
 		Timeout:      cfgInt(node, "timeout_seconds"),
+		// 有状态适配器(mock)据此按执行隔离计数,避免同一工作流
+		// 并发运行时决策序列互相错位。
+		ExecutionID: env.Exec.ID,
 	}
 	if wd := e.Git.WorkingDir; req.WorkingDir == "" && wd != "" {
 		req.WorkingDir = wd
@@ -286,6 +297,33 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		}, e.stateView(st))
 	}
 	return outcome
+}
+
+// reportMissingVars 上报模板渲染时缺失的变量。
+// 只告警不让节点失败:部分变量确实是可选的(上游分支未走到)。
+// 但拼错的变量名与"上游没产出"必须区分得开,否则用户无从下手。
+func (e *Engine) reportMissingVars(env *compiler.RunEnv, node *model.Node, missing []string) {
+	if len(missing) == 0 {
+		return
+	}
+	// 去重 + 排序,保证事件内容稳定可比对
+	seen := map[string]bool{}
+	uniq := make([]string, 0, len(missing))
+	for _, m := range missing {
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		uniq = append(uniq, m)
+	}
+	sort.Strings(uniq)
+	msg := "prompt 模板变量缺失(渲染为空串): " + strings.Join(uniq, ", ")
+	logx.Warn(msg, "execution", env.Exec.ID, "node", node.ID)
+	// 用独立的 node.warning 类型,不复用 NodeWaiting —— 后者语义是
+	// "暂停等待人工",前端会据此渲染 HITL 交互面板,拿来做告警会误导。
+	env.Bus.Emit(event.New("node.warning", env.Exec.ID, node.ID, map[string]any{
+		"node": node.ID, "reason": "missing_template_vars", "missing": uniq, "message": msg,
+	}))
 }
 
 // invokeAgent 调用 Agent 并把结果映射为节点结果。
@@ -496,39 +534,137 @@ func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.N
 	return compiler.NodeOutcome{State: model.NodeSuccess, Output: string(out)}
 }
 
-// runMergeNode 汇合并行分支结果:收集所有入边分支节点的状态,
-// 输出聚合摘要(全部 SUCCESS / 部分失败一目了然)。
+// runMergeNode 汇合并行分支结果:输出聚合摘要(成功/失败/跳过/被截断)。
+//
+// 两个关键修正(此前都导致"并行区没跑完"被报成"全部成功"):
+//
+//  1. 统计对象错了。此前按"merge 的入边"统计,但入边 ≠ 并行区的分支:
+//     分支内嵌路由时(edge decide --REJECTED--> patch --> merge),
+//     条件不成立的 patch 本就不该跑,却是 merge 的一条入边。
+//     现在改为从"喂给本 merge 的 parallel 节点"取分支清单。
+//  2. "查不到状态"一律算成功。分支被 enabled:false 跳过、被
+//     RetryNode(skip) 跳过,或因 KeyAbort 根本没跑到时 StatusKey 缺失,
+//     于是输出"汇合 2 个分支,全部成功"。现在区分:
+//     - 并行区的**无条件扇出**是必须执行的,没有状态 = 被截断 → 失败;
+//     - 条件分支没状态是正常路由结果 → 只在摘要里标注,不算失败;
+//     - 显式 SKIPPED → 标注,不算失败(用户主动禁用)。
 func (e *Engine) runMergeNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
-	var branches []string
-	var failed []string
-	for _, edge := range env.WF.Edges {
-		if edge.To != node.ID {
-			continue
-		}
-		branchID := edge.From
-		branches = append(branches, branchID)
+	branchInfo, mustRun := e.mergeBranches(env, node.ID)
+	branchIDs := make([]string, len(branchInfo))
+	for i, b := range branchInfo {
+		branchIDs[i] = b.id
+	}
+	var succeeded, failed, skipped, notRun []string
+	for _, b := range branchInfo {
 		status := ""
-		if v, ok := st.Get(compiler.StatusKey(branchID)); ok {
+		if v, ok := st.Get(compiler.StatusKey(b.id)); ok {
 			status = fmt.Sprint(v)
 		}
-		if status == string(model.NodeFailed) {
-			failed = append(failed, branchID)
+		switch status {
+		case string(model.NodeSuccess):
+			succeeded = append(succeeded, b.id)
+		case string(model.NodeFailed):
+			failed = append(failed, b.id)
+		case string(model.NodeSkipped):
+			skipped = append(skipped, b.id)
+		case "":
+			// 无状态:无条件扇出 = 被截断/从未执行;条件分支 = 路由未选中
+			if mustRun[b.id] {
+				notRun = append(notRun, b.id)
+			} else {
+				skipped = append(skipped, b.id)
+			}
+		default:
+			// WAITING 等中间态:分支还没跑完(并行区未收敛),按未完成处理
+			notRun = append(notRun, b.id)
 		}
 	}
-	summary := fmt.Sprintf("汇合 %d 个分支", len(branches))
+
+	summary := fmt.Sprintf("汇合 %d 个分支", len(branchIDs))
 	if len(failed) > 0 {
-		summary += fmt.Sprintf(",失败分支: %s", strings.Join(failed, ", "))
-	} else {
+		summary += ",失败分支: " + strings.Join(failed, ", ")
+	}
+	if len(notRun) > 0 {
+		summary += ",未完成分支: " + strings.Join(notRun, ", ")
+	}
+	if len(skipped) > 0 {
+		summary += ",跳过/未选中: " + strings.Join(skipped, ", ")
+	}
+	// 只有确实全部成功才这么说 —— 分支被跳过时不能说"全部成功"
+	// (那正是本项修复要消除的失真)
+	if len(failed) == 0 && len(notRun) == 0 && len(skipped) == 0 {
 		summary += ",全部成功"
 	}
-	e.Bus.Emit(event.New("merge.completed", env.Exec.ID, node.ID, map[string]any{
-		"branches": branches, "failed": failed,
-	}))
-	return compiler.NodeOutcome{
-		State:   model.NodeSuccess,
-		Summary: summary,
-		Data:    map[string]any{"branches": branches, "failed": failed},
+	// 失败或必跑分支未完成 → merge 失败,让并行区没跑完在执行记录里可见
+	state := model.NodeSuccess
+	if len(failed) > 0 || len(notRun) > 0 {
+		state = model.NodeFailed
 	}
+	out := compiler.NodeOutcome{
+		State:   state,
+		Summary: summary,
+		Data: map[string]any{
+			// 分支 ID 序列(供前端展示);struct 本身不可 JSON 序列化
+			"branches": branchIDs, "succeeded": succeeded,
+			"failed": failed, "skipped": skipped, "not_run": notRun,
+		},
+	}
+	if state == model.NodeFailed {
+		out.Error = summary
+	}
+	e.Bus.Emit(event.New("merge.completed", env.Exec.ID, node.ID, map[string]any{
+		"branches": branchIDs, "succeeded": succeeded,
+		"failed": failed, "skipped": skipped, "not_run": notRun,
+	}))
+	return out
+}
+
+// mergeBranch 是一个并行分支的根节点。
+type mergeBranch struct {
+	id   string
+	cond string // 该扇出边上的条件(空 = 无条件 = 必须执行)
+}
+
+// mergeBranches 找出喂给 mergeNode 的并行区分支根。
+// 优先找直接入边的 parallel 节点;没有则找能到达 mergeNode 的
+// parallel 节点(并行区后面可能隔了别的节点)。
+func (e *Engine) mergeBranches(env *compiler.RunEnv, mergeNode string) ([]mergeBranch, map[string]bool) {
+	wf := env.WF
+	var par *model.Node
+	for i := range wf.Nodes {
+		n := &wf.Nodes[i]
+		if n.Type != model.NodeTypeParallel {
+			continue
+		}
+		for _, edge := range wf.OutgoingEdges(n.ID) {
+			if edge.To == mergeNode {
+				par = n
+				break
+			}
+		}
+		if par != nil {
+			break
+		}
+	}
+	if par == nil {
+		// 没有直接相连的 parallel:退回到"入边即分支"(无并行区的裸 merge)
+		var out []mergeBranch
+		for _, edge := range wf.Edges {
+			if edge.To == mergeNode {
+				out = append(out, mergeBranch{id: edge.From, cond: edge.Condition})
+			}
+		}
+		return out, nil
+	}
+	var branches []mergeBranch
+	mustRun := map[string]bool{}
+	for _, edge := range wf.OutgoingEdges(par.ID) {
+		branches = append(branches, mergeBranch{id: edge.To, cond: edge.Condition})
+		if edge.Condition == "" {
+			mustRun[edge.To] = true
+		}
+	}
+	return branches, mustRun
 }
 
 // runHumanNode 暂停执行等待用户输入(配合 routeAgent/恢复机制)。

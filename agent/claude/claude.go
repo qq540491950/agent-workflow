@@ -17,6 +17,7 @@ import (
 	"time"
 
 	coreagent "agentworkflow/agent"
+	"agentworkflow/logx"
 	"agentworkflow/permission"
 	"agentworkflow/workflow/model"
 )
@@ -122,14 +123,22 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	env = append(env, a.agentConfig().MergeEnv(req.Environment)...)
 	cmd.Env = env
 
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if errors.Is(err, exec.ErrWaitDelay) {
+	// stdout/stderr 走带上限的缓冲区,不再无界读进内存
+	// (见 coreagent.BoundedBuffer 与 MaxOutputBytes)
+	stderr := coreagent.NewBoundedBuffer(0)
+	cmd.Stderr = stderr
+	stdout := coreagent.NewBoundedBuffer(0)
+	cmd.Stdout = stdout
+	runErr := cmd.Run()
+	out := []byte(stdout.String())
+	if stdout.Truncated() {
+		logx.Warn("claude 输出超出上限,已截断", "limit", coreagent.MaxOutputBytes)
+	}
+	if errors.Is(runErr, exec.ErrWaitDelay) {
 		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
 		return a.parseOutput(out)
 	}
-	if err != nil {
+	if runErr != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			return nil, model.NewError(model.KindTimeoutError, "CLAUDE_TIMEOUT",
 				fmt.Sprintf("claude 执行超时(%ds)", timeout))
@@ -138,7 +147,7 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 			return nil, model.NewError(model.KindCancelledError, "CLAUDE_CANCELLED", "执行被取消")
 		}
 		return nil, model.NewError(model.KindProcessError, "CLAUDE_PROCESS_ERROR",
-			fmt.Sprintf("claude 启动/执行失败: %v; stderr: %s", err, truncate(stderr.String(), 2000)))
+			fmt.Sprintf("claude 启动/执行失败: %v; stderr: %s", runErr, truncate(stderr.String(), 2000)))
 	}
 
 	return a.parseOutput(out)
@@ -201,25 +210,14 @@ Respond with JSON at the end of your reply:
 	return b.String()
 }
 
-// extractJSON 从文本中提取第一个 JSON 对象。
+// extractJSON 从文本中提取第一个能配平的 JSON 对象。
+// 改用 coreagent.FirstJSONObject:旧实现不跳过字符串字面量内的括号,
+// 遇到 {"summary":"格式 {x}"} 这类内容会算错深度。
 func extractJSON(s string) string {
-	start := strings.Index(s, "{")
-	if start < 0 {
-		return s
+	if js := coreagent.FirstJSONObject(s); js != "" {
+		return js
 	}
-	depth := 0
-	for i := start; i < len(s); i++ {
-		switch s[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
-		}
-	}
-	return s[start:]
+	return s
 }
 
 func truncate(s string, n int) string {

@@ -7,6 +7,7 @@ import (
 	"iter"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/expr-lang/expr"
 	"google.golang.org/adk/agent"
@@ -17,6 +18,7 @@ import (
 
 	coreagent "agentworkflow/agent"
 	"agentworkflow/event"
+	"agentworkflow/logx"
 	"agentworkflow/permission"
 	"agentworkflow/workflow/model"
 )
@@ -119,6 +121,9 @@ type RunEnv struct {
 	// execMu 保护 Exec 的节点级写入:parallel 分支由 ADK 并发执行,
 	// 直接写 Exec.CurrentNodeID / Exec.NodeStates 是数据竞争。
 	execMu sync.Mutex
+	// abort 记录最近一次中断原因(FAILED:node / WAIT_USER / LOOP_LIMIT:node)。
+	// 并行区用它做失败级联;受 execMu 保护。
+	abort string
 }
 
 // SetCurrentNode 并发安全地更新当前节点。
@@ -136,6 +141,25 @@ func (e *RunEnv) SetNodeState(nodeID, state string) {
 		e.Exec.NodeStates = map[string]string{}
 	}
 	e.Exec.NodeStates[nodeID] = state
+}
+
+// abortReason 读取当前的中断原因(供并行区失败级联监视器使用)。
+// 并发安全:abort 标记写在 ADK 会话状态里,这里读的是 Runtime 侧
+// 维护的快照(由 nodeAgent 写入 SetAbort 时同步更新)。
+func (e *RunEnv) abortReason() (string, bool) {
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
+	if e.abort == "" {
+		return "", false
+	}
+	return e.abort, true
+}
+
+// SetAbort 记录中断原因(并发安全)。
+func (e *RunEnv) SetAbort(reason string) {
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
+	e.abort = reason
 }
 
 // RunPermissionChecker 由 runtime 注入的策略检查接口。
@@ -206,9 +230,18 @@ func (l *lowerer) lower(p *Plan, name string) (agent.Agent, error) {
 			}
 			subs = append(subs, a)
 		}
-		return parallelagent.New(parallelagent.Config{
+		// 失败级联:nodeAgent 失败时只 yield escalateEvent 且 err==nil,
+		// ADK parallelagent 的 errgroup 仅在 Go error 时 cancel 兄弟分支 ——
+		// 于是分支 A 失败后分支 B 仍完整跑完(真实 Agent 场景下等于继续
+		// 烧 token、继续改文件)。这里让整个并行区共享一个可取消的 ctx,
+		// 任一分支失败即取消其余分支。
+		parAgt, err := parallelagent.New(parallelagent.Config{
 			AgentConfig: agent.Config{Name: name, Description: "并行分支", SubAgents: subs},
 		})
+		if err != nil {
+			return nil, err
+		}
+		return l.parallelCascadeAgent(parAgt, name)
 	case KindRoute:
 		return l.routeAgent(p, name)
 	case KindSwitch:
@@ -217,6 +250,69 @@ func (l *lowerer) lower(p *Plan, name string) (agent.Agent, error) {
 		return l.noopAgent(name)
 	}
 }
+
+// parallelCascadeAgent 包一层:给并行区一个共享的派生 context,
+// 任一分支出现 KeyAbort=FAILED 时取消它,兄弟分支随之中止。
+//
+// 判定依据是运行期记录的 abort 原因(而非 ADK 的 err 通道),因为节点失败
+// 走的是 escalate + err==nil 的路径。WAIT_USER 同样写 abort 但语义不同
+// (暂停等人工,不是失败),故只认 FAILED 前缀 —— 人工闸门在并行区内
+// 不会误杀兄弟分支。
+func (l *lowerer) parallelCascadeAgent(inner agent.Agent, name string) (agent.Agent, error) {
+	env := l.env
+	return agent.New(agent.Config{
+		Name:        l.uniqueName(name + ".cascade"),
+		Description: "并行分支(失败级联)",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// 共享取消器:分支失败时由监视协程 cancel
+				parCtx, cancelPar := context.WithCancel(ctx)
+				defer cancelPar()
+				watchDone := make(chan struct{})
+				defer close(watchDone)
+				go func() {
+					tick := time.NewTicker(20 * time.Millisecond)
+					defer tick.Stop()
+					for {
+						select {
+						case <-watchDone:
+							return
+						case <-parCtx.Done():
+							return
+						case <-tick.C:
+							if v, ok := env.abortReason(); ok &&
+								strings.HasPrefix(v, "FAILED:") {
+								logx.Warn("并行分支失败,取消其余分支",
+									"execution", env.Exec.ID, "parallel", name, "abort", v)
+								cancelPar()
+								return
+							}
+						}
+					}
+				}()
+				// ADK 的 Run 收 InvocationContext(内嵌 context.Context),
+				// 故用包装类型只替换取消语义,其余方法原样透传。
+				for ev, err := range inner.Run(cascadeCtx{InvocationContext: ctx, ctx: parCtx}) {
+					if !yield(ev, err) {
+						return
+					}
+				}
+			}
+		},
+	})
+}
+
+// cascadeCtx 把 InvocationContext 的取消/截止语义换成并行区共享的那个,
+// 其余方法(Agent/Session/Branch/…)原样透传。
+type cascadeCtx struct {
+	agent.InvocationContext
+	ctx context.Context
+}
+
+func (c cascadeCtx) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
+func (c cascadeCtx) Done() <-chan struct{}       { return c.ctx.Done() }
+func (c cascadeCtx) Err() error                  { return c.ctx.Err() }
+func (c cascadeCtx) Value(key any) any           { return c.ctx.Value(key) }
 
 // switchAgent 纯条件选择:按状态求值条件挑一条链执行,自身不执行任何
 // 节点。用于一个决策点存在多条回边时,在循环体内选择本轮走哪条回边。
@@ -363,7 +459,17 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 
 				outcome := env.Runner.ExecuteNode(ctx, env, node, st)
 
-				// 写回状态
+				// 写回状态。节点状态机此前从未接线(CanTransitionNode 只在
+				// 测试里被调用):任何来源的写入 —— resume 回放、循环重置
+				// (StatusKey 被清空)、Delete 写 nil —— 都不过校验,非法转换
+				// 既不被拒绝也不留痕。终态之间不可再流转,违反即记
+				// runtime.error 让问题可见,但不阻断执行(状态已是既成事实)。
+				if !model.CanTransitionNode(model.NodeRunning, outcome.State) {
+					env.Bus.Emit(event.New("runtime.error", env.Exec.ID, node.ID, map[string]any{
+						"error": fmt.Sprintf("节点状态非法转换 %s → %s",
+							model.NodeRunning, outcome.State),
+					}))
+				}
 				st.Set(StatusKey(node.ID), string(outcome.State))
 				if raw, err := json.Marshal(outcome); err == nil {
 					st.Set(ResultKey(node.ID), string(raw))
@@ -395,6 +501,7 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 					// 人工交互:暂停执行,等待用户提供输入
 					st.Set(KeyResumeNode, node.ID)
 					st.Set(KeyAbort, "WAIT_USER")
+					env.SetAbort("WAIT_USER")
 					env.Bus.Emit(event.New(event.NodeWaiting, env.Exec.ID, node.ID, map[string]any{
 						"node": node.ID, "prompt": outcome.Summary,
 					}))
@@ -406,6 +513,7 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 					return
 				case model.NodeFailed:
 					st.Set(KeyAbort, "FAILED:"+node.ID)
+					env.SetAbort("FAILED:" + node.ID)
 					if outcome.Error != "" {
 						st.Set("_error", outcome.Error)
 					}
@@ -521,6 +629,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 						st.Set(KeyStatus, "success")
 					case "reject":
 						st.Set(KeyAbort, "FAILED:"+decisionNode.ID)
+						env.SetAbort("FAILED:" + decisionNode.ID)
 						st.Set("_error", "用户在节点 "+decisionNode.ID+" 拒绝继续")
 						yield(stateEvent(ctx, actions), nil)
 						return
@@ -586,6 +695,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 					}))
 					if p.Loop.OnLoopLimit == "fail" {
 						st.Set(KeyAbort, "LOOP_LIMIT:"+decisionNode.ID)
+						env.SetAbort("LOOP_LIMIT:" + decisionNode.ID)
 						st.Set("_error", "循环达到最大迭代数: "+decisionNode.ID)
 						yield(escalateEvent(ctx, actions), nil)
 						return
@@ -593,6 +703,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 					// 默认 wait_user:暂停等待人工干预
 					st.Set(KeyResumeNode, decisionNode.ID)
 					st.Set(KeyAbort, "WAIT_USER")
+					env.SetAbort("WAIT_USER")
 					env.Bus.Emit(event.New(event.HumanInputRequired, env.Exec.ID, decisionNode.ID, map[string]any{
 						"node":      decisionNode.ID,
 						"prompt":    fmt.Sprintf("工作流在节点 %s 循环 %d 轮后仍未通过,请人工处理", decisionNode.ID, p.Loop.MaxIterations),
@@ -648,6 +759,7 @@ func (l *lowerer) abortNoRoute(ctx agent.InvocationContext, actions *session.Eve
 	}
 	msg += ";请补一条无条件默认分支,或修正条件表达式"
 	st.Set(KeyAbort, "FAILED:"+nodeID)
+	env.SetAbort("FAILED:" + nodeID)
 	st.Set("_error", msg)
 	env.SetNodeState(nodeID, string(model.NodeFailed))
 	env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, nodeID, map[string]any{
