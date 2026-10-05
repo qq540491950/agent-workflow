@@ -157,12 +157,13 @@ float64 陷阱)已经用解码归一拿到了。
 
 ### 仍然开放(需单独立项,不属于已登记缺陷)
 
-1. **分支 goroutine 的 panic 没有兜底(P0 候选)**:ADK 的
-   `parallelagent` 在**自己的** goroutine 里跑分支,而 `grep recover()`
-   在 `adk/agent/` 与 `adk/runner/` 生产代码中零命中。本项目的
-   `defer recover()` 在 `engine.execute`,只对执行协程生效 ——
-   分支内 panic(第三方适配器、模板渲染)会绕过它直接杀进程。
-   建议在 `nodeAgent` 的 Run 内层加同款兜底。
+1. ~~**分支 goroutine 的 panic 没有兜底**~~ —— **本轮已修(#84)**。ADK 的
+   `parallelagent` 在自己的 goroutine 里跑分支(`errgroup.Go`),而
+   `recover()` 在 adk 生产代码中零命中,分支内 panic 绕过 `engine.execute`
+   的兜底直接杀进程(实测确认,违反约定 #12)。改为在 `RunEnv.runNodeGuarded`
+   兜住:节点是 panic 的实际发生地,无论跑在执行协程还是 ADK 分支协程都覆盖;
+   panic 转成 FAILED outcome 后由既有 KeyAbort 流程落库 FAILED,
+   用户看到"哪个节点炸了"而不是整个应用消失。
 2. **执行全程无持久化**:运行中崩溃时 DB 里的 `current_node_id` 仍是
    Start 时的值(空),`RecoverPending` 标 FAILED 后 `RetryNode` 恒返回
    `NO_FAILED_NODE`("无法定位失败节点")。现有崩溃模拟用例先把执行跑完

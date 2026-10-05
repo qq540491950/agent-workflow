@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -160,6 +161,34 @@ func (e *RunEnv) SetAbort(reason string) {
 	e.execMu.Lock()
 	defer e.execMu.Unlock()
 	e.abort = reason
+}
+
+// runNodeGuarded 执行单个节点并兜住 panic。
+//
+// 为什么不复用 runtime.execute 的 defer recover():ADK 的 parallelagent
+// 在**自己的** goroutine 里跑各分支(`errgroup.Go`),而 `recover()` 在
+// adk 生产代码中零命中 —— 分支内的 panic 会绕过执行协程的兜底直接杀掉
+// 整个进程(桌面模式即整应用退出),违反 AGENTS.md 硬性约定 #12。
+// 实测:分支内 Agent 适配器 panic → `panic: boom from agent adapter`,
+// 栈顶是 `created by errgroup.(*Group).Go`,进程确实被杀。
+//
+// 兜在这里而不是只加在 execute:节点是 panic 的实际发生地,无论它跑在
+// 执行协程(顺序链)还是 ADK 的分支协程(并行区)都能覆盖。
+// panic 转成 FAILED outcome 后,上层既有的 KeyAbort 流程会把执行落库
+// FAILED,用户能看到"哪个节点炸了"而不是整个应用消失。
+func (e *RunEnv) runNodeGuarded(ctx agent.InvocationContext, env *RunEnv, node *model.Node, st StateAccess) (out NodeOutcome) {
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("节点 %s 执行 panic: %v", node.ID, r)
+			logx.Error("节点 panic(已兜底)", "execution", env.Exec.ID,
+				"node", node.ID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, node.ID, map[string]any{
+				"node": node.ID, "error": msg,
+			}))
+			out = NodeOutcome{State: model.NodeFailed, Error: msg}
+		}
+	}()
+	return env.Runner.ExecuteNode(ctx, env, node, st)
 }
 
 // RunPermissionChecker 由 runtime 注入的策略检查接口。
@@ -481,7 +510,7 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 					}))
 				}
 
-				outcome := env.Runner.ExecuteNode(ctx, env, node, st)
+				outcome := env.runNodeGuarded(ctx, env, node, st)
 
 				// 写回状态。节点状态机此前从未接线(CanTransitionNode 只在
 				// 测试里被调用):任何来源的写入 —— resume 回放、循环重置

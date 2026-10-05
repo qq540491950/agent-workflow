@@ -742,6 +742,23 @@
 ("will be removed later... we plan to stop embedding go context in adk
 context types")** —— 即 `cascadeCtx` 依赖的是 ADK 明示要移除的形态。
 
+### #84 并行分支内 panic 杀掉整个进程(P0)
+
+ADK 的 `parallelagent` 在**自己的** goroutine 里跑各分支(`errgroup.Go`),
+而 `recover()` 在 adk 生产代码中零命中 —— 分支内的 panic 绕过
+`engine.execute` 的 `defer recover()`(那只覆盖执行协程),直接杀进程,
+违反 AGENTS.md 硬性约定 #12(桌面模式即整应用退出)。
+
+**实测确认**:分支内 Agent 适配器 panic → `panic: boom from agent adapter`,
+栈顶 `created by errgroup.(*Group).Go`,测试进程被杀。
+
+修复:`RunEnv.runNodeGuarded` 在节点执行点兜住 panic —— 节点是 panic 的实际
+发生地,无论跑在执行协程(顺序链)还是 ADK 分支协程(并行区)都覆盖。
+panic 转成 FAILED outcome + `node.failed` 事件 + 完整栈日志,随后由既有
+KeyAbort 流程把执行落库 FAILED,用户看到"哪个节点炸了"。
+`TestPanicInsideParallelBranchDoesNotKillProcess` 断言进程存活、执行 FAILED、
+错误信息含 panic、坏节点记 FAILED、事件已发出。
+
 ### 回归汇总(轮次 29)
 
 - `gofmt`/`go vet` 干净;`go test -count=1 -race ./...` 全部通过。✅

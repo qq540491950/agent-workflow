@@ -168,3 +168,103 @@ func TestMissingSnapshotFailsCleanly(t *testing.T) {
 		t.Errorf("错误信息未提示快照问题: %q", broken.Error)
 	}
 }
+
+// TestPanicInsideParallelBranchDoesNotKillProcess 轮次 29(#84):
+// 并行分支内的 panic 必须被兜住,不能杀掉整个进程。
+//
+// ADK 的 parallelagent 在**自己的** goroutine 里跑各分支(errgroup.Go),
+// 而 recover() 在 adk 生产代码中零命中 —— 分支内的 panic 绕过 runtime.execute
+// 的 defer recover()(那只覆盖执行协程),直接杀进程,违反 AGENTS.md 硬性
+// 约定 #12(桌面模式即整应用退出)。
+//
+// 修复前实测:`panic: boom from agent adapter`,栈顶
+// `created by errgroup.(*Group).Go`,测试进程被杀。
+func TestPanicInsideParallelBranchDoesNotKillProcess(t *testing.T) {
+	repo, err := persistence.Open(t.TempDir() + "/t.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { repo.Close() })
+	bus := event.NewBus()
+	bus.KeepHistory = true
+
+	agents := coreagent.NewRegistry()
+	if err := agents.Register(panicAgent{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := agents.Register(mock.New(mock.Options{ID: "mock-claude"})); err != nil {
+		t.Fatal(err)
+	}
+	skills := skill.NewRegistry()
+	for _, sk := range builtin.All() {
+		if err := skills.Register(sk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eng := NewEngine(agents, skills, permission.NewManager(), bus, git.New(t.TempDir()), repo)
+	eng.Perms.Set("panic-agent", permission.Policy{FilesystemRead: true, FilesystemWrite: true})
+	eng.Perms.Set("mock-claude", permission.Policy{FilesystemRead: true, FilesystemWrite: true})
+
+	doc, err := dsl.Parse([]byte(`
+version: "1"
+workflow:
+  id: par-panic
+  name: 并行 panic
+nodes:
+  - id: fanout
+    type: parallel
+  - id: bad
+    type: agent
+    agent: panic-agent
+    mode: plan
+  - id: ok
+    type: agent
+    agent: mock-claude
+    mode: plan
+  - id: merge
+    type: merge
+edges:
+  - from: fanout
+    to: bad
+  - from: fanout
+    to: ok
+  - from: bad
+    to: merge
+  - from: ok
+    to: merge
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wf := doc.ToModel()
+	if res := eng.Validate(wf); !res.Valid {
+		t.Fatalf("invalid: %+v", res.Errors)
+	}
+
+	// 能走到这里说明进程没被 panic 杀掉 —— 这就是本用例的核心断言
+	exec, err := eng.Start(context.Background(), wf, "分支 panic", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	final := waitForState(t, eng, exec.ID, model.ExecutionFailed, model.ExecutionCompleted)
+	if final.State != model.ExecutionFailed {
+		t.Fatalf("分支 panic 后执行应 FAILED,实际 %s (%s)", final.State, final.Error)
+	}
+	// 失败原因要指名道姓,而不是一句空错误
+	if !strings.Contains(final.Error, "panic") {
+		t.Errorf("错误信息应说明 panic,实际 %q", final.Error)
+	}
+	if got := final.NodeStates["bad"]; got != string(model.NodeFailed) {
+		t.Errorf("出问题的节点应记 FAILED,实际 %q", got)
+	}
+	// 必须发出 node.failed 事件
+	sawFailed := false
+	for _, ev := range bus.History() {
+		if ev.Type == event.NodeFailed && ev.NodeID == "bad" {
+			sawFailed = true
+		}
+	}
+	if !sawFailed {
+		t.Error("应发出 node.failed 事件(node=bad)")
+	}
+}
