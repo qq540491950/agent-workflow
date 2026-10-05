@@ -1,6 +1,9 @@
 package logx
 
 import (
+	"bytes"
+	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +35,35 @@ func TestMaskKeepsNormalText(t *testing.T) {
 	normal := "workflow completed node=plan duration=42ms"
 	if got := Mask(normal); got != normal {
 		t.Errorf("normal text should be untouched: %q", got)
+	}
+}
+
+// 回归:结构化参数此前不脱敏(api 层把可能含 CLI stderr 的 err 以
+// "error"= 写入日志,token 明文落盘)。
+func TestMaskStructuredArgs(t *testing.T) {
+	var buf bytes.Buffer
+	old := logger.Load()
+	logger.Store(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { logger.Store(old) })
+
+	Warn("http error",
+		"path", "/api/workflows/wf-1/run",
+		"error", errors.New("cli exited: ANTHROPIC_AUTH_TOKEN=sk-ant-leak"),
+		"count", 3,
+		"ok", true,
+	)
+	out := buf.String()
+	if strings.Contains(out, "sk-ant-leak") {
+		t.Errorf("error 参数未脱敏: %s", out)
+	}
+	if !strings.Contains(out, "***") {
+		t.Errorf("期望出现 ***: %s", out)
+	}
+	// 非敏感参数必须原样保留,否则日志失去诊断价值
+	for _, want := range []string{"/api/workflows/wf-1/run", "count=3", "ok=true"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("非敏感参数丢失 %q: %s", want, out)
+		}
 	}
 }
 
