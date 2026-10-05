@@ -197,6 +197,15 @@ func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 
 // ---- Execution ----
 
+// TouchExecutionNode 只更新执行的"当前节点"定位信息(单列 UPDATE,
+// 不触碰其余字段)。用于运行期的轻量检查点:崩溃后 RecoverPending 标
+// FAILED 时,RetryNode 靠 current_node_id 定位失败节点 —— 若运行中从不
+// 落库,该值会停留在 Start 时的空串,重试恒返回 NO_FAILED_NODE。
+func (d *DB) TouchExecutionNode(executionID, nodeID string) error {
+	_, err := d.sql.Exec(`UPDATE executions SET current_node_id=? WHERE id=?`, nodeID, executionID)
+	return wrap(err)
+}
+
 // SaveExecution 插入或更新执行状态(实时保存)。
 // 单条原子 upsert:不可变字段(workflow 绑定/task/变量/created_at)只在
 // 插入时写入,更新时不覆盖。

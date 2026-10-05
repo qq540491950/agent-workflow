@@ -125,6 +125,38 @@ type RunEnv struct {
 	// abort 记录最近一次中断原因(FAILED:node / WAIT_USER / LOOP_LIMIT:node)。
 	// 并行区用它做失败级联;受 execMu 保护。
 	abort string
+	// lastCheckpoint 上次落库检查点的时间(受 execMu 保护)。
+	lastCheckpoint time.Time
+	// OnNodeCheckpoint 在节点开始执行时被调用(节流后)。用于让 runtime
+	// 把"当前在跑哪个节点"落库:此前 CurrentNodeID 只存在内存里,运行中
+	// 崩溃时库中仍是 Start 时的空值,RecoverPending 标 FAILED 之后
+	// RetryNode 恒返回 NO_FAILED_NODE("无法定位失败节点")。
+	// 逐节点写库会显著拖慢执行(每个节点两次事务),故由 runtime 侧按
+	// 时间节流。
+	OnNodeCheckpoint func(nodeID string)
+}
+
+// checkpointInterval 是节点检查点的最小间隔(毫秒)。
+// 与其让 runtime 自己判断,不如由 compiler 在这里做节流:
+// 并行分支会同时调用,去重逻辑放在 SetCurrentNode 之后更自然。
+const checkpointInterval = 2 * time.Second
+
+// maybeCheckpoint 按时间节流地通知 runtime 落库当前节点。
+func (e *RunEnv) maybeCheckpoint(nodeID string) {
+	if e.OnNodeCheckpoint == nil {
+		return
+	}
+	e.execMu.Lock()
+	// 距上次落库不足间隔且不是新节点:跳过。
+	// 换节点时立即落盘(崩溃后要能定位到"卡在哪个节点")。
+	if nodeID == e.Exec.CurrentNodeID &&
+		time.Since(e.lastCheckpoint) < checkpointInterval {
+		e.execMu.Unlock()
+		return
+	}
+	e.lastCheckpoint = time.Now()
+	e.execMu.Unlock()
+	e.OnNodeCheckpoint(nodeID)
 }
 
 // SetCurrentNode 并发安全地更新当前节点。
@@ -500,6 +532,7 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 				st.Set(KeyCurrentNode, node.ID)
 				env.SetCurrentNode(node.ID)
 				env.SetNodeState(node.ID, string(model.NodeRunning))
+				env.maybeCheckpoint(node.ID)
 				env.Bus.Emit(event.New(event.NodeStarted, env.Exec.ID, node.ID, map[string]any{
 					"node": node.ID, "name": node.Name, "type": string(node.Type),
 				}))

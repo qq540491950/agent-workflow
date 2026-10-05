@@ -759,6 +759,30 @@ KeyAbort 流程把执行落库 FAILED,用户看到"哪个节点炸了"。
 `TestPanicInsideParallelBranchDoesNotKillProcess` 断言进程存活、执行 FAILED、
 错误信息含 panic、坏节点记 FAILED、事件已发出。
 
+### #85 真崩溃后无法定位失败节点(P1)
+
+`CurrentNodeID` 只存在内存,运行中从不落库。真崩溃(进程被强杀,**没有任何
+收尾代码执行**)后库中仍是 Start 时的空值 → `RecoverPending` 标 FAILED →
+`RetryNode` 恒返回 `NO_FAILED_NODE`("无法定位失败节点")—— 崩溃恢复后
+无法从失败处重试,用户只能整条重跑。
+
+**为什么现有崩溃模拟用例覆盖不到**:`executor_node_test.go` 的崩溃测试是
+先把执行**跑完**再改库状态,`current_node_id` 早已被正常路径写过;而
+panic 被兜住的路径上 `failExecution → save(exec)` 也会顺手把内存里的
+`CurrentNodeID` 写进去 —— 两条路都掩盖了真崩溃场景。
+**实测(无检查点时)**:节点执行期间 t=80/160/240ms 的 `current_node_id`
+恒为空串,直到 t=320ms panic 被兜住后才变成 "work"。
+
+修复:`RunEnv.maybeCheckpoint`(2s 节流,换节点时立即落盘)+
+`DB.TouchExecutionNode`(单列 UPDATE,不触碰其余字段 —— 逐节点整行写会
+明显拖慢执行)。检查点失败静默:它只是尽力而为的诊断信息,不能反过来
+中断工作流。
+
+`TestCrashMidExecutionStillLocatesFailedNode` 的断言窗口刻意短于 Agent
+存活时间(250ms < 300ms),确保测的是"节点还在跑时"而非"panic 收尾后"。
+**实测有效性**:回退检查点后该用例 FAIL 并报出
+"节点执行期间 current_node_id 未落库"。
+
 ### 回归汇总(轮次 29)
 
 - `gofmt`/`go vet` 干净;`go test -count=1 -race ./...` 全部通过。✅

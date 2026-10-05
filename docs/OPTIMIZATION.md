@@ -164,10 +164,15 @@ float64 陷阱)已经用解码归一拿到了。
    兜住:节点是 panic 的实际发生地,无论跑在执行协程还是 ADK 分支协程都覆盖;
    panic 转成 FAILED outcome 后由既有 KeyAbort 流程落库 FAILED,
    用户看到"哪个节点炸了"而不是整个应用消失。
-2. **执行全程无持久化**:运行中崩溃时 DB 里的 `current_node_id` 仍是
-   Start 时的值(空),`RecoverPending` 标 FAILED 后 `RetryNode` 恒返回
-   `NO_FAILED_NODE`("无法定位失败节点")。现有崩溃模拟用例先把执行跑完
-   再改库状态,覆盖不到真实场景。
+2. ~~**执行全程无持久化**~~ —— **本轮已修(#85)**。`CurrentNodeID` 只存在
+   内存,运行中从不落库:真崩溃(进程被强杀,没有任何收尾代码执行)后库里
+   仍是空值,`RecoverPending` 标 FAILED 之后 `RetryNode` 恒返回
+   `NO_FAILED_NODE`("无法定位失败节点")—— 崩溃恢复后**无法从失败处重试**。
+   实测(无检查点时):节点执行期间 t=80/160/240ms 的 `current_node_id`
+   恒为空串,直到 panic 被兜住后才被 `failExecution → save` 写进去 ——
+   那条路径掩盖了真崩溃场景。新增 `RunEnv.maybeCheckpoint`(2s 节流)+
+   `DB.TouchExecutionNode`(单列 UPDATE,不碰其余字段),节点开始时把
+   "卡在哪个节点"写进库。
 3. **`ADK 契约`待补**:`loopagent` 恰好 N 轮(现有断言只是"至多")、
    `yield` 返回 false 的消费者提前停止语义、分支错误是否回传消费者、
    `session.State` 的 Set(nil)/Get 缺失键/StateDelta 提交路径、

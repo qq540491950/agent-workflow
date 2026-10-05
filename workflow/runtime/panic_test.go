@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	coreagent "agentworkflow/agent"
 	"agentworkflow/agent/mock"
@@ -266,5 +267,107 @@ edges:
 	}
 	if !sawFailed {
 		t.Error("应发出 node.failed 事件(node=bad)")
+	}
+}
+
+// slowThenPanicAgent 先慢跑(给检查点落库留时间),随后 panic —— 模拟
+// "Agent 跑着跑着炸了"的真实场景。
+type slowThenPanicAgent struct{ inner *mock.Agent }
+
+func (a *slowThenPanicAgent) ID() string   { return a.inner.ID() }
+func (a *slowThenPanicAgent) Name() string { return a.inner.Name() }
+func (a *slowThenPanicAgent) Execute(ctx context.Context, req coreagent.AgentRequest) (*coreagent.AgentResponse, error) {
+	select {
+	case <-time.After(300 * time.Millisecond):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	panic("slow agent blew up")
+}
+
+// TestCrashMidExecutionStillLocatesFailedNode 轮次 29(#85):
+// 运行中崩溃后,RetryNode 必须能定位失败节点。
+//
+// 此前 CurrentNodeID 只存在于内存,运行中从不落库 → 崩溃后库中仍是
+// Start 时的空值 → RecoverPending 标 FAILED → RetryNode 恒返回
+// NO_FAILED_NODE("无法定位失败节点")。也就是说崩溃恢复后**无法从失败处
+// 重试**,用户只能整条重跑。
+//
+// 注意:现有的崩溃模拟用例(executor_node_test.go)是把执行**跑完**再改库
+// 状态,current_node_id 早已被正常路径写过,因此覆盖不到真实场景。
+func TestCrashMidExecutionStillLocatesFailedNode(t *testing.T) {
+	repo, err := persistence.Open(filepath.Join(t.TempDir(), "crash.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { repo.Close() })
+	bus := event.NewBus()
+
+	agents := coreagent.NewRegistry()
+	slow := &slowThenPanicAgent{inner: mock.New(mock.Options{ID: "slow-boom"})}
+	if err := agents.Register(slow); err != nil {
+		t.Fatal(err)
+	}
+	skills := skill.NewRegistry()
+	for _, sk := range builtin.All() {
+		if err := skills.Register(sk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eng := NewEngine(agents, skills, permission.NewManager(), bus, git.New(t.TempDir()), repo)
+	eng.Perms.Set("slow-boom", permission.Policy{FilesystemRead: true, FilesystemWrite: true})
+
+	doc, err := dsl.Parse([]byte(`
+version: "1"
+workflow:
+  id: crash-locate
+  name: 崩溃定位
+nodes:
+  - id: work
+    type: agent
+    agent: slow-boom
+    mode: plan
+  - id: done
+    type: skill
+    skill: log
+edges:
+  - from: work
+    to: done
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wf := doc.ToModel()
+	exec, err := eng.Start(context.Background(), wf, "崩溃定位", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// 关键断言点在**节点仍在跑的时候**:真崩溃(进程被强杀)不会有任何
+	// 收尾代码执行,只有运行期检查点能把"卡在哪个节点"写进库。
+	//
+	// 窗口必须比 Agent 的存活时间(300ms)短,否则会等到 panic 收尾之后
+	// 才断言 —— 那时 failExecution → save(exec) 会顺手把内存里的
+	// CurrentNodeID 写进去,测到的就不是真崩溃路径了。
+	// 实测(无检查点时):t=80/160/240ms 期间 current_node_id 恒为空串,
+	// 直到 t=320ms panic 被兜住后才变成 "work"。
+	deadline := time.Now().Add(250 * time.Millisecond)
+	var locatedEarly bool
+	for time.Now().Before(deadline) {
+		if e, err := eng.Repo.GetExecution(exec.ID); err == nil && e.CurrentNodeID == "work" {
+			locatedEarly = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !locatedEarly {
+		t.Error("节点执行期间 current_node_id 未落库 —— 真崩溃(无收尾代码)后" +
+			"无法定位失败节点,RetryNode 会返回 NO_FAILED_NODE")
+	}
+
+	// 兜住 panic 后执行应落 FAILED(这一段与检查点无关,是 #84 的行为)
+	final := waitForState(t, eng, exec.ID, model.ExecutionFailed, model.ExecutionCompleted)
+	if final.State != model.ExecutionFailed {
+		t.Fatalf("应 FAILED,实际 %s", final.State)
 	}
 }

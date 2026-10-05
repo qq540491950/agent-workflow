@@ -392,6 +392,16 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 		MaxIterations: loopLimit(exec.Snapshot),
 		Perms:         runPerms,
 	}
+	// 节点检查点:把"当前在跑哪个节点"落库(节流见 compiler 侧)。
+	// 此前 CurrentNodeID 只存在于内存,运行中崩溃时库中仍是 Start 时的
+	// 空值 → RecoverPending 标 FAILED 后 RetryNode 恒返回
+	// NO_FAILED_NODE("无法定位失败节点"),崩溃恢复后无法从失败处重试。
+	env.OnNodeCheckpoint = func(nodeID string) {
+		// 状态仍写 RUNNING(执行没结束);只更新定位信息。
+		// 失败时静默:检查点只是尽力而为的诊断信息,不能因为它失败
+		// 而中断工作流(真正致命的问题由事件/日志暴露)。
+		_ = e.Repo.TouchExecutionNode(exec.ID, nodeID)
+	}
 
 	root, err := compiler.Compile(env)
 	if err != nil {
