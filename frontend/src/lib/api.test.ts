@@ -16,10 +16,70 @@ vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () => ({
 vi.mock("@bindings/agentworkflow/app/application/executionservice.js", () => ({
   AllEvents: (...a: unknown[]) => exAllEvents(...a),
 }));
-vi.mock("@bindings/agentworkflow/app/application/agentservice.js", () => ({}));
-vi.mock("@bindings/agentworkflow/app/application/skillservice.js", () => ({}));
-vi.mock("@bindings/agentworkflow/app/application/gitservice.js", () => ({}));
-vi.mock("@bindings/agentworkflow/app/application/settingsservice.js", () => ({}));
+// 桌面绑定用 Proxy 桩:被调用的导出自动返回 vi.fn()(默认 undefined),
+// 但**显式断言模块形状**—— 访问一个后端并不存在的绑定(例如
+// ResetConfig 被改名)会在读取属性时立刻抛出,而不是静默得到 undefined
+// 然后让某个用例以"期望 undefined"的姿态通过。
+// 此前把整个模块 mock 成 {}:任何依赖它的用例都会静默失败而非报错,
+// 绑定漂移(后端改了导出名)完全测不出来。
+//
+// exports 列表取自 frontend/bindings/ 下 wails 生成的真实文件,改动后端
+// 导出名时这两个列表会与真实绑定对不上,测试即刻失败。
+function bindingStub(name: string, exports: string[]) {
+  const known = new Set(exports);
+  // Promise.all 会把每个桩当 thenable 处理并读 .then,这类协议属性
+  // 不能当成"未知导出"抛错
+  const protocol = new Set(["then", "catch", "finally"]);
+  return new Proxy(
+    {},
+    {
+      get(_t, prop) {
+        if (typeof prop === "symbol") return undefined;
+        if (protocol.has(prop)) return undefined;
+        if (!known.has(prop)) {
+          throw new Error(
+            `绑定 ${name} 不存在导出 ${prop}(可用: ${[...known].join(", ")})`,
+          );
+        }
+        return vi.fn();
+      },
+      has: () => true,
+    },
+  );
+}
+
+vi.mock("@bindings/agentworkflow/app/application/agentservice.js", () =>
+  bindingStub("AgentService", [
+    "List",
+    "GetConfig",
+    "UpdateConfig",
+    "ResetConfig",
+    "Test",
+    "SetPermission",
+  ]),
+);
+vi.mock("@bindings/agentworkflow/app/application/skillservice.js", () =>
+  bindingStub("SkillService", ["List", "SetEnabled", "Test"]),
+);
+vi.mock("@bindings/agentworkflow/app/application/gitservice.js", () =>
+  bindingStub("GitService", [
+    "Status",
+    "Diff",
+    "Log",
+    "Commit",
+    "SetWorkingDir",
+  ]),
+);
+vi.mock("@bindings/agentworkflow/app/application/settingsservice.js", () =>
+  bindingStub("SettingsService", [
+    "Info",
+    "Update",
+    "Get",
+    "Set",
+    "ExportBackup",
+    "RestoreBackup",
+  ]),
+);
 
 // 每个用例重新加载被测模块,清除 detectMode 的模式缓存。
 async function freshApi() {
@@ -304,5 +364,47 @@ describe("ApiError 保留后端 code/kind/status", () => {
     const err = await api.getWorkflow("x").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect((err as InstanceType<typeof ApiError>).status).toBe(500);
+  });
+});
+
+// ---- C3:绑定形状守卫 ----
+
+// TestBindingStubRejectsUnknownExport 证明桩确实能挡住绑定漂移。
+// 若桩退化成普通空对象(mock 成 {} 的旧做法),访问不存在的导出会
+// 静默得到 undefined,所有依赖它的用例继续"通过",漂移永远测不出来。
+describe("绑定形状守卫", () => {
+  it("访问未声明的导出立刻抛错", async () => {
+    const stub = bindingStub("AgentService", ["List", "ResetConfig"]);
+    expect(typeof stub.List).toBe("function");
+    expect(() => stub.NotAThing).toThrow(/不存在导出 NotAThing/);
+  });
+
+  it("then/catch/finally 等协议属性不触发该守卫(Promise.all 需要)", async () => {
+    const stub = bindingStub("AgentService", ["List"]);
+    expect(stub.then).toBeUndefined();
+    expect(stub.catch).toBeUndefined();
+    expect(stub.finally).toBeUndefined();
+    // Promise.all 能正常吞掉桩
+    await expect(Promise.all([stub])).resolves.toBeDefined();
+  });
+
+  it("导出清单与真实 wails 绑定一致(防止手写清单漂移)", async () => {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    // vitest 的 import.meta.dirname 指向 src/lib,绑定的别名指向
+    // frontend/bindings(见 vite.config.ts),故上溯两级
+    const dir = path.join(import.meta.dirname, "..", "..", "bindings",
+      "agentworkflow", "app", "application");
+    const expected: Record<string, string[]> = {
+      "agentservice": ["GetConfig", "List", "ResetConfig", "SetPermission", "Test", "UpdateConfig"],
+      "skillservice": ["List", "SetEnabled", "Test"],
+      "gitservice": ["Commit", "Diff", "Log", "SetWorkingDir", "Status"],
+      "settingsservice": ["ExportBackup", "Get", "Info", "RestoreBackup", "Set", "Update"],
+    };
+    for (const [file, names] of Object.entries(expected)) {
+      const src = await fs.readFile(path.join(dir, `${file}.ts`), "utf8");
+      const actual = [...src.matchAll(/^export function ([A-Za-z]+)/gm)].map((m) => m[1]).sort();
+      expect(actual, `${file} 的绑定导出清单`).toEqual([...names].sort());
+    }
   });
 });

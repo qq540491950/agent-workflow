@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -33,6 +34,7 @@ export default function Settings() {
   const [level, setLevel] = useState("info");
   const [allowScript, setAllowScript] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -66,6 +68,56 @@ export default function Settings() {
       toast.error((e as Error).message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const exportBackup = async () => {
+    setBackupBusy(true);
+    try {
+      // 桌面模式经 IPC 拿 JSON 文本;浏览器模式走同源下载链接
+      // (桌面 AssetHandler 也把 /api 挂到同源,故链接在两种模式都可用)
+      const text = await api.exportBackupText();
+      const blob = new Blob([text], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `agent-workflow-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("备份已导出(含明文敏感环境变量,请妥善保管)");
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const restoreBackup = async (file: File) => {
+    if (
+      !window.confirm(
+        `从 ${file.name} 恢复?\n\n已存在同 ID 的工作流会被跳过(不覆盖你的修改);` +
+          `不合法的定义会被拒绝并计数。`,
+      )
+    )
+      return;
+    setBackupBusy(true);
+    try {
+      const raw = JSON.parse(await file.text());
+      const r = await api.restoreBackup(raw);
+      const parts = [`恢复工作流 ${r.workflows_restored} 个`];
+      if (r.workflows_skipped > 0) parts.push(`跳过已存在 ${r.workflows_skipped} 个`);
+      if (r.workflows_invalid > 0) parts.push(`拒绝非法 ${r.workflows_invalid} 个`);
+      parts.push(`恢复 Agent 配置 ${r.agent_configs_restored} 个`);
+      if (r.agent_configs_invalid > 0) parts.push(`拒绝非法配置 ${r.agent_configs_invalid} 个`);
+      toast.success(parts.join(","));
+      if (r.workflows_invalid > 0 || r.agent_configs_invalid > 0) {
+        toast.warning("有内容未恢复,详见恢复结果计数");
+      }
+      refresh();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBackupBusy(false);
     }
   };
 
@@ -133,6 +185,45 @@ export default function Settings() {
                 </p>
               </div>
               <Switch checked={allowScript} onCheckedChange={setAllowScript} />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3">
+            <CardTitle className="text-base">备份</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              备份含全部工作流与 Agent 配置。<b className="text-foreground">
+                环境变量以明文导出</b>
+              ,请妥善保管。
+            </p>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={exportBackup} disabled={backupBusy}>
+                导出备份
+              </Button>
+              <label
+                className={cn(
+                  "inline-flex cursor-pointer items-center rounded-md border px-4 py-2 text-sm",
+                  backupBusy
+                    ? "pointer-events-none opacity-50"
+                    : "hover:bg-accent",
+                )}
+              >
+                从文件恢复
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  disabled={backupBusy}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = ""; // 允许重复选同一个文件
+                    if (f) restoreBackup(f);
+                  }}
+                />
+              </label>
             </div>
           </CardContent>
         </Card>

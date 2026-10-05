@@ -1,7 +1,9 @@
 package persistence
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"agentworkflow/event"
@@ -260,5 +262,66 @@ func TestWorkflowVersionHistoryNotSilentlyOverwritten(t *testing.T) {
 	v, err := db.GetWorkflowVersion("wf-demo", 1)
 	if err != nil || v == nil {
 		t.Fatalf("原版本快照丢失: %v %+v", err, v)
+	}
+}
+
+// TestSaveWorkflowSurfacesExistenceQueryError 故障注入(C4):
+// 存在性查询失败必须上抛。此前 `existing` 查询的错误被 `_ =` 丢弃,
+// existing 保持 0 → 对**已存在**的工作流执行 INSERT → 用户看到的是
+// 一句主键冲突,真实根因(查询失败)被彻底掩盖;若判定反了则是静默丢数据。
+// 正常内存 SQLite 无法构造查询失败,只能注入。
+func TestSaveWorkflowSurfacesExistenceQueryError(t *testing.T) {
+	db := openTestDB(t)
+	doc, _ := dsl.Parse([]byte(demoYAML))
+	wf := doc.ToModel()
+	if err := db.SaveWorkflow(wf, false); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	injected := errors.New("injected: disk I/O error")
+	db.SetQueryFault(func(stmt string) error {
+		if strings.Contains(stmt, "SELECT COUNT(1) FROM workflows") {
+			return injected
+		}
+		return nil
+	})
+	t.Cleanup(func() { db.SetQueryFault(nil) })
+
+	err := db.SaveWorkflow(wf, true)
+	if err == nil {
+		t.Fatal("存在性查询失败时 SaveWorkflow 必须报错")
+	}
+	if !strings.Contains(err.Error(), "injected") {
+		t.Errorf("错误应保留真实根因(而非被主键冲突掩盖),实际 %v", err)
+	}
+	// 取消注入后仍能正常保存
+	db.SetQueryFault(nil)
+	got, err := db.GetWorkflow("wf-demo")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if err := db.SaveWorkflow(got, true); err != nil {
+		t.Errorf("取消注入后应恢复正常保存,实际 %v", err)
+	}
+}
+
+// TestSetSettingFailureDoesNotFakeSuccess 故障注入(C4):设置项写入失败
+// 必须上抛,调用方据此保持内存态不变(否则界面提示"已保存"但重启即失效)。
+func TestSetSettingFailureDoesNotFakeSuccess(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.SaveSetting("k", "v1"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	injected := errors.New("injected: database is locked")
+	db.SetQueryFault(func(stmt string) error {
+		if strings.Contains(stmt, "settings") {
+			return injected
+		}
+		return nil
+	})
+	t.Cleanup(func() { db.SetQueryFault(nil) })
+
+	if err := db.SaveSetting("k", "v2"); err == nil {
+		t.Fatal("写入失败必须报错,不能静默成功")
 	}
 }

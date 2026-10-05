@@ -14,6 +14,24 @@ import (
 // DB 封装 SQLite 连接与迁移。
 type DB struct {
 	sql *sql.DB
+	// queryFault 仅测试使用:非 nil 时,在执行敏感语句前先问一次,
+	// 返回非 nil 即让该语句失败。正常内存 SQLite 无法构造
+	// IO/锁/查询失败,而"查询失败被吞 → 走错分支"这类缺陷只有
+	// 注入才能覆盖(见 TestSaveWorkflowSurfacesExistenceQueryError)。
+	// 生产代码不设置该字段。
+	queryFault func(stmt string) error
+}
+
+// SetQueryFault 安装语句级故障注入(仅测试用;传 nil 取消)。
+// 生产路径不应调用。
+func (d *DB) SetQueryFault(fn func(stmt string) error) { d.queryFault = fn }
+
+// checkFault 在敏感语句执行前询问故障注入器。
+func (d *DB) checkFault(stmt string) error {
+	if d.queryFault == nil {
+		return nil
+	}
+	return d.queryFault(stmt)
 }
 
 // Open 打开(或创建)数据库并执行迁移。

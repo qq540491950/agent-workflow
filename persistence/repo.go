@@ -48,6 +48,12 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 		return wrap(err)
 	}
 	var existing int
+	// 存在性查询失败必须上抛(见 TestSaveWorkflowSurfacesExistenceQueryError):
+	// 吞掉后 existing 保持 0,会对**已存在**的工作流走 INSERT 分支,
+	// 用户看到的是一句语焉不详的主键冲突,真实根因被完全掩盖。
+	if err := d.checkFault("SELECT COUNT(1) FROM workflows WHERE id=?"); err != nil {
+		return wrap(err)
+	}
 	if err := tx.QueryRow(`SELECT COUNT(1) FROM workflows WHERE id=?`, wf.ID).Scan(&existing); err != nil {
 		return wrap(err)
 	}
@@ -567,7 +573,14 @@ func (d *DB) GetSetting(key string, out any) error {
 
 func (d *DB) SaveSetting(key string, value any) error {
 	raw, _ := json.Marshal(value)
-	_, err := d.sql.Exec(`INSERT OR REPLACE INTO settings (key,value_json) VALUES (?,?)`, key, string(raw))
+	stmt := `INSERT OR REPLACE INTO settings (key,value_json) VALUES (?,?)`
+	// 注入点:设置项写入失败必须让调用方感知(见
+	// TestSetSettingFailureDoesNotFakeSuccess)——上层据此保持内存态不变,
+	// 不会出现"界面提示已保存、重启即失效"的假成功。
+	if err := d.checkFault(stmt); err != nil {
+		return wrap(err)
+	}
+	_, err := d.sql.Exec(stmt, key, string(raw))
 	return wrap(err)
 }
 

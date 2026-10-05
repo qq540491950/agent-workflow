@@ -411,7 +411,12 @@ export const api = {
   async restoreBackup(backup: Record<string, unknown>): Promise<{
     workflows_restored: number;
     workflows_skipped: number;
+    // 校验不通过而被拒绝的工作流(悬空边/空图等)与 ID 列表
+    workflows_invalid: number;
+    workflows_invalid_ids?: string[];
     agent_configs_restored: number;
+    // 结构非法未落库的 Agent 配置
+    agent_configs_invalid: number;
   }> {
     if ((await detectMode()) === "desktop") {
       return nn(await (await wailsBindings()).st.RestoreBackup(backup as unknown as never));
