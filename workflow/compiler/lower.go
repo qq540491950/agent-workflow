@@ -63,6 +63,10 @@ type NodeOutcome struct {
 type StateAccess interface {
 	Get(key string) (any, bool)
 	Set(key string, val any) error
+	// Delete 清除一次性状态(如人工输入 _user_input)。
+	// ADK State 接口本身没有删除语义,实现约定写入 nil 等价于删除,
+	// 且 Get 对 nil 值返回 false(见 stateAccess.Get)。
+	Delete(key string) error
 }
 
 // stateAccess 基于 ADK InvocationContext 的实现:
@@ -74,7 +78,7 @@ type stateAccess struct {
 
 func (s *stateAccess) Get(key string) (any, bool) {
 	v, err := s.ctx.Session().State().Get(key)
-	if err != nil {
+	if err != nil || v == nil {
 		return nil, false
 	}
 	return v, true
@@ -85,6 +89,15 @@ func (s *stateAccess) Set(key string, val any) error {
 		s.actions.StateDelta[key] = val
 	}
 	return s.ctx.Session().State().Set(key, val)
+}
+
+// Delete 以 nil 覆盖实现删除:ADK 的 session.State 只有 Get/Set/All。
+// 约定 nil 即"不存在",Get 会把它与缺失键同等对待。
+func (s *stateAccess) Delete(key string) error {
+	if s.actions != nil && s.actions.StateDelta != nil {
+		delete(s.actions.StateDelta, key)
+	}
+	return s.ctx.Session().State().Set(key, nil)
 }
 
 // RunEnv 是一次执行运行的编译/执行环境。

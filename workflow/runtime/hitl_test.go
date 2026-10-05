@@ -80,3 +80,75 @@ func TestHumanRejectAbortsExecution(t *testing.T) {
 		t.Errorf("缺少 node.failed 事件: %v", types)
 	}
 }
+
+// twoGateWorkflowYAML 同一条链上串联两个人工闸门,用于验证
+// _user_input 消费后是否被清除(第二个闸门必须再次暂停)。
+const twoGateWorkflowYAML = `
+version: "1"
+workflow:
+  id: two-gates
+  name: Two Gates
+nodes:
+  - id: gate1
+    type: human
+    prompt: "第一道闸门"
+    responses: ["approve", "reject"]
+  - id: mid
+    type: agent
+    agent: mock-claude
+    mode: plan
+  - id: gate2
+    type: human
+    prompt: "第二道闸门"
+    responses: ["approve", "reject"]
+  - id: submit
+    type: skill
+    skill: submit
+    args:
+      message: "feat: done"
+edges:
+  - from: gate1
+    to: mid
+  - from: mid
+    to: gate2
+  - from: gate2
+    to: submit
+`
+
+// 回归:两个串联人工闸门,第一个 approve 后第二个必须再次暂停。
+// StateAccess 此前没有 Delete,_user_input 消费后残留,第二个闸门读到
+// 上一次的输入直接 SUCCESS,人工交互被静默跳过。
+func TestSecondHumanGatePausesAgain(t *testing.T) {
+	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionApproved})
+	wf := loadWf(t, f.engine, twoGateWorkflowYAML)
+
+	exec, err := f.engine.Start(context.Background(), wf, "两道闸门任务", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	exec = waitForState(t, f.engine, exec.ID, model.ExecutionWaitingUser)
+	if exec.CurrentNodeID != "gate1" {
+		t.Fatalf("首个暂停节点 = %q, want gate1", exec.CurrentNodeID)
+	}
+
+	resumed, err := f.engine.Resume(context.Background(), exec.ID, map[string]any{"response": "approve"})
+	if err != nil {
+		t.Fatalf("resume gate1: %v", err)
+	}
+	second := waitForState(t, f.engine, resumed.ID, model.ExecutionWaitingUser, model.ExecutionCompleted)
+	if second.State == model.ExecutionCompleted {
+		t.Fatalf("第二个闸门未暂停即完成(残留 _user_input 被复用): current=%s", second.CurrentNodeID)
+	}
+	if second.CurrentNodeID != "gate2" {
+		t.Fatalf("第二次暂停节点 = %q, want gate2", second.CurrentNodeID)
+	}
+
+	resumed2, err := f.engine.Resume(context.Background(), exec.ID, map[string]any{"response": "approve"})
+	if err != nil {
+		t.Fatalf("resume gate2: %v", err)
+	}
+	final := waitForState(t, f.engine, resumed2.ID, model.ExecutionCompleted)
+	if final.NodeStates["gate2"] != string(model.NodeSuccess) {
+		t.Errorf("gate2 状态 = %s, want SUCCESS", final.NodeStates["gate2"])
+	}
+}

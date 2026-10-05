@@ -454,6 +454,11 @@ func (e *Engine) runHumanNode(ctx context.Context, env *compiler.RunEnv, node *m
 	if ui, ok := st.Get(compiler.KeyUserInput); ok && ui != nil {
 		if m, ok := ui.(map[string]any); ok && len(m) > 0 {
 			raw, _ := json.Marshal(m)
+			// 一次性状态:消费后立即清除。此前 _user_input 一直留在会话
+			// 状态里(StateAccess 也没有 Delete),同一执行内的第二个
+			// human 闸门会读到上一次的输入直接 SUCCESS,人工交互被静默
+			// 跳过;它还会随 StateData 持久化并在恢复时回放。
+			_ = st.Delete(compiler.KeyUserInput)
 			// reject 是显式否决,必须中止工作流。此前无论什么响应都返回
 			// NodeSuccess,拒绝后后续 execute/fix 照常执行、执行最终标
 			// COMPLETED(与路由决策路径 lower.go 的 reject→KeyAbort 语义

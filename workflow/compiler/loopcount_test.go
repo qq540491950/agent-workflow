@@ -54,11 +54,19 @@ type fakeState struct{ data map[string]any }
 
 func (f *fakeState) Get(key string) (any, bool) {
 	v, ok := f.data[key]
-	return v, ok
+	if !ok || v == nil { // 与 stateAccess 一致:nil 视为不存在
+		return nil, false
+	}
+	return v, true
 }
 
 func (f *fakeState) Set(key string, val any) error {
 	f.data[key] = val
+	return nil
+}
+
+func (f *fakeState) Delete(key string) error {
+	delete(f.data, key)
 	return nil
 }
 
