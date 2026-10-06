@@ -151,17 +151,22 @@ func answeredOutcome(st compiler.StateAccess, nodeID string) (compiler.NodeOutco
 	out.State = model.NodeSuccess
 	out.Summary = strings.TrimSpace(prev.Summary + " (用户已答复,复用原响应)")
 	// Decision 必须按用户答复**重新映射**,不能沿用 WAIT_USER 之前的值。
+	//
 	// invokeAgent 构造 outcome 时总会填 Decision,而 status=WAIT_USER 与
 	// decision=REJECTED 可以同时成立(Agent 一边要求人工确认、一边给了
-	// 倾向性结论)。若照搬旧值,用户点 Approve 之后 lower.go 仍会把
-	// KeyDecision 写成 REJECTED,路由走回拒绝分支 —— 用户的批准被无视。
-	// 路由级恢复路径(routeAgent 的 "0. 恢复消费")已显式做同样的映射,
-	// 两条恢复路径必须一致。
+	// 倾向性结论 —— 真实场景很常见)。若照搬,用户点 Approve 之后
+	// lower.go 的 case NodeSuccess 仍会把 KeyDecision 写成 REJECTED,
+	// 路由走回拒绝分支 —— 用户的批准被无视。
+	//
+	// 注意与 routeAgent 的恢复消费路径(那里 case "approve" 也会写
+	// DecisionApproved)的关系:那条路径只在**决策节点**上跑,会抢先覆盖;
+	// 本函数覆盖的是**非路由**的普通节点 —— 那条链上 KeyDecision 的唯一
+	// 来源就是这里。两条路径现已一致。
 	switch strings.ToLower(strings.TrimSpace(userResp)) {
 	case "approve":
 		out.Decision = string(coreagent.DecisionApproved)
 	case "continue":
-		// 继续 = 清空决策,让路由重新评估(与 routeAgent 恢复路径一致)
+		// 继续 = 清空决策,让下游路由重新评估
 		out.Decision = ""
 	case "reject":
 		// 上面的 reject 分支已返回,这里到不了

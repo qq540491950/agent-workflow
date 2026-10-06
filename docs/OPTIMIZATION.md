@@ -166,9 +166,11 @@ float64 陷阱)已经用解码归一拿到了。
   纯 2s 定时。后果:快速链里第 2..N 个节点都不落库,崩溃时
   `current_node_id` 仍指向链首,`RetryNode` 从错误位置重试 —— 恰好把
   #85 打了折扣。改用独立的 `lastCheckpointNode` 字段。
-- **#87 Approve 不重新映射决策**:`answeredOutcome` 照搬 WAIT_USER 之前的
-  Decision,而路由级恢复路径早已显式映射。*如实说明*:当前 `NodeWaiting`
-  分支并不写 `KeyDecision`,所以照搬暂不出错 —— 这是纵深防御。
+- **#87 Approve 不重新映射决策(可真实触发)**:`status=WAIT_USER` 与
+  `decision=REJECTED` 可同时成立(Agent 一边要求人工确认、一边给倾向性
+  结论),而 `answeredOutcome` 照搬该决策 —— 用户点 Approve 后
+  `KeyDecision` 仍是 REJECTED,路由走回拒绝分支,用户的批准被无视。改为按
+  答复重新映射,与 routeAgent 的恢复消费路径一致。
 
 **一条约定违反(经人工裁决)**:并行不收敛原本只告警就落 COMPLETED,
 与硬性约定 #14 逐字冲突(约定点名"并行不收敛"必须显式失败)。已改为

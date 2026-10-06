@@ -867,12 +867,22 @@ stderr 线索。
   **实测有效性**:回退后报出 n2/n3/n4 三个节点全丢(实际只观察到
   `{n1, tail}`)。注:断言必须在执行中做 —— 收尾的 `save(exec)` 会把内存值
   一并写入,执行结束后两种实现都是 `tail`,测不出差异。
-- **#87 Approve 不重新映射决策(P1,纵深防御)**:`answeredOutcome` 用
-  `out := prev` 照搬 WAIT_USER 之前的 Decision,而路由级恢复路径早就显式
-  做了 approve → `DecisionApproved` 的映射,两条路径不一致。
-  *如实说明*:当前 `NodeWaiting` 分支并不写 `KeyDecision`,所以 `prev.Decision`
-  实际为空、照搬暂不出错;这是防止将来行为变化时用户的批准被无视。
-  两条路径现已一致,`TestApproveOverridesPendingDecision` 锁定该不变式。
+- **#87 Approve 不重新映射决策(P1)**:Agent 返回 `WAIT_USER` 的同时可以带
+  决策(`invokeAgent` 总会填 `Decision`,而 `status=WAIT_USER` 与
+  `decision=REJECTED` 可同时成立 —— 一边要求人工确认、一边给倾向性结论)。
+  `answeredOutcome` 用 `out := prev` 照搬该决策,用户点 Approve 之后
+  `lower.go` 的 `case NodeSuccess` 仍把 `KeyDecision` 写成 REJECTED,路由走回
+  拒绝分支 —— **用户的批准被无视**。改为按答复重新映射
+  (approve→APPROVED / continue→清空 / reject→FAILED),与 routeAgent 的恢复
+  消费路径一致。
+
+  *测试打错位置,第一版没有牙齿*:最初把 WAIT_USER 放在**路由决策节点**上,
+  而 `routeAgent` 的恢复消费路径会抢先写 `KeyDecision=APPROVED`,无论
+  `answeredOutcome` 写什么都不影响结果。改为**非路由**的普通链 ——
+  该链上 `KeyDecision` 的唯一来源就是 `answeredOutcome`。
+  **实测有效性**:删掉整个 `switch` 后两个用例都 FAIL,分别报出
+  `decision = "REJECTED"`(approve 被无视)与
+  `Continue 后决策应被清空…实际 "REJECTED"`。
 
 ### 约定违反(人工裁决后修)
 

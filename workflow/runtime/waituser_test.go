@@ -379,16 +379,17 @@ func (a *decisionWaitAgent) Execute(ctx context.Context, req coreagent.AgentRequ
 // TestApproveOverridesPendingDecision 轮次 31(#87):用户 Approve 后,
 // 决策必须被 APPROVED 重新映射,不能沿用 WAIT_USER 之前的值。
 //
-// 路由级恢复路径(routeAgent 的"0. 恢复消费")早就显式做了 approve →
-// DecisionApproved 的映射,节点级路径此前却 `out := prev` 照搬旧值。
+// **上一版测试没有牙齿**:它把 WAIT_USER 放在**路由决策节点**上,而
+// routeAgent 的恢复消费路径(lower.go 的 "0. 恢复消费" case "approve")
+// 会抢先 `st.Set(KeyDecision, DecisionApproved)` —— 无论
+// answeredOutcome 写什么都不影响最终结果,删掉整个 switch 用例照样通过。
 //
-// **当前代码里 NodeWaiting 分支不写 KeyDecision**,所以 prev.Decision 实际
-// 为空、照搬也不会出错 —— 这是纵深防御:一旦将来有人在 NodeWaiting 分支
-// 里也写入决策(或 invokeAgent 调整 Decision 的填充时机),照搬就会让用户
-// 的批准被无视。本用例锁定"无论上游怎么变,答复都必须重新映射"这条不变式。
+// 改为**非路由**的普通链:gate 节点直接 WAIT_USER(不构成决策点,
+// 后面是无条件链),这样 KeyDecision 的唯一来源就是 answeredOutcome。
 func TestApproveOverridesPendingDecision(t *testing.T) {
 	ag := &decisionWaitAgent{}
 	eng, _, _ := newWaitUserEngineWithAgent(t, ag)
+	// 无条件链:gate 不构成决策点,不存在 routeAgent 恢复消费路径
 	wf := loadWfYAML(t, eng, `
 workflow:
   id: approve-wins
@@ -398,19 +399,12 @@ nodes:
     type: agent
     agent: decision-wait
     mode: review
-  - id: approved_path
-    type: skill
-    skill: log
-  - id: rejected_path
+  - id: next
     type: skill
     skill: log
 edges:
   - from: gate
-    to: approved_path
-    condition: decision == "APPROVED"
-  - from: gate
-    to: rejected_path
-    condition: decision == "REJECTED"
+    to: next
 `)
 	exec, err := eng.Start(context.Background(), wf, "批准任务", nil)
 	if err != nil {
@@ -425,18 +419,54 @@ edges:
 	if final.State != model.ExecutionCompleted {
 		t.Fatalf("应 COMPLETED,实际 %s (%s)", final.State, final.Error)
 	}
-	// 用户点了 Approve,就必须走 APPROVED 分支
-	if final.NodeStates["approved_path"] != string(model.NodeSuccess) {
-		t.Errorf("Approve 后应走 APPROVED 分支,实际节点状态 %v —— "+
-			"恢复路径照搬了 WAIT_USER 之前的 REJECTED 决策,用户的批准被无视",
-			final.NodeStates)
-	}
-	if _, ran := final.NodeStates["rejected_path"]; ran {
-		t.Errorf("Approve 后不应走 REJECTED 分支,实际 %v", final.NodeStates)
-	}
-	// 决策键也必须是 APPROVED
+	// 关键:KeyDecision 的唯一来源是 answeredOutcome,不能是暂停前的 REJECTED
 	if got, _ := final.StateData[compiler.KeyDecision].(string); got != "APPROVED" {
-		t.Errorf("StateData[decision] = %q,应为 APPROVED", got)
+		t.Errorf("StateData[decision] = %q,应为 APPROVED —— "+
+			"恢复路径照搬了 WAIT_USER 之前的 REJECTED,用户的批准被无视", got)
+	}
+	// 且不应带旧决策的其它痕迹
+	if got, _ := final.StateData[compiler.KeyStatus].(string); got != "success" {
+		t.Errorf("StateData[status] = %q,应为 success", got)
+	}
+}
+
+// TestContinueClearsPendingDecision 对称验证:Continue 应**清空**决策
+// 让路由重新评估(与 routeAgent 恢复路径的 default 分支一致),
+// 而不是沿用暂停前的值。
+func TestContinueClearsPendingDecision(t *testing.T) {
+	ag := &decisionWaitAgent{}
+	eng, _, _ := newWaitUserEngineWithAgent(t, ag)
+	wf := loadWfYAML(t, eng, `
+workflow:
+  id: continue-clears
+  name: 继续则清空
+nodes:
+  - id: gate
+    type: agent
+    agent: decision-wait
+    mode: review
+  - id: next
+    type: skill
+    skill: log
+edges:
+  - from: gate
+    to: next
+`)
+	exec, err := eng.Start(context.Background(), wf, "继续任务", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForState(t, eng, exec.ID, model.ExecutionWaitingUser)
+	if _, err := eng.Resume(context.Background(), exec.ID, map[string]any{"response": "continue"}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	final := waitForState(t, eng, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
+	if final.State != model.ExecutionCompleted {
+		t.Fatalf("应 COMPLETED,实际 %s (%s)", final.State, final.Error)
+	}
+	if got, _ := final.StateData[compiler.KeyDecision].(string); got != "" {
+		t.Errorf("Continue 后决策应被清空(让路由重新评估),实际 %q —— "+
+			"沿用了暂停前的 REJECTED", got)
 	}
 }
 
