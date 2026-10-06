@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -501,5 +502,124 @@ edges:
 				"换节点未立即落盘,节流退化成纯 2s 定时,崩溃后会从链首重试",
 				want, seen)
 		}
+	}
+}
+
+// panickingSkill 调用即 panic,用于验证 Skill 节点跑在**并行分支内**时
+// 进程依然存活。
+//
+// 如实说明:这一路径实际已被 runNodeGuarded 覆盖(实测关掉 lower 出口的
+// 兜底层,本用例仍通过)。保留它是因为"Skill 在并行分支内 panic"是最容易
+// 触发的真实场景,值得持续守住;lower 出口那层兜底覆盖的是本用例触不到的
+// 代码(结构体 Agent 内部的表达式求值等),属纵深防御。
+type panickingSkill struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *panickingSkill) ID() string          { return "panic-skill" }
+func (s *panickingSkill) Name() string        { return "Panic Skill" }
+func (s *panickingSkill) Description() string { return "test" }
+
+func (s *panickingSkill) Execute(ctx context.Context, req skill.SkillRequest) (*skill.SkillResponse, error) {
+	s.mu.Lock()
+	s.calls++
+	n := s.calls
+	s.mu.Unlock()
+	if n >= 1 {
+		panic("skill blew up on call " + itoaForTest(n))
+	}
+	return &skill.SkillResponse{Status: "SUCCESS", Output: "ok"}, nil
+}
+
+func itoaForTest(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}
+
+// TestPanicInsideParallelBranchSkillIsContained 验证结构体 Agent 的 panic
+// 也被兜住:Skill 节点跑在并行分支内时 panic,进程必须存活。
+func TestPanicInsideParallelBranchSkillIsContained(t *testing.T) {
+	repo, err := persistence.Open(filepath.Join(t.TempDir(), "sk.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { repo.Close() })
+	bus := event.NewBus()
+	bus.KeepHistory = true
+
+	agents := coreagent.NewRegistry()
+	if err := agents.Register(mock.New(mock.Options{ID: "mock-claude"})); err != nil {
+		t.Fatal(err)
+	}
+	skills := skill.NewRegistry()
+	for _, sk := range builtin.All() {
+		if err := skills.Register(sk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := skills.Register(&panickingSkill{}); err != nil {
+		t.Fatal(err)
+	}
+	eng := NewEngine(agents, skills, permission.NewManager(), bus, git.New(t.TempDir()), repo)
+	eng.Perms.Set("mock-claude", permission.Policy{FilesystemRead: true, FilesystemWrite: true})
+	eng.Perms.Set("workflow", permission.Policy{FilesystemRead: true, GitRead: true, GitCommit: true})
+
+	doc, err := dsl.Parse([]byte(`
+version: "1"
+workflow:
+  id: par-skill-panic
+  name: 并行 skill panic
+nodes:
+  - id: fanout
+    type: parallel
+  - id: ok
+    type: agent
+    agent: mock-claude
+    mode: plan
+  - id: boom
+    type: skill
+    skill: panic-skill
+  - id: merge
+    type: merge
+edges:
+  - from: fanout
+    to: ok
+  - from: fanout
+    to: boom
+  - from: ok
+    to: merge
+  - from: boom
+    to: merge
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wf := doc.ToModel()
+	if res := eng.Validate(wf); !res.Valid {
+		t.Fatalf("invalid: %+v", res.Errors)
+	}
+
+	// 进程存活即核心断言
+	exec, err := eng.Start(context.Background(), wf, "skill panic", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	final := waitForState(t, eng, exec.ID, model.ExecutionFailed, model.ExecutionCompleted)
+	if final.State != model.ExecutionFailed {
+		t.Errorf("Skill panic 后执行应 FAILED,实际 %s (%s)", final.State, final.Error)
+	}
+	if !strings.Contains(final.Error, "panic") && !strings.Contains(final.Error, "blown") {
+		t.Logf("错误信息: %q", final.Error)
+	}
+	if final.NodeStates["boom"] != string(model.NodeFailed) {
+		t.Errorf("出问题的 Skill 节点应记 FAILED,实际 %q", final.NodeStates["boom"])
 	}
 }

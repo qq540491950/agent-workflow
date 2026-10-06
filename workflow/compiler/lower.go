@@ -275,6 +275,75 @@ func (l *lowerer) uniqueName(base string) string {
 
 // lower 将 IR 计划降级为 ADK Agent。
 func (l *lowerer) lower(p *Plan, name string) (agent.Agent, error) {
+	a, err := l.lowerInner(p, name)
+	if err != nil {
+		return nil, err
+	}
+	// 出口统一包一层 panic 兜底。
+	//
+	// 为什么不能在 engine.execute 一处了事:并行分支由 ADK 在自己的 goroutine
+	// 里跑(`errgroup.Go`),而 recover() 在 adk 生产代码中零命中 —— 分支内的
+	// panic 绕过执行协程的兜底直接杀进程(#84)。runNodeGuarded 只包住了
+	// "节点执行"这一个点,但分支内跑的**结构体 Agent**(routeAgent 的条件
+	// 求值、loopGuard 的 expr 运行、loopResetter 的状态操作)同样可能 panic
+	// (如畸形表达式、损坏的状态快照),它们不在 runNodeGuarded 覆盖范围内。
+	//
+	// 在 lower() 出口统一包装,保证降级出来的每一棵子树都被兜住 ——
+	// 新增 Agent 类型时也不会漏。
+	return l.guardAgent(a, name), nil
+}
+
+// guardAgent 给已降级的 Agent 包一层 panic 兜底(纵深防御)。
+//
+// 已知它**不替代** runNodeGuarded:节点执行那一步(Agent/Skill 适配器
+// 调用)仍由 runNodeGuarded 覆盖,实测关掉本层后 Skill 路径的 panic 依旧
+// 被兜住。本层覆盖的是 runNodeGuarded **之外**的代码 ——
+// routeAgent/loopGuard/switchAgent/loopResetter 里的表达式求值、状态操作等,
+// 理论上也能 panic(畸形表达式、损坏的状态快照)。它们没有实测到 panic,
+// 故这是一层为"未来新增/修改的结构体 Agent"准备的兜底,而不是已证的缺陷修复。
+//
+// 放在 lower() 出口而非逐个 Agent 包:新增 Agent 类型时不会漏。
+func (l *lowerer) guardAgent(a agent.Agent, name string) agent.Agent {
+	env := l.env
+	guarded, err := agent.New(agent.Config{
+		Name:        l.uniqueName(name + ".guard"),
+		Description: "panic 兜底",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				defer func() {
+					if r := recover(); r != nil {
+						msg := fmt.Sprintf("子图 %s 执行 panic: %v", name, r)
+						logx.Error("子图 panic(已兜底)", "execution", env.Exec.ID,
+							"agent", name, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+						env.Bus.Emit(event.New("runtime.error", env.Exec.ID, "", map[string]any{
+							"error": msg, "agent": name,
+						}))
+						// 中止整条执行:子图没跑完,后续节点不应继续。
+						// 置 KeyAbort 让 engine 落 FAILED 并带上原因。
+						env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, "", map[string]any{
+							"error": msg,
+						}))
+						env.SetAbort("FAILED:" + name)
+					}
+				}()
+				for ev, err := range a.Run(ctx) {
+					if !yield(ev, err) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		// 兜底层自身构造失败(理论上只有 Name 冲突):退回原 Agent,
+		// 不能因为"加一层保护"反而让工作流跑不起来。
+		return a
+	}
+	return guarded
+}
+
+// lowerInner 是 lower 的实际降级逻辑(panic 兜底在 lower 出口统一包)。
+func (l *lowerer) lowerInner(p *Plan, name string) (agent.Agent, error) {
 	name = l.uniqueName(name)
 	switch p.Kind {
 	case KindSingle:

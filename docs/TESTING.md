@@ -906,6 +906,15 @@ stderr 线索。
   复用它无害)。
 - **#93 `agent/output.go` 手写 `itoa`**:同文件已 import 标准库,无理由自造
   轮子(且 `MinInt64` 取负会溢出)。改用 `strconv.FormatInt`。
+- **#94 `lower()` 出口补结构体 Agent 的 panic 兜底(纵深防御,非已证缺陷)**:
+  `runNodeGuarded` 只包住"节点执行"这一个点;`routeAgent` / `loopGuard` /
+  `switchAgent` / `loopResetter` 里的表达式求值、状态操作同样可能 panic,
+  而它们在并行分支内运行时不受 `engine.execute` 的兜底保护(ADK 的
+  `errgroup.Go` 起了独立 goroutine,`recover()` 在 adk 生产代码中零命中)。
+  **如实说明**:这一层**没有实测到 panic** —— 实测关掉它之后,Skill 在
+  并行分支内 panic 的用例仍通过(该路径已被 runNodeGuarded 覆盖)。它是给
+  "未来新增/修改的结构体 Agent"准备的兜底,放在 `lower()` 出口以保证新增
+  Agent 类型时不会漏。
 
 ### 回归汇总(轮次 31)
 
@@ -917,7 +926,7 @@ stderr 线索。
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
-| 31 | 复审最近三轮:修自己引入的缺陷 + 约定违反 + 恒真测试清理 | ✅ | #86 检查点节流是死代码 #87 Approve 不重映射决策 #88 并行不收敛违反约定 #14 #89 nil 测试恒真 #90 契约测试不断言 #91 死代码半成品 #92 mock runs 无界增长 #93 自造 itoa |
+| 31 | 复审最近三轮:修自己引入的缺陷 + 约定违反 + 恒真测试清理 | ✅ | #86 检查点节流是死代码 #87 Approve 不重映射决策 #88 并行不收敛违反约定 #14 #89 nil 测试恒真 #90 契约测试不断言 #91 死代码半成品 #92 mock runs 无界增长 #93 自造 itoa #94 结构体 Agent panic 兜底(纵深防御) |
 | 30 | 补齐剩余 ADK 契约 + pi 同形替身冒烟 | ✅ | ADK 契约 4→9 条(恰好 N 轮/Escalate 即退/提前停止 drain/分支错误回传/Set(nil)/temp: 前缀)+ pi 子进程层冒烟 6 条 |
 | --- | --- | --- | --- |
 | 1 | 后端全量 go test/vet/build | ✅ 全部通过 | — |

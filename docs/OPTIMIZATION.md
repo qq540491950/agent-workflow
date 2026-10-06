@@ -155,6 +155,36 @@ float64 陷阱)已经用解码归一拿到了。
 返回 `CLAUDE_TIMEOUT` 且不挂死(验证进程组击杀 + WaitDelay)。
 无 CLI / 无凭据 / 无网络时全部 skip,不阻塞 CI。
 
+### 轮次 31:复审发现并已处理
+
+对最近三轮改动做了"改 A 坏 B"复审(只读审计 diff),13 条结论逐条复核。
+**其中两条是本项目自己引入的**:
+
+- **#86 检查点节流写成了死代码**:`maybeCheckpoint` 用
+  `Exec.CurrentNodeID` 判断"是否换了节点",但调用点在它之前一行就调了
+  `SetCurrentNode(nodeID)` —— 两者恒等,这条分支永远走不到,节流退化成
+  纯 2s 定时。后果:快速链里第 2..N 个节点都不落库,崩溃时
+  `current_node_id` 仍指向链首,`RetryNode` 从错误位置重试 —— 恰好把
+  #85 打了折扣。改用独立的 `lastCheckpointNode` 字段。
+- **#87 Approve 不重新映射决策**:`answeredOutcome` 照搬 WAIT_USER 之前的
+  Decision,而路由级恢复路径早已显式映射。*如实说明*:当前 `NodeWaiting`
+  分支并不写 `KeyDecision`,所以照搬暂不出错 —— 这是纵深防御。
+
+**一条约定违反(经人工裁决)**:并行不收敛原本只告警就落 COMPLETED,
+与硬性约定 #14 逐字冲突(约定点名"并行不收敛"必须显式失败)。已改为
+落 FAILED,错误写明"请把分支连到同一个 merge 节点"。
+
+**恒真测试清理**:`TestNilStateDoesNotBecomeLiteralNil` 断言的
+`node_states_json` 根本不经过 `syncNodeStates` —— 无论 #83 修没修都通过,
+等于没为 #83 提供任何保护;两个 ADK 契约测试只 `t.Log` 不 `t.Error`,
+意味着关键契约回归不会让 CI 变红。恒真的测试比没有测试更危险(虚假安全感),
+已全部改为真断言并**实测有效性**。
+
+**死代码清理**:`Plan.Unconverged` 只写不读;`KindWarning` 携带的
+`Branches` 无人读取却带假注释;`logx` 有 `MaskMap` 幽灵注释;`runNodeGuarded`
+把同一对象既当 receiver 又当参数;`mock.Agent.runs` 无界增长(加 256 上限);
+`agent/output.go` 自造 `itoa`(改 `strconv.FormatInt`)。
+
 ### 仍然开放(需单独立项,不属于已登记缺陷)
 
 1. ~~**分支 goroutine 的 panic 没有兜底**~~ —— **本轮已修(#84)**。ADK 的
