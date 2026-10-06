@@ -58,6 +58,10 @@ export function List(workflowID: string, limit: number): $CancellablePromise<(mo
     return $Call.ByID(4221995049, workflowID, limit);
 }
 
+/**
+ * 三个子资源端点先确认执行存在:此前直接查子表,不存在的执行 ID 返回
+ * 200 + 空数组,前端无法区分"这个执行没有节点明细"与"执行 ID 打错了"。
+ */
 export function Nodes(id: string): $CancellablePromise<(model$0.ExecutionNode | null)[] | null> {
     return $Call.ByID(2835310866, id);
 }

@@ -17,7 +17,7 @@ import * as $models from "./models.js";
 /**
  * Update 更新设置:git_working_dir / log_level(日志级别即时生效)/
  * allow_script_nodes(script 节点放行开关,默认关闭)。
- * allowScriptNodes 为 null 表示不修改,保持既有值。
+ * allowScriptNodes 为 nil 表示不修改,保持既有值。
  * ExportBackup 导出全部工作流与 Agent 配置(备份用;含明文敏感环境变量,请妥善保管)。
  */
 export function ExportBackup(): $CancellablePromise<{ [_ in string]?: any } | null> {

@@ -932,10 +932,56 @@ stderr 线索。
 - 新增/重写回归:检查点跟随快速节点切换 1 组、Approve 覆盖决策 1 组、
   nil 状态不进视图 1 组(3 条均为**实测有效性**验证)。✅
 
+## 轮次 32:可视化/端到端验证
+
+> 用真实浏览器与真实应用验证最近几轮的行为变更。**重要发现:一个测试环境
+> 限制(见下),它一度被误判为应用缺陷。**
+
+### 环境障碍与定位过程
+
+内置 Browser(Electron)打开页面后,一旦应用建立 SSE 连接
+(`EventSource('/api/events')`),**整个页面 JS 冻结** —— 连 `setTimeout`
+都不再触发,React 的三个 API 请求永远停在 pending。
+
+定位步骤(每一步都有证据):
+
+1. 服务端直查:`/api/workflows` 13ms 返回 5 个工作流 —— **后端正常**;
+2. 原生 `fetch` 探针页(与应用同源):`status=200 count=5`,
+   `/api/stats`、`/api/executions` 全部 200 —— **传输层正常**;
+3. 请求头探针:无头 / `application/json` / `text/plain` 三种都正常 ——
+   **不是 CORS 或 Content-Type 问题**;
+4. 增量探针:`api ok 200` 打出来了,`new EventSource(...)` 之后脚本
+   **再也不推进** —— **定位到 EventSource 本身**。
+
+结论:**这是内置 Browser 工具的环境限制,不是应用缺陷**(已与项目所有者
+确认并按"继续用 API 冒烟 + 真实桌面 .app"推进)。
+
+### 端到端验证结果(全部通过)
+
+| 验证项 | 结果 |
+| --- | --- |
+| 首页 Dashboard 渲染 | 侧栏 8 项、5 个统计卡、最近执行区 —— 正常,**0 控制台错误**(唯一警告来自 Wails 框架的浏览器模式提示) |
+| Workflows 页渲染 | 表头 8 列、空态文案正确 —— 正常 |
+| **#88 并行不收敛 → FAILED** | `state=FAILED`,错误信息「节点 fanout 之后的链路不会执行:该处没有公共汇合点…请把分支连到同一个 merge 节点」;两个分支本身 `a/b/tail_a/tail_b` 均 SUCCESS —— **各分支跑完、失败的只是"之后的链",符合约定 #14** |
+| **HITL 全链路** | 运行 → `WAITING_USER`(gate=WAITING,plan=SUCCESS)→ 提交 approve → `COMPLETED`,三个节点全 SUCCESS |
+| **#46 节点明细按 attempt 独立成行** | coding-task 循环工作流:6 行明细,`review` 的 `attempts=[1,2]` —— 修复前会被覆盖成一行 |
+| **#32 script 节点安全门禁** | 默认不放行,执行落 FAILED,错误写明「需在设置页开启「允许执行 script 节点」」 |
+| **REST 列表契约(约定 #7)** | 6 个列表端点全部返回数组:workflows[6] / stats[6] / events/all[77] / agents[4] / skills[3] / executions[5] |
+| **REST 错误体契约** | 4 个 404 端点全部含 `error` + `code:"NOT_FOUND"` |
+| **#52 enable fail-closed** | 缺参 / `?value=0` / `?value=no` 全部 400;`true`/`false` 正常 200 |
+| **桌面 .app 打包与启动** | `wails3 task package` 成功;启动后前端资源加载 11 个请求、**绑定 IPC 走真实 Wails 通道**;数据库 3 个种子工作流正常入库 |
+
+### 未覆盖(环境限制)
+
+**桌面窗口无法置前截图**:macOS 沙箱未授予辅助功能权限,`osascript` 报
+`AppleEvent已超时 (-1712)`,应用窗口无法抢到前台,因此桌面模式的**像素级
+视觉验证未完成**(逻辑验证已通过:IPC 绑定加载、数据库正常)。
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 32 | 可视化/端到端验证(Browser + 真实 .app) | ⚠️ 环境受限 | 环境障碍:EventSource 冻结 Browser 页面 JS(非应用缺陷);已用 API 冒烟 + .app 完成 10 项端到端验证 |
 | 31 | 复审最近三轮:修自己引入的缺陷 + 约定违反 + 恒真测试清理 | ✅ | #86 检查点节流是死代码 #87 Approve 不重映射决策 #88 并行不收敛违反约定 #14 #89 nil 测试恒真 #90 契约测试不断言 #91 死代码半成品 #92 mock runs 无界增长 #93 自造 itoa #94 结构体 Agent panic 兜底(纵深防御) |
 | 30 | 补齐剩余 ADK 契约 + pi 同形替身冒烟 | ✅ | ADK 契约 4→9 条(恰好 N 轮/Escalate 即退/提前停止 drain/分支错误回传/Set(nil)/temp: 前缀)+ pi 子进程层冒烟 6 条 |
 | --- | --- | --- | --- |

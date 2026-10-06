@@ -20,6 +20,7 @@ export function List(): $CancellablePromise<skill$0.DTO[] | null> {
 
 /**
  * SetEnabled 启用/禁用 Skill(禁用后运行时拒绝调用)。
+ * 先落库再改内存:此前先改内存,持久化失败时界面显示已保存但重启即失效。
  */
 export function SetEnabled(id: string, enabled: boolean): $CancellablePromise<void> {
     return $Call.ByID(1620570695, id, enabled);
