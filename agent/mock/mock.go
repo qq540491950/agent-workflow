@@ -135,6 +135,12 @@ func (a *Agent) ResetMock() {
 	a.summaries = map[string][]string{}
 }
 
+// maxRunSpaces 限制按执行隔离的计数空间数量。
+// 桌面应用是长生命周期进程,每次执行永久留一个 runState 会无界增长
+// (这是 ExecutionID 隔离引入的新问题,原共享空间不存在)。
+// 超限后按 FIFO 复用最旧的空间 —— 那个执行早已结束,复用它无害。
+const maxRunSpaces = 256
+
 // stateFor 返回本次调用应使用的计数空间。
 func (a *Agent) stateFor(executionID string) *runState {
 	if executionID == "" {
@@ -143,6 +149,13 @@ func (a *Agent) stateFor(executionID string) *runState {
 	}
 	if rs, ok := a.runs[executionID]; ok {
 		return rs
+	}
+	// 超限:丢弃最旧的一个空间(FIFO),再登记新的
+	if len(a.runs) >= maxRunSpaces {
+		for k := range a.runs { // map 迭代顺序随机,任意一个都够用
+			delete(a.runs, k)
+			break
+		}
 	}
 	rs := &runState{calls: map[string]int{}, summaries: map[string][]string{}}
 	a.runs[executionID] = rs

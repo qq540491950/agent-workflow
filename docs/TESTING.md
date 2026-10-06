@@ -849,10 +849,75 @@ stderr 线索。
 - 顺带修正 TESTING.md 轮次 28「仍未覆盖」段的表述 —— 那是当时的快照,
   其四项均已在后续轮次解决,现标注去向以免被误读为现状。✅
 
+## 轮次 31:复审最近三轮改动 —— 修掉自己引入的缺陷
+
+> 做了一轮"改 A 坏 B"的复审(只读审计最近三轮的 diff),13 条结论逐条复核后
+> 处理。其中**两条是本项目自己引入的**,三条是恒真/死代码。
+
+### 本项目自己引入的缺陷
+
+- **#86 检查点节流写成了死代码(P1)**:`maybeCheckpoint` 用
+  `Exec.CurrentNodeID` 判断"是否换了节点",但调用点在它**之前**一行就调了
+  `SetCurrentNode(nodeID)` —— 两者恒等,这条分支永远走不到,节流退化成纯
+  2s 定时。后果:快速链里第 2..N 个节点都不落库,崩溃时
+  `current_node_id` 仍指向链首,`RetryNode` 从错误的位置重试 —— 恰好是
+  #85 想修的问题被打了折扣。改用独立的 `lastCheckpointNode` 字段。
+  `TestCheckpointFollowsFastNodeChanges` 用 4 个 30ms 节点(全程远小于 2s)
+  并在**执行过程中**轮询库,断言 n1..n4 全被观察到。
+  **实测有效性**:回退后报出 n2/n3/n4 三个节点全丢(实际只观察到
+  `{n1, tail}`)。注:断言必须在执行中做 —— 收尾的 `save(exec)` 会把内存值
+  一并写入,执行结束后两种实现都是 `tail`,测不出差异。
+- **#87 Approve 不重新映射决策(P1,纵深防御)**:`answeredOutcome` 用
+  `out := prev` 照搬 WAIT_USER 之前的 Decision,而路由级恢复路径早就显式
+  做了 approve → `DecisionApproved` 的映射,两条路径不一致。
+  *如实说明*:当前 `NodeWaiting` 分支并不写 `KeyDecision`,所以 `prev.Decision`
+  实际为空、照搬暂不出错;这是防止将来行为变化时用户的批准被无视。
+  两条路径现已一致,`TestApproveOverridesPendingDecision` 锁定该不变式。
+
+### 约定违反(人工裁决后修)
+
+- **#88 并行不收敛落 COMPLETED,违反硬性约定 #14**:`warningAgent` 只发
+  `runtime.warning` 就收尾,执行落 COMPLETED —— 各分支确实跑完了,但它们
+  **之后的链一个都没跑**,用户看到"成功"却不知道缺了一截(事件流无订阅者
+  时完全无感)。约定 #14 逐字点名"并行不收敛"必须显式失败。
+  **经人工裁决,按约定改为落 FAILED**:与"无匹配出口"(#42)同款处理 ——
+  置 `KeyAbort` + `_error` 写明修法("请把分支连到同一个 merge 节点")+ 
+  `node.failed` 事件;各分支本身仍正常跑完,失败的只是"之后的链"。
+
+### 恒真测试与死代码
+
+- **#89 `TestNilStateDoesNotBecomeLiteralNil` 是恒真测试**:它把 nil 写库再
+  `GetExecution`,断言 `node_states_json` —— 但 `GetExecution` **直接读那一
+  列,不经过 `syncNodeStates`**,无论 #83 的修复在不在都通过。改为直接构造
+  "StateData 含 nil / 空串"的状态调 `syncNodeStates`。
+  **实测有效性**:回退后 4 处断言同时 FAIL(nil 渲染成 `"<nil>"`、空串进视图)。
+- **#90 两个 ADK 契约测试只 `t.Log` 不 `t.Error`**:`err 为 nil 不取消兄弟`
+  与 `重名子 Agent` 两条不断言任何东西 —— 意味着"ADK 改成 Escalate 即取消
+  兄弟"这种回归**不会让 CI 变红**,而这恰是 `parallelCascadeAgent` 的契约
+  前提。恒真的测试比没有测试更危险(虚假安全感),已改为真断言。
+- **#91 清理死代码/半成品**:`Plan.Unconverged` 只写不读(告警实际由
+  `KindWarning` 承载);`KindWarning` 携带的 `Branches` 无人读取却带
+  "仅用于承载告警"的假注释;`logx` 有 `MaskMap` 幽灵注释(声称一个不存在的
+  导出名,Go doc 会把它渲染到 `maskRecursive` 上);
+  `runNodeGuarded` 把同一对象既当 receiver 又当参数(receiver 完全未用)。
+- **#92 `mock.Agent.runs` 按 ExecutionID 无界增长**:桌面应用是长生命周期
+  进程,每次执行永久留一个 `runState` —— 这是 ExecutionID 隔离引入的**新增**
+  无界增长。加 256 空间上限,超限后丢弃最旧的一个(那个执行早已结束,
+  复用它无害)。
+- **#93 `agent/output.go` 手写 `itoa`**:同文件已 import 标准库,无理由自造
+  轮子(且 `MinInt64` 取负会溢出)。改用 `strconv.FormatInt`。
+
+### 回归汇总(轮次 31)
+
+- `gofmt`/`go vet` 干净;`go test -count=1 -race ./...` 全部通过。✅
+- 新增/重写回归:检查点跟随快速节点切换 1 组、Approve 覆盖决策 1 组、
+  nil 状态不进视图 1 组(3 条均为**实测有效性**验证)。✅
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 31 | 复审最近三轮:修自己引入的缺陷 + 约定违反 + 恒真测试清理 | ✅ | #86 检查点节流是死代码 #87 Approve 不重映射决策 #88 并行不收敛违反约定 #14 #89 nil 测试恒真 #90 契约测试不断言 #91 死代码半成品 #92 mock runs 无界增长 #93 自造 itoa |
 | 30 | 补齐剩余 ADK 契约 + pi 同形替身冒烟 | ✅ | ADK 契约 4→9 条(恰好 N 轮/Escalate 即退/提前停止 drain/分支错误回传/Set(nil)/temp: 前缀)+ pi 子进程层冒烟 6 条 |
 | --- | --- | --- | --- |
 | 1 | 后端全量 go test/vet/build | ✅ 全部通过 | — |

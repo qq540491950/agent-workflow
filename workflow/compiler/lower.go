@@ -125,8 +125,11 @@ type RunEnv struct {
 	// abort 记录最近一次中断原因(FAILED:node / WAIT_USER / LOOP_LIMIT:node)。
 	// 并行区用它做失败级联;受 execMu 保护。
 	abort string
-	// lastCheckpoint 上次落库检查点的时间(受 execMu 保护)。
-	lastCheckpoint time.Time
+	// lastCheckpoint 上次落库检查点的时间、lastCheckpointNode 上次的
+	// 节点 ID(受 execMu 保护)。后者用于识别"换了节点",必须独立于
+	// Exec.CurrentNodeID —— 后者在本函数调用前已被设成同一个值。
+	lastCheckpoint     time.Time
+	lastCheckpointNode string
 	// OnNodeCheckpoint 在节点开始执行时被调用(节流后)。用于让 runtime
 	// 把"当前在跑哪个节点"落库:此前 CurrentNodeID 只存在内存里,运行中
 	// 崩溃时库中仍是 Start 时的空值,RecoverPending 标 FAILED 之后
@@ -141,20 +144,29 @@ type RunEnv struct {
 // 并行分支会同时调用,去重逻辑放在 SetCurrentNode 之后更自然。
 const checkpointInterval = 2 * time.Second
 
-// maybeCheckpoint 按时间节流地通知 runtime 落库当前节点。
+// maybeCheckpoint 通知 runtime 把"当前在跑哪个节点"落库。
+//
+// 节流规则:同一节点重复进入按时间节流(2s),**换节点立即落盘**。
+// 换节点必须立即写 —— 崩溃后要能定位到真正卡住的那个节点;若纯按时间
+// 节流,快速链里后续节点都不落库,崩溃时库里的 current_node_id 仍指向
+// 更早的节点,RetryNode 于是从错误的位置重试。
+//
+// 比较对象必须是 lastCheckpointNode 而不是 Exec.CurrentNodeID:调用点
+// 在本函数**之前**已调 SetCurrentNode(nodeID),两者恒等,拿它比较会让
+// "换节点"分支永远走不到(实测:该实现退化为纯 2s 节流,4 个秒级节点里
+// 只有链首与收尾被记录,中间的 n2/n3/n4 全丢)。
 func (e *RunEnv) maybeCheckpoint(nodeID string) {
 	if e.OnNodeCheckpoint == nil {
 		return
 	}
 	e.execMu.Lock()
-	// 距上次落库不足间隔且不是新节点:跳过。
-	// 换节点时立即落盘(崩溃后要能定位到"卡在哪个节点")。
-	if nodeID == e.Exec.CurrentNodeID &&
+	if nodeID == e.lastCheckpointNode &&
 		time.Since(e.lastCheckpoint) < checkpointInterval {
 		e.execMu.Unlock()
 		return
 	}
 	e.lastCheckpoint = time.Now()
+	e.lastCheckpointNode = nodeID
 	e.execMu.Unlock()
 	e.OnNodeCheckpoint(nodeID)
 }
@@ -208,7 +220,8 @@ func (e *RunEnv) SetAbort(reason string) {
 // 执行协程(顺序链)还是 ADK 的分支协程(并行区)都能覆盖。
 // panic 转成 FAILED outcome 后,上层既有的 KeyAbort 流程会把执行落库
 // FAILED,用户能看到"哪个节点炸了"而不是整个应用消失。
-func (e *RunEnv) runNodeGuarded(ctx agent.InvocationContext, env *RunEnv, node *model.Node, st StateAccess) (out NodeOutcome) {
+func (e *RunEnv) runNodeGuarded(ctx agent.InvocationContext, node *model.Node, st StateAccess) (out NodeOutcome) {
+	env := e
 	defer func() {
 		if r := recover(); r != nil {
 			msg := fmt.Sprintf("节点 %s 执行 panic: %v", node.ID, r)
@@ -377,23 +390,43 @@ func (c cascadeCtx) Done() <-chan struct{}       { return c.ctx.Done() }
 func (c cascadeCtx) Err() error                  { return c.ctx.Err() }
 func (c cascadeCtx) Value(key any) any           { return c.ctx.Value(key) }
 
-// warningAgent 只发告警事件、不执行任何节点。
-// 用于编译期发现的拓扑问题(如并行分支不收敛):不能默默丢弃后续节点,
-// 也不能阻止执行 —— 各分支照常跑完,只是明确告知用户"这段没有收口,
-// 分支之后的链不会执行"。
+// warningAgent 处理"并行分支不收敛":各分支照常跑完,但执行显式失败。
+//
+// 语义依据 AGENTS.md 硬性约定 #14("该失败却成功"等同 P0):执行结束前若
+// 仍有未执行的可达节点(条件出口全不匹配、**并行不收敛**、回边被丢弃),
+// 必须显式失败并给出可读原因,不允许默认收尾落 COMPLETED。
+// 此前只发 runtime.warning 然后让执行落 COMPLETED —— 各分支确实跑完了,
+// 但它们**之后的链一个都没跑**,用户看到"成功"却不知道缺了一截,
+// 事件流无订阅者时更是完全无感。与 "无匹配出口"(#42)同款处理:
+// 置 KeyAbort + 写明原因,由 engine 落库 FAILED。
 func (l *lowerer) warningAgent(p *Plan, name string) (agent.Agent, error) {
 	env := l.env
-	msg := fmt.Sprintf("节点 %s 之后的链路不会执行:该处没有公共汇合点("+
-		"各并行分支终点互不相同),请把分支连到同一个 merge 节点上", p.NodeID)
+	msg := fmt.Sprintf("节点 %s 之后的链路不会执行:该处没有公共汇合点"+
+		"(各并行分支终点互不相同),请把分支连到同一个 merge 节点上", p.NodeID)
 	return agent.New(agent.Config{
 		Name:        l.uniqueName(name + ".warn"),
-		Description: "拓扑告警",
+		Description: "并行不收敛",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
+				actions := &session.EventActions{StateDelta: map[string]any{}}
+				st := &stateAccess{ctx: ctx, actions: actions}
+				if aborted(st) {
+					return
+				}
 				logx.Warn(msg, "execution", env.Exec.ID, "node", p.NodeID)
 				env.Bus.Emit(event.New("runtime.warning", env.Exec.ID, p.NodeID, map[string]any{
 					"node": p.NodeID, "reason": "parallel_not_converged", "message": msg,
 				}))
+				// 约定 #14:不能只告警。置 KeyAbort 让 engine 落 FAILED,
+				// 并把原因写进 _error,用户在执行详情里能直接看到该修哪里。
+				st.Set(KeyAbort, "FAILED:"+p.NodeID)
+				env.SetAbort("FAILED:" + p.NodeID)
+				st.Set("_error", msg)
+				env.SetNodeState(p.NodeID, string(model.NodeFailed))
+				env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, p.NodeID, map[string]any{
+					"node": p.NodeID, "error": msg,
+				}))
+				yield(escalateEvent(ctx, actions), nil)
 			}
 		},
 	})
@@ -543,7 +576,7 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 					}))
 				}
 
-				outcome := env.runNodeGuarded(ctx, env, node, st)
+				outcome := env.runNodeGuarded(ctx, node, st)
 
 				// 写回状态。节点状态机此前从未接线(CanTransitionNode 只在
 				// 测试里被调用):任何来源的写入 —— resume 回放、循环重置

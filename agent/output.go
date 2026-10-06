@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -65,8 +66,8 @@ func (b *BoundedBuffer) String() string {
 	defer b.mu.Unlock()
 	s := b.buf.String()
 	if b.dropped > 0 {
-		s += "\n…[输出超出 " + itoa(int64(b.limit)) + " 字节上限,已丢弃 " +
-			itoa(b.dropped) + " 字节]"
+		s += "\n…[输出超出 " + strconv.FormatInt(int64(b.limit), 10) + " 字节上限,已丢弃 " +
+			strconv.FormatInt(b.dropped, 10) + " 字节]"
 	}
 	return s
 }
@@ -76,25 +77,6 @@ func (b *BoundedBuffer) Truncated() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.dropped > 0
-}
-
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	if neg {
-		return "-" + string(b)
-	}
-	return string(b)
 }
 
 // BalancedJSON 从 start 处的 '{' 开始做括号配平,能配平时返回该对象

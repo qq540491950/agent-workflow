@@ -14,6 +14,7 @@ import (
 	"agentworkflow/persistence"
 	"agentworkflow/skill"
 	"agentworkflow/skill/builtin"
+	"agentworkflow/workflow/compiler"
 	"agentworkflow/workflow/dsl"
 	"agentworkflow/workflow/model"
 )
@@ -348,4 +349,121 @@ func openRepoForSkill(t *testing.T) *persistence.DB {
 	}
 	t.Cleanup(func() { repo.Close() })
 	return repo
+}
+
+// decisionWaitAgent 返回 WAIT_USER 的同时**带一个倾向性决策**
+// (REJECTED)—— 真实场景里 Agent 完全可能"一边要求人工确认、一边给出
+// 当前倾向"。此时若恢复路径照搬旧 Decision,用户点 Approve 之后路由
+// 仍会走 REJECTED 分支 —— 用户的批准被无视。
+type decisionWaitAgent struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (a *decisionWaitAgent) ID() string   { return "decision-wait" }
+func (a *decisionWaitAgent) Name() string { return "Decision Wait" }
+
+func (a *decisionWaitAgent) Execute(ctx context.Context, req coreagent.AgentRequest) (*coreagent.AgentResponse, error) {
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	// 第一次:WAIT_USER + REJECTED
+	return &coreagent.AgentResponse{
+		Status:   coreagent.StatusWaitUser,
+		Decision: coreagent.DecisionRejected,
+		Summary:  "倾向拒绝,但需要人工确认",
+		Data:     map[string]any{"responses": []string{"approve", "reject", "continue"}},
+	}, nil
+}
+
+// TestApproveOverridesPendingDecision 轮次 31(#87):用户 Approve 后,
+// 决策必须被 APPROVED 重新映射,不能沿用 WAIT_USER 之前的值。
+//
+// 路由级恢复路径(routeAgent 的"0. 恢复消费")早就显式做了 approve →
+// DecisionApproved 的映射,节点级路径此前却 `out := prev` 照搬旧值。
+//
+// **当前代码里 NodeWaiting 分支不写 KeyDecision**,所以 prev.Decision 实际
+// 为空、照搬也不会出错 —— 这是纵深防御:一旦将来有人在 NodeWaiting 分支
+// 里也写入决策(或 invokeAgent 调整 Decision 的填充时机),照搬就会让用户
+// 的批准被无视。本用例锁定"无论上游怎么变,答复都必须重新映射"这条不变式。
+func TestApproveOverridesPendingDecision(t *testing.T) {
+	ag := &decisionWaitAgent{}
+	eng, _, _ := newWaitUserEngineWithAgent(t, ag)
+	wf := loadWfYAML(t, eng, `
+workflow:
+  id: approve-wins
+  name: 批准优先
+nodes:
+  - id: gate
+    type: agent
+    agent: decision-wait
+    mode: review
+  - id: approved_path
+    type: skill
+    skill: log
+  - id: rejected_path
+    type: skill
+    skill: log
+edges:
+  - from: gate
+    to: approved_path
+    condition: decision == "APPROVED"
+  - from: gate
+    to: rejected_path
+    condition: decision == "REJECTED"
+`)
+	exec, err := eng.Start(context.Background(), wf, "批准任务", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForState(t, eng, exec.ID, model.ExecutionWaitingUser)
+
+	if _, err := eng.Resume(context.Background(), exec.ID, map[string]any{"response": "approve"}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	final := waitForState(t, eng, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
+	if final.State != model.ExecutionCompleted {
+		t.Fatalf("应 COMPLETED,实际 %s (%s)", final.State, final.Error)
+	}
+	// 用户点了 Approve,就必须走 APPROVED 分支
+	if final.NodeStates["approved_path"] != string(model.NodeSuccess) {
+		t.Errorf("Approve 后应走 APPROVED 分支,实际节点状态 %v —— "+
+			"恢复路径照搬了 WAIT_USER 之前的 REJECTED 决策,用户的批准被无视",
+			final.NodeStates)
+	}
+	if _, ran := final.NodeStates["rejected_path"]; ran {
+		t.Errorf("Approve 后不应走 REJECTED 分支,实际 %v", final.NodeStates)
+	}
+	// 决策键也必须是 APPROVED
+	if got, _ := final.StateData[compiler.KeyDecision].(string); got != "APPROVED" {
+		t.Errorf("StateData[decision] = %q,应为 APPROVED", got)
+	}
+}
+
+// newWaitUserEngineWithAgent 用自定义 Agent 构造引擎(供需要特定响应
+// 形态的 WAIT_USER 用例)。
+func newWaitUserEngineWithAgent(t *testing.T, a coreagent.Agent) (*Engine, *persistence.DB, *event.Bus) {
+	t.Helper()
+	repo, err := persistence.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { repo.Close() })
+	bus := event.NewBus()
+	bus.KeepHistory = true
+	agents := coreagent.NewRegistry()
+	if err := agents.Register(a); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	_ = agents.Register(mock.New(mock.Options{ID: "mock-a"}))
+	skills := skill.NewRegistry()
+	for _, sk := range builtin.All() {
+		if err := skills.Register(sk); err != nil {
+			t.Fatalf("register skill: %v", err)
+		}
+	}
+	eng := NewEngine(agents, skills, permission.NewManager(), bus, git.New(t.TempDir()), repo)
+	eng.Perms.Set(a.ID(), permission.Policy{FilesystemRead: true, FilesystemWrite: true})
+	eng.Perms.Set("workflow", permission.Policy{FilesystemRead: true, GitRead: true, GitCommit: true})
+	return eng, repo, bus
 }

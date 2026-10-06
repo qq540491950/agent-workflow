@@ -126,8 +126,9 @@ func answeredOutcome(st compiler.StateAccess, nodeID string) (compiler.NodeOutco
 		return compiler.NodeOutcome{}, false
 	}
 	resp, _ := ui.(map[string]any)
+	userResp, _ := resp["response"].(string)
 	// reject 是显式否决,必须让工作流失败而不是"复用上一次的成功响应"
-	if r, _ := resp["response"].(string); strings.EqualFold(strings.TrimSpace(r), "reject") {
+	if strings.EqualFold(strings.TrimSpace(userResp), "reject") {
 		return compiler.NodeOutcome{
 			State: model.NodeFailed,
 			Error: "用户在节点 " + nodeID + " 拒绝继续",
@@ -145,10 +146,26 @@ func answeredOutcome(st compiler.StateAccess, nodeID string) (compiler.NodeOutco
 	if inst != "" {
 		_ = st.Set("user_instruction", inst)
 	}
-	// 复用原响应,但明确标注这是"用户答复后完成",不是 Agent 重新执行
+	// 复用原响应,但明确标注这是"用户已答复,复用原响应",不是 Agent 重新执行
 	out := prev
 	out.State = model.NodeSuccess
 	out.Summary = strings.TrimSpace(prev.Summary + " (用户已答复,复用原响应)")
+	// Decision 必须按用户答复**重新映射**,不能沿用 WAIT_USER 之前的值。
+	// invokeAgent 构造 outcome 时总会填 Decision,而 status=WAIT_USER 与
+	// decision=REJECTED 可以同时成立(Agent 一边要求人工确认、一边给了
+	// 倾向性结论)。若照搬旧值,用户点 Approve 之后 lower.go 仍会把
+	// KeyDecision 写成 REJECTED,路由走回拒绝分支 —— 用户的批准被无视。
+	// 路由级恢复路径(routeAgent 的 "0. 恢复消费")已显式做同样的映射,
+	// 两条恢复路径必须一致。
+	switch strings.ToLower(strings.TrimSpace(userResp)) {
+	case "approve":
+		out.Decision = string(coreagent.DecisionApproved)
+	case "continue":
+		// 继续 = 清空决策,让路由重新评估(与 routeAgent 恢复路径一致)
+		out.Decision = ""
+	case "reject":
+		// 上面的 reject 分支已返回,这里到不了
+	}
 	return out, true
 }
 

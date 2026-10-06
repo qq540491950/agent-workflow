@@ -371,3 +371,135 @@ edges:
 		t.Fatalf("应 FAILED,实际 %s", final.State)
 	}
 }
+
+// quickNode 立刻返回成功的 Agent(用于构造多节点快速链)。
+type quickNode struct{ id string }
+
+func (a *quickNode) ID() string   { return a.id }
+func (a *quickNode) Name() string { return a.id }
+func (a *quickNode) Execute(ctx context.Context, req coreagent.AgentRequest) (*coreagent.AgentResponse, error) {
+	// 每节点 30ms:让 4 个节点串起来约 120ms —— 远小于 2s 节流窗口,
+	// 却足够测试轮询观察中间节点
+	select {
+	case <-time.After(30 * time.Millisecond):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &coreagent.AgentResponse{Status: coreagent.StatusSuccess, Decision: coreagent.DecisionDone}, nil
+}
+
+// TestCheckpointFollowsFastNodeChanges 轮次 31(#86):检查点必须跟随
+// "当前在跑哪个节点",即使节点切换得比 2s 节流还快。
+//
+// 缺陷(本项目自己引入):maybeCheckpoint 用 Exec.CurrentNodeID 判断
+// "是否换了节点",但调用点在此**之前**已 SetCurrentNode(nodeID) ——
+// 两者恒等,"换节点立即落盘"这条分支永远走不到,节流退化成纯 2s 定时。
+// 后果:快速链里第 2..N 个节点都不落库,崩溃时 current_node_id 仍指向
+// 第 1 个节点,RetryNode 从错误的位置重试。
+//
+// 单节点用例覆盖不到(首个节点必然触发落库),故这里用 4 个秒级完成的
+// 节点:全程远小于 2s 节流窗口。
+func TestCheckpointFollowsFastNodeChanges(t *testing.T) {
+	repo, err := persistence.Open(filepath.Join(t.TempDir(), "ck.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { repo.Close() })
+	bus := event.NewBus()
+
+	agents := coreagent.NewRegistry()
+	for _, id := range []string{"n1", "n2", "n3", "n4"} {
+		if err := agents.Register(&quickNode{id: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	skills := skill.NewRegistry()
+	for _, sk := range builtin.All() {
+		if err := skills.Register(sk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eng := NewEngine(agents, skills, permission.NewManager(), bus, git.New(t.TempDir()), repo)
+	for _, id := range []string{"n1", "n2", "n3", "n4"} {
+		eng.Perms.Set(id, permission.Policy{FilesystemRead: true, FilesystemWrite: true})
+	}
+
+	doc, err := dsl.Parse([]byte(`
+version: "1"
+workflow:
+  id: fast-chain
+  name: 快速链
+nodes:
+  - id: n1
+    type: agent
+    agent: n1
+    mode: plan
+  - id: n2
+    type: agent
+    agent: n2
+    mode: plan
+  - id: n3
+    type: agent
+    agent: n3
+    mode: plan
+  - id: n4
+    type: agent
+    agent: n4
+    mode: plan
+  - id: tail
+    type: skill
+    skill: log
+edges:
+  - from: n1
+    to: n2
+  - from: n2
+    to: n3
+  - from: n3
+    to: n4
+  - from: n4
+    to: tail
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wf := doc.ToModel()
+	exec, err := eng.Start(context.Background(), wf, "快速链", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// 关键:必须在**执行过程中**观察,而不是执行结束后 ——
+	// 收尾的 save(exec) 会把内存里的 CurrentNodeID 一并写入,无论检查点
+	// 是否生效,执行结束后都是 "tail",测不出差异。
+	//
+	// 做法:让链中途的某个节点阻塞,由测试在它运行时读库。
+	// 期望:读到的是**当前正在跑的那个节点**,而不是链首。
+	seen := map[string]bool{}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		e, err := eng.Repo.GetExecution(exec.ID)
+		if err != nil {
+			break
+		}
+		if e.CurrentNodeID != "" {
+			seen[e.CurrentNodeID] = true
+		}
+		if e.State == model.ExecutionCompleted || e.State == model.ExecutionFailed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	waitForState(t, eng, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
+
+	// 检查点必须观察到**不止链首**的节点:若被 2s 节流卡住,4 个秒级节点
+	// 全程只会看到 n1,崩溃后从 n1 重试,把后面几个白跑一遍。
+	// 坏实现(拿 Exec.CurrentNodeID 比较)只观察到 {n1, tail}:n1 是首次落库,
+	// tail 是收尾 save 写的,中间的 n2/n3/n4 全被 2s 节流吃掉 ——
+	// 崩溃发生在 n3 时库里仍指向 n1,RetryNode 从 n1 重试。
+	for _, want := range []string{"n1", "n2", "n3", "n4"} {
+		if !seen[want] {
+			t.Errorf("检查点从未观察到节点 %s(实际观察到 %v) —— "+
+				"换节点未立即落盘,节流退化成纯 2s 定时,崩溃后会从链首重试",
+				want, seen)
+		}
+	}
+}

@@ -396,10 +396,13 @@ var _ = dsl.Parse
 
 // ---- B2:并行分支不收敛必须告警 ----
 
-// TestNonConvergingParallelWarns 验证并行分支不收敛时执行仍能跑完各分支,
-// 但必须发出 runtime.warning 告警说明"分支之后的链不会执行"。
-// 此前塞一个合成的 `fanout.merge` 占位节点(落到 lower 变 noop),
-// 后续链被静默丢弃,执行报成功。
+// TestNonConvergingParallelFails 验证并行分支不收敛时,执行必须**显式失败**
+// 并给出可读原因(AGENTS.md 硬性约定 #14:"该失败却成功"等同 P0)。
+//
+// 演进:此前塞一个合成的 `fanout.merge` 占位节点(落到 lower 变 noop),
+// 后续链被静默丢弃而执行报成功(#B2);改成"只告警"仍不够 —— 各分支确实
+// 跑完了,但它们之后的链一个都没跑,用户看到"成功"却不知道缺了一截。
+// 现在按约定 #14 落 FAILED,错误信息直接说清该改哪里。
 func TestNonConvergingParallelWarns(t *testing.T) {
 	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionApproved})
 	wf := loadWf(t, f.engine, `
@@ -438,16 +441,24 @@ edges:
 		t.Fatalf("start: %v", err)
 	}
 	final := waitForState(t, f.engine, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
-	if final.State != model.ExecutionCompleted {
-		t.Fatalf("不收敛不应让执行失败(各分支照常跑),实际 %s (%s)", final.State, final.Error)
+	if final.State != model.ExecutionFailed {
+		t.Fatalf("不收敛必须落 FAILED(约定 #14:仍有未执行的可达节点),实际 %s (%s)",
+			final.State, final.Error)
 	}
-	// 各分支都跑到了
+	// 失败原因必须可读且指向修复动作
+	if !strings.Contains(final.Error, "没有公共汇合点") {
+		t.Errorf("失败原因应说明没有公共汇合点,实际 %q", final.Error)
+	}
+	if !strings.Contains(final.Error, "merge") {
+		t.Errorf("失败原因应指出修法(连到同一个 merge 节点),实际 %q", final.Error)
+	}
+	// 各分支本身仍然跑完了 —— 不收敛的是它们之后的链,不是分支本身
 	for _, id := range []string{"a", "b", "tail_a", "tail_b"} {
 		if final.NodeStates[id] != string(model.NodeSuccess) {
 			t.Errorf("节点 %s 应执行完成,实际 %q", id, final.NodeStates[id])
 		}
 	}
-	// 但必须有告警
+	// 告警事件仍然发出(供 UI 实时面板展示)
 	warned := false
 	for _, ev := range f.bus.History() {
 		if ev.Type == "runtime.warning" && ev.NodeID == "fanout" {
@@ -455,7 +466,7 @@ edges:
 		}
 	}
 	if !warned {
-		t.Error("并行分支不收敛必须发 runtime.warning 告警(此前静默丢弃后续链)")
+		t.Error("应发出 runtime.warning 事件(供 UI 实时展示)")
 	}
 }
 
@@ -603,33 +614,47 @@ func TestSyncNodeStatesRebuildsFromScratch(t *testing.T) {
 // Get/Set/All),Get 把 nil 当缺失。若派生时 `fmt.Sprint(nil)`,UI 上会出现
 // 状态为 "<nil>" 的节点。
 func TestNilStateDoesNotBecomeLiteralNil(t *testing.T) {
+	// 直接测派生函数本身:上一版用例把 nil 写库再 GetExecution,断言
+	// node_states_json —— 但 GetExecution 直接读那一列,**不经过
+	// syncNodeStates**,无论本修复在不在都通过,属恒真测试。
+	// 这里改为直接构造"StateData 里有 nil / 空串"的状态,调 syncNodeStates。
 	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionApproved})
-	wf := loadWf(t, f.engine, loopWorkflowYAML)
-	exec, err := f.engine.Start(context.Background(), wf, "nil 检查", nil)
-	if err != nil {
-		t.Fatalf("start: %v", err)
+	exec := &model.Execution{
+		NodeStates: map[string]string{},
+		Iterations: map[string]int{"loop": 99}, // 应被全量重建清掉
+		StateData: map[string]any{
+			// Delete 以 Set(key, nil) 伪造删除:派生时 fmt.Sprint(nil)
+			// 会写出字面量 "<nil>"
+			compiler.StatusKey("withnil"): nil,
+			// loopResetter 用空串当哨兵
+			compiler.StatusKey("withempty"): "",
+			compiler.StatusKey("good"):      model.NodeSuccess,
+		},
+		Snapshot: &model.Workflow{Nodes: []model.Node{
+			{ID: "withnil"}, {ID: "withempty"}, {ID: "good"},
+		}},
 	}
-	waitForState(t, f.engine, exec.ID, model.ExecutionCompleted, model.ExecutionFailed)
+	f.engine.syncNodeStates(exec)
 
-	got, err := f.repo.GetExecution(exec.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	// 模拟 Delete 的效果:StateData 里某个 StatusKey 被置 nil
-	got.StateData[compiler.StatusKey("plan")] = nil
-	if err := f.repo.SaveExecution(got); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	back, err := f.repo.GetExecution(exec.ID)
-	if err != nil {
-		t.Fatalf("get back: %v", err)
-	}
-	if v, ok := back.NodeStates["plan"]; ok && v == "<nil>" {
-		t.Error("nil 状态被渲染成字面量 \"<nil>\"")
-	}
-	for id, v := range back.NodeStates {
+	for id, v := range exec.NodeStates {
 		if v == "<nil>" {
-			t.Errorf("节点 %s 的状态是字面量 \"<nil>\"", id)
+			t.Errorf("节点 %s 的状态被渲染成字面量 \"<nil>\"", id)
 		}
+		if v == "" {
+			t.Errorf("节点 %s 的状态是空串(loopResetter 的哨兵不该进视图)", id)
+		}
+	}
+	if _, leaked := exec.NodeStates["withnil"]; leaked {
+		t.Error("nil 状态不应进入派生视图")
+	}
+	if _, leaked := exec.NodeStates["withempty"]; leaked {
+		t.Error("空串状态不应进入派生视图")
+	}
+	if got := exec.NodeStates["good"]; got != string(model.NodeSuccess) {
+		t.Errorf("正常节点应保留,实际 %q", got)
+	}
+	// 全量重建:StateData 里没有 loop 计数,Iterations 里的旧值必须被清掉
+	if len(exec.Iterations) != 0 {
+		t.Errorf("Iterations 应被全量重建清空,实际 %v", exec.Iterations)
 	}
 }

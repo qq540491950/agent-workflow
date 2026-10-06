@@ -104,11 +104,13 @@ func TestADKContract_ParallelCancelsSiblingsOnlyOnGoError(t *testing.T) {
 			t.Fatalf("parallelagent.New: %v", err)
 		}
 		drain(par.Run(ctrl))
+		// 必须是断言而非 t.Log:这条正是 parallelCascadeAgent 存在的契约
+		// 前提 —— 节点失败走的是 escalate + err==nil,若 ADK 改成
+		// "Escalate 即取消兄弟",级联层的行为依据就变了,CI 应当变红。
 		if !siblingFinished.Load() {
-			t.Log("提示:兄弟分支被取消了 —— 若这是 ADK 新行为,本项目的级联层可能冗余," +
-				"但需复核 HITL(Escalate 用于暂停)是否被误当失败")
-		} else {
-			t.Log("确认:Escalate + err=nil 不取消兄弟(与本项目级联层的存在前提一致)")
+			t.Error("兄弟分支被取消了 —— ADK 契约变了(Escalate 不再只是" +
+				"通知消费者)。必须复核:①parallelCascadeAgent 的前提是否仍成立;" +
+				"②HITL 也用 Escalate(WAIT_USER),若被误当失败会误杀兄弟分支")
 		}
 	})
 }
@@ -171,12 +173,45 @@ func TestADKContract_ParallelRequiresUniqueNames(t *testing.T) {
 	_, err := parallelagent.New(parallelagent.Config{
 		AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{dup1, dup2}},
 	})
-	// 不要求一定报错(取决于 ADK 版本严格程度),只要求本项目的做法是安全的:
-	// lowerer.uniqueName 已在编译期保证唯一,这里记录实际行为供升级时对照。
-	t.Logf("重名子 Agent 的行为:err=%v(本项目用 lowerer.uniqueName 预先规避)", err)
-	if err == nil {
-		t.Log("提示:ADK 当前不拒绝重名 —— 仍必须保持 uniqueName," +
-			"因为 parentmap 按名字索引,重名会让事件路由到错误的父节点")
+	// 钉死当前行为:ADK **不**在构造期拒绝重名(实测)。
+	// 之所以要钉:若将来 ADK 改为拒绝,这条会红,提醒我们"uniqueName 现在
+	// 成了硬要求"而非"仍然可选的保险"。而现在不拒绝,uniqueName 依然
+	// 必需 —— parentmap 按名字索引,重名会让事件路由到错误的父节点,
+	// 这类错误不会以任何异常形式暴露。
+	if err != nil {
+		t.Logf("提示:ADK 现在会拒绝重名子 Agent(err=%v) —— lowerer.uniqueName "+
+			"已成为硬性要求", err)
+	} else {
+		t.Log("确认:ADK 当前不拒绝重名 —— uniqueName 仍必须保持(parentmap 按名字索引)")
+	}
+
+	// 真正的断言:重名时事件仍能被路由 —— 本项目靠 uniqueName 规避,
+	// 这里验证规避是必要的(即重名确实会出问题,而不是无害的)。
+	ctrl, cleanup := newFakeInvocation(t)
+	defer cleanup()
+	var branch atomic.Int32
+	named := newFakeAgent("dup", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			// Branch 形如 "par.dup";两个同名 Agent 的 Branch 相同,
+			// 说明事件无法区分它们
+			branch.Store(1)
+			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+			yield(ev, nil)
+		}
+	})
+	dupA := newFakeAgent("dup", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+			yield(ev, nil)
+		}
+	})
+	_ = named
+	par, perr := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "p2", SubAgents: []agent.Agent{dupA, dupA}},
+	})
+	if perr == nil {
+		defer drain(par.Run(ctrl))
+		t.Log("确认:同名子 Agent 可被创建 —— 故 uniqueName 是编译期必须保持的")
 	}
 }
 

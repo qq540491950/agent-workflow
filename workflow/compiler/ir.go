@@ -54,10 +54,6 @@ type Plan struct {
 	Children []*Plan // KindSeq/KindPar 的子计划
 	Branches []RouteBranch
 	Loop     *LoopSpec
-	// Unconverged 标记并行区没有公共汇合点(各分支终点互不相同)。
-	// 此时分支之后的链不会进入计划,必须由 lower 阶段发告警 ——
-	// 静默丢弃等于"该跑的没跑却报成功"。
-	Unconverged bool
 	// NodeID 序列(仅 KindSeq 用于调试展示)。
 	Path []string
 }
@@ -240,19 +236,11 @@ func (b *irBuilder) parallel(parID string, ancestors map[string]bool, outerStop 
 	// 此前塞一个合成的 "<parID>.merge" 占位节点并丢掉并行区之后的链 ——
 	// 用户在工作流里并不存在这个节点,它落到 lower 时变成 noop,而
 	// 分支之后的节点一个都没进 Plan。执行会报成功,但那一段根本没跑。
-	// 现在不造假节点:直接返回并行区本身,并在 Plan 上标记不收敛,
-	// 由 lower 阶段发告警事件(执行仍继续跑各分支,只是提醒用户
-	// 拓扑没有收口,后续链不会执行)。
-	plans[0].Unconverged = true
-	plans[0].Branches = nil
-	plans = append(plans, &Plan{
-		Kind:   KindWarning,
-		NodeID: parID,
-		Branches: []RouteBranch{{
-			Condition: "",
-			Target:    &Plan{Kind: KindSeq}, // 空动作,仅用于承载告警
-		}},
-	})
+	//
+	// 现在不造假节点:各分支照常跑完,再挂一个 KindWarning 告警节点 ——
+	// 它只发 runtime.warning 事件说明"分支之后的链不会执行",
+	// 不执行任何动作(KindWarning 的 Branches/Flatten 均为空)。
+	plans = append(plans, &Plan{Kind: KindWarning, NodeID: parID})
 	return plans
 }
 
