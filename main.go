@@ -194,6 +194,13 @@ func runDesktop(app *app.App) {
 		BackgroundColour: wails.NewRGB(13, 17, 23),
 		URL:              "/",
 	})
+	// 记录窗口创建:桌面模式无法在浏览器里观察(没有 HTTP 端口),
+	// 视觉验证与"窗口为什么没出来"这类排障只能靠日志。
+	if win, ok := wailsApp.Window.GetByName("main"); ok && win != nil {
+		logx.Info("主窗口已创建", "name", "main", "title", "Agent Workflow Orchestrator")
+	} else {
+		logx.Warn("主窗口创建失败")
+	}
 
 	if err := wailsApp.Run(); err != nil {
 		logx.Error("应用退出异常", "error", err)

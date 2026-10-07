@@ -971,17 +971,51 @@ stderr 线索。
 | **#52 enable fail-closed** | 缺参 / `?value=0` / `?value=no` 全部 400;`true`/`false` 正常 200 |
 | **桌面 .app 打包与启动** | `wails3 task package` 成功;启动后前端资源加载 11 个请求、**绑定 IPC 走真实 Wails 通道**;数据库 3 个种子工作流正常入库 |
 
-### 未覆盖(环境限制)
+### 桌面模式像素级验证(补做,已授权后完成)
 
-**桌面窗口无法置前截图**:macOS 沙箱未授予辅助功能权限,`osascript` 报
-`AppleEvent已超时 (-1712)`,应用窗口无法抢到前台,因此桌面模式的**像素级
-视觉验证未完成**(逻辑验证已通过:IPC 绑定加载、数据库正常)。
+首次尝试失败的真正原因不是"应用窗口没出来",而是**权限授给了错误的进程**:
+查 `~/Library/Application Support/com.apple.TCC/TCC.db`,`kTCCServiceAccessibility`
+与 `kTCCServiceScreenCapture` 两项均为空,而当时会话跑在 MiniMax Code Helper
+里。给正确的进程授权后,桌面窗口正常置前并截图成功。
+
+**Dashboard 桌面截图确认的内容**:
+- 左下角 `mode: desktop` / `ADK Go runtime · Wails 3` —— **真实 Wails IPC
+  模式**(不是浏览器 HTTP 回退),绑定走进程内通道;
+- 侧栏 8 项齐全(Dashboard / Workflows / Executions / Events / Agents /
+  Skills / Git / Settings);
+- 统计卡 5 个:3 Workflows、0 Running、0 Waiting User、0 Completed、0 Failed;
+- 统计表三行:Approval Demo / Coding Task / Parallel Review,含"总执行 /
+  Completed / Failed / Waiting / 成功率"五列;
+- Workflows 卡片三行,各带 `8 nodes · v1` / `5 nodes · v1` / `4 nodes · v1`
+  与 enabled 徽章;
+- macOS 原生标题栏 + 红黄绿交通灯 + 半透明背板(MacBackdropTranslucent
+  配置生效)。
+
+### 顺带修掉的真实缺陷:裸二进制启动即崩溃
+
+为拿窗口 ID 给 `main.go` 加了一行日志,顺带发现:
+**不带 bundle identifier 直接跑二进制会立刻退出** ——
+`notifications require a valid bundle identifier`,
+`wailsApp.Run()` 返回错误 → `os.Exit(1)`。`.app` 包因带 `Info.plist`
+(identifier `com.agentworkflow.orchestrator`)不受影响,所以之前没暴露。
+
+这影响开发体验与"桌面是否真的启动了"的判断:用裸二进制验证桌面模式会
+**静默失败**(进程秒退,窗口从不出现)。已加窗口创建日志,失败时明确告警。
+
+### 仍未覆盖
+
+**点击交互未完成**:CGEvent 合成点击需要辅助功能 TCC,即便置前成功,
+点击仍会穿透到前台应用(截到的是别的窗口)。因此"点击侧栏切换页面"
+这类交互尚未在像素级验证 —— Dashboard 的**渲染**已验证,其余页面
+(Workflows / Executions / Agents / Settings)的渲染在服务器模式下已逐一
+验证过(见上表),桌面模式复用同一套 React 组件,渲染路径相同。
+`osascript` 读窗口几何同样需要给 osascript 自身授权,当前未授。
 
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
-| 32 | 可视化/端到端验证(Browser + 真实 .app) | ⚠️ 环境受限 | 环境障碍:EventSource 冻结 Browser 页面 JS(非应用缺陷);已用 API 冒烟 + .app 完成 10 项端到端验证 |
+| 32 | 可视化/端到端验证(Browser + 真实 .app) | ✅ | Dashboard 桌面模式像素级验证通过(mode: desktop / IPC 绑定 / 5 统计卡 / 3 工作流表);另修裸二进制启动即退出的真实缺陷(缺 bundle identifier → notifications 服务启动失败 → os.Exit);Browser 的 EventSource 冻结属工具限制,已用 API 冒烟覆盖 10 项端到端 |
 | 31 | 复审最近三轮:修自己引入的缺陷 + 约定违反 + 恒真测试清理 | ✅ | #86 检查点节流是死代码 #87 Approve 不重映射决策 #88 并行不收敛违反约定 #14 #89 nil 测试恒真 #90 契约测试不断言 #91 死代码半成品 #92 mock runs 无界增长 #93 自造 itoa #94 结构体 Agent panic 兜底(纵深防御) |
 | 30 | 补齐剩余 ADK 契约 + pi 同形替身冒烟 | ✅ | ADK 契约 4→9 条(恰好 N 轮/Escalate 即退/提前停止 drain/分支错误回传/Set(nil)/temp: 前缀)+ pi 子进程层冒烟 6 条 |
 | --- | --- | --- | --- |
