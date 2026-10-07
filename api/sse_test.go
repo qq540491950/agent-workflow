@@ -110,10 +110,18 @@ func TestSSESlowClientDoesNotBlockProducer(t *testing.T) {
 		done <- time.Since(start)
 	}()
 
+	// 真正要守的不变式:**Emit 必须非阻塞返回**(慢客户端不能反压到
+	// 产生事件的工作流协程)。用"能否在合理时间内返回"判定,而非
+	// 精确耗时 —— 2000 个事件每次都要过一次脱敏,耗时随机器负载波动:
+	// 单独跑约 0.55s,而全量并发(CPU 被其它包抢占)时会到 2.3s。
+	// 原先 2s 的阈值在并发下偶发失败(EXIT=1 却无法复现单跑),是
+	// 脆弱的性能断言而非回归。阈值放宽到 5s:既能稳定容纳负载抖动,
+	// 又与"被真正阻塞"有量级差异(阻塞版会一直挂到 10s 超时分支)。
+	const maxEmitDuration = 5 * time.Second
 	select {
 	case elapsed := <-done:
-		if elapsed > 2*time.Second {
-			t.Errorf("Emit 被慢客户端阻塞 %v(应非阻塞投递)", elapsed)
+		if elapsed > maxEmitDuration {
+			t.Errorf("Emit 被慢客户端阻塞 %v(应非阻塞投递,阈值 %v)", elapsed, maxEmitDuration)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Emit 长时间未返回:订阅回调仍在同步写客户端")
