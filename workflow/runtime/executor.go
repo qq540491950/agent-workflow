@@ -325,14 +325,40 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 	data := e.CtxMgr.Build(mode, ec, node.ID)
 	prompt := cfgStr(node, "prompt")
 	if prompt == "" {
+		// prompt 有两种写法:字符串,或 {template: ...}(契约表里 prompt 的
+		// 子键就是 template)。写成对象却没给可用的 template 时,此前
+		// prompt 会变成空串 —— Agent 收到**空提示词**照常执行,用户以为
+		// 提示词生效了(约定 14:该失败却成功)。显式失败(fail closed)。
 		if tplRaw, ok := node.Config["prompt"].(map[string]any); ok {
-			prompt, _ = tplRaw["template"].(string)
+			tpl, isStr := tplRaw["template"].(string)
+			if !isStr {
+				return compiler.NodeOutcome{
+					State: model.NodeFailed,
+					Error: fmt.Sprintf("节点 %s 的 prompt 必须是字符串,或 {template: \"...\"} 对象(对象里没有可用的 template)", node.ID),
+				}
+			}
+			prompt = tpl
 		}
 	}
-	rendered, missing := e.Tpl.Render(prompt, data)
+	rendered, missing, err := e.Tpl.RenderErr(prompt, data)
+	if err != nil {
+		// 渲染失败 → 节点失败(约定 14)。此前用 Render:渲染失败时它**吞掉
+		// error 并回退原始模板**,于是 Agent 收到的是一段没渲染过的模板
+		// 文本,照常执行、照常 SUCCESS —— 用户完全不知道提示词根本没渲染。
+		return compiler.NodeOutcome{
+			State: model.NodeFailed,
+			Error: fmt.Sprintf("节点 %s 的 prompt 模板渲染失败: %v", node.ID, err),
+		}
+	}
 	instructions := rendered
 	if extra := cfgStr(node, "instructions"); extra != "" {
-		r2, m2 := e.Tpl.Render(extra, data)
+		r2, m2, rerr := e.Tpl.RenderErr(extra, data)
+		if rerr != nil {
+			return compiler.NodeOutcome{
+				State: model.NodeFailed,
+				Error: fmt.Sprintf("节点 %s 的 instructions 模板渲染失败: %v", node.ID, rerr),
+			}
+		}
 		missing = append(missing, m2...)
 		instructions = strings.TrimSpace(rendered + "\n\n" + r2)
 	}
@@ -449,18 +475,48 @@ func (e *Engine) invokeAgent(ctx context.Context, a coreagent.Agent, req coreage
 		Output:   resp.Output,
 		Data:     resp.Data,
 	}
-	switch resp.Status {
-	case coreagent.StatusFailed:
+	switch normalizeAgentStatus(resp.Status) {
+	case string(coreagent.StatusSuccess):
+		// 契约内:成功(保持默认状态)
+	case string(coreagent.StatusFailed):
 		outcome.State = model.NodeFailed
 		outcome.Error = resp.Error
-	case coreagent.StatusWaitUser:
+		if outcome.Error == "" {
+			// 失败却没有原因:用户只看到"失败",无从下手
+			outcome.Error = "Agent " + a.ID() + " 返回 FAILED"
+		}
+	case string(coreagent.StatusWaitUser):
 		outcome.State = model.NodeWaiting
 		if outcome.Data == nil {
 			outcome.Data = map[string]any{}
 		}
 		outcome.Data["responses"] = []string{"approve", "reject", "continue", "instruction"}
+	default:
+		// 契约外状态 → **显式失败**(约定 14),与 Skill 侧同一口径:
+		// 工作流无法判断这个 Agent 到底成功没有,按成功继续就是
+		// "该失败却成功"。
+		outcome.State = model.NodeFailed
+		if strings.TrimSpace(string(resp.Status)) == "" {
+			outcome.Error = fmt.Sprintf("Agent %q 未返回状态(契约要求 SUCCESS/FAILED/WAIT_USER)", a.ID())
+		} else {
+			outcome.Error = fmt.Sprintf("Agent %q 返回未知状态 %q(契约只允许 SUCCESS/FAILED/WAIT_USER)",
+				a.ID(), resp.Status)
+		}
 	}
 	return outcome
+}
+
+// normalizeAgentStatus 归一化 Agent 返回的状态(去首尾空白 + 转大写)。
+//
+// agent.AgentStatus 是字符串类型,外部实现可能返回 "failed" / "wait_user"。
+// 运行期此前**精确匹配**大小写:小写 "failed" 不匹配任何分支 → 落到
+// 默认 → 节点按**成功**继续(该失败却成功,约定 14)。
+//
+// 口径与 Skill 侧一致(skill.NormalizeStatus:去空白 + 转大写)。
+// agent 包目前只有 NormalizeDecision、没有状态归一化函数,所以这里在
+// 运行期本地归一(不改 agent 包的所有权范围)。
+func normalizeAgentStatus(s coreagent.AgentStatus) string {
+	return strings.ToUpper(strings.TrimSpace(string(s)))
 }
 
 // retryPolicyOf 读取节点 retry 配置。
@@ -515,7 +571,20 @@ func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *m
 	if e.IsSkillDisabled != nil && e.IsSkillDisabled(skillID) {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: "Skill 已被禁用: " + skillID}
 	}
-	args, _ := node.Config["args"].(map[string]any)
+	// args 必须是对象:此前写法 `args, _ := node.Config["args"].(map[string]any)`
+	// 在类型断言失败时把参数变成 nil,**不报任何错** —— 用户在节点上写的
+	// 参数全部静默丢失,Skill 拿到空参数照常执行(约定 14:该失败却成功)。
+	// 显式失败(fail closed):args 不存在或为空值是合法的,类型不对不是。
+	args, argsOK := node.Config["args"].(map[string]any)
+	if !argsOK {
+		if raw, exists := node.Config["args"]; exists && raw != nil {
+			return compiler.NodeOutcome{
+				State: model.NodeFailed,
+				Error: fmt.Sprintf("节点 %s 的 args 必须是对象(键值对),实际是 %T", node.ID, raw),
+			}
+		}
+		args = nil
+	}
 	resp, err := s.Execute(ctx, skill.SkillRequest{
 		NodeID:   node.ID,
 		Args:     args,
@@ -541,9 +610,15 @@ func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *m
 	// (约定 14)。此前只精确匹配 "WAIT_USER" 与 {"FAILED","failed"}:
 	// 小写 "wait_user" 被当成功,人工确认这一步被静默跳过。
 	switch skill.NormalizeStatus(resp.Status) {
+	case skill.StatusSuccess:
+		// 契约内:成功(保持默认状态)
 	case skill.StatusFailed:
 		outcome.State = model.NodeFailed
 		outcome.Error = resp.Error
+		if outcome.Error == "" {
+			// 失败却没有原因:用户只看到"失败"两个字,无从下手
+			outcome.Error = "Skill " + skillID + " 返回 FAILED"
+		}
 	case skill.StatusWaitUser:
 		// Skill 接口承诺 WAIT_USER:暂停等待用户输入(与人工节点一致)
 		outcome.State = model.NodeWaiting
@@ -551,6 +626,22 @@ func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *m
 			outcome.Data = map[string]any{}
 		}
 		outcome.Data["responses"] = []string{"approve", "reject", "continue", "instruction"}
+	default:
+		// 契约外状态 → **显式失败**(约定 14)。
+		//
+		// 旧口径是"未知状态按成功处理(不猜)":但"不猜"应当是"不猜某个
+		// 具体状态值",而不是"猜它是成功"。契约只承诺三个状态,返回第四种
+		// 取值说明这个 Skill 出了问题(实现有 bug / 第三方用了别的口径),
+		// 此时工作流**无法知道它到底成功没有** —— 按成功继续就是
+		// "该失败却成功",用户看到的却是"执行成功"。
+		// 失败原因里点名状态值与契约,用户照着改即可。
+		outcome.State = model.NodeFailed
+		if strings.TrimSpace(resp.Status) == "" {
+			outcome.Error = fmt.Sprintf("Skill %q 未返回状态(契约要求 SUCCESS/FAILED/WAIT_USER)", skillID)
+		} else {
+			outcome.Error = fmt.Sprintf("Skill %q 返回未知状态 %q(契约只允许 SUCCESS/FAILED/WAIT_USER)",
+				skillID, resp.Status)
+		}
 	}
 	if resp.Decision != "" {
 		outcome.Decision = resp.Decision
@@ -576,8 +667,20 @@ func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *mod
 	default:
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: "不支持的 git 操作: " + op}
 	}
-	args, _ := node.Config["args"].(map[string]any)
-	out, err := e.Git.Run(ctx, op, args)
+	// git 节点同理:args 必须是对象。git 服务靠 args 里的
+	// working_dir / staged / max_count / name 生效,类型不对时这些参数
+	// 会被静默丢弃(跑成"默认 git status")—— 显式失败(fail closed)。
+	gitArgs, gitArgsOK := node.Config["args"].(map[string]any)
+	if !gitArgsOK {
+		if raw, exists := node.Config["args"]; exists && raw != nil {
+			return compiler.NodeOutcome{
+				State: model.NodeFailed,
+				Error: fmt.Sprintf("节点 %s 的 args 必须是对象(键值对),实际是 %T", node.ID, raw),
+			}
+		}
+		gitArgs = nil
+	}
+	out, err := e.Git.Run(ctx, op, gitArgs)
 	if err != nil {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 	}
@@ -841,7 +944,18 @@ func (e *Engine) runSubworkflowNode(ctx context.Context, env *compiler.RunEnv, n
 	if e.SubworkflowRunner == nil {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: "subworkflow runner 未配置"}
 	}
-	input, _ := node.Config["input"].(map[string]any)
+	// input 与 args 同理:必须是对象。类型不对时子工作流收到空 input,
+	// 用户写的输入被静默丢弃(约定 14)。
+	input, inputOK := node.Config["input"].(map[string]any)
+	if !inputOK {
+		if raw, exists := node.Config["input"]; exists && raw != nil {
+			return compiler.NodeOutcome{
+				State: model.NodeFailed,
+				Error: fmt.Sprintf("节点 %s 的 input 必须是对象(键值对),实际是 %T", node.ID, raw),
+			}
+		}
+		input = nil
+	}
 	result, err := e.SubworkflowRunner(ctx, wfID, env.Exec.Task, input)
 	if err != nil {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}

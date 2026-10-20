@@ -289,6 +289,31 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 		addWarn("DEPRECATED_NODE_CONFIG", n.ID, "%s", msg)
 	}
 
+	// 未知配置键:键名拼错(timeout_seconds 写成 timeout_second)时,运行期
+	// **照常执行节点**,只是那个设置根本没生效 —— 用户以为超时是 30 秒,
+	// 实际用的是默认值。此前校验期只查必填键,拼错的键既不报错也不警告,
+	// 与"没写"完全无法区分(约定 14:静默丢弃与崩溃同样危险)。
+	//
+	// **只警告,不报错**:存量工作流里确实存在拼错或已废弃的键,一旦报错,
+	// 用户就打不开自己的老工作流(约定 13 的反例)。警告不阻断保存,前端
+	// 会把它显示在画布错误面板与 toast 里(前端 validate 分支已经会渲染
+	// res.warnings)。
+	//
+	// 键的清单只有一份来源:compiler.NodeConfigSpecFor(约定 13)——
+	// 已废弃的键也在清单里,因此它们只报"已废弃",不会同时报"未知"。
+	//
+	// 被禁用的节点不参与本检查:运行期在类型分发前就跳过它,一个配置键都
+	// 不读(见上面 enabled 分支的提前 return)—— 那里报出来对用户无意义。
+	knownKeys := knownConfigKeys(spec)
+	for _, key := range unknownConfigKeys(n, knownKeys) {
+		msg := fmt.Sprintf("节点 %q 的配置键 %q 未被识别(运行期会忽略它,该设置不会生效)", n.ID, key)
+		if hint := closestConfigKey(key, knownKeys); hint != "" {
+			msg += fmt.Sprintf(";是否想写 %q?", hint)
+		}
+		msg += fmt.Sprintf(";该节点类型允许的键: %s", strings.Join(knownKeys, ", "))
+		addWarn("UNKNOWN_NODE_CONFIG", n.ID, "%s", msg)
+	}
+
 	switch n.Type {
 	case model.NodeTypeAgent:
 		if str("agent") != "" && agents != nil && !agents(str("agent")) {
@@ -305,6 +330,101 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 			addErr("INVALID_GIT_OPERATION", n.ID, "git 节点 %q 的 operation %q 非法(允许: %s)", n.ID, op, strings.Join(compiler.GitOperations(), "|"))
 		}
 	}
+}
+
+// knownConfigKeys 返回该节点类型"被识别"的全部配置键(排序后)。
+//
+// 唯一来源是 compiler.NodeConfigSpecFor(约定 13:校验期与运行期同源):
+//
+//   - Required / Optional:运行期会读的键;
+//   - ValidatorOnly:只有校验期使用、运行期不读的键;
+//   - Deprecated:已废弃的键(仍在清单里 → 报"已废弃"而不是"未知");
+//   - GlobalConfigKeys:所有节点类型都支持的全局键(enabled)。
+//
+// 子键(如 prompt.template / retry.max_attempts)**不查**:map 型配置键
+// 的内容是开放的(prompt 既可以是字符串也可以是 {template:...},args /
+// input 更是自由映射),逐个子键校验会误伤大量合法写法。
+func knownConfigKeys(spec compiler.NodeConfigSpec) []string {
+	seen := map[string]bool{}
+	for _, k := range spec.Required {
+		seen[k] = true
+	}
+	for _, k := range spec.Optional {
+		seen[k] = true
+	}
+	for _, k := range spec.ValidatorOnly {
+		seen[k] = true
+	}
+	for _, k := range spec.Deprecated {
+		seen[k] = true
+	}
+	for _, k := range compiler.GlobalConfigKeys() {
+		seen[k] = true
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// unknownConfigKeys 返回节点配置里不被识别的键(排序)。
+func unknownConfigKeys(n model.Node, known []string) []string {
+	set := make(map[string]bool, len(known))
+	for _, k := range known {
+		set[k] = true
+	}
+	var out []string
+	for k := range n.Config {
+		if !set[k] {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// closestConfigKey 在允许的键里找"最可能是用户想写的那个"。
+//
+// 编辑距离 ≤ 2 才算相近(timeout_seconds → timeout_second 距离 1;
+// 距离太远的键给建议反而误导)。找不到相近的返回空串。
+func closestConfigKey(key string, candidates []string) string {
+	best, bestDist := "", 3
+	for _, c := range candidates {
+		if d := editDistance(key, c); d < bestDist {
+			best, bestDist = c, d
+		}
+	}
+	return best
+}
+
+// editDistance 是 Levenshtein 距离(插入/删除/替换各算 1)。
+func editDistance(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	prev := make([]int, len(br)+1)
+	cur := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		cur[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			cur[j] = prev[j-1] + cost
+			if v := prev[j] + 1; v < cur[j] {
+				cur[j] = v
+			}
+			if v := cur[j-1] + 1; v < cur[j] {
+				cur[j] = v
+			}
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(br)]
 }
 
 // checkExpression 使用 expr 引擎做条件表达式语法检查。

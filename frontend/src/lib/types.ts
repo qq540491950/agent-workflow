@@ -43,11 +43,24 @@ export interface Workflow {
   version: number;
   enabled: boolean;
   variables?: Record<string, unknown>;
+  /**
+   * 工作流级权限覆盖(后端 model.Workflow.Permission;DSL 里写作根级
+   * permissions 段)。
+   *
+   * 设计器**不提供**编辑入口,但保存时必须原样带回 —— 保存路径会重建整个
+   * 工作流对象,漏掉这个字段等于把用户没碰过的权限覆盖静默抹掉。
+   */
+  permission?: Record<string, unknown>;
   nodes: WFNode[];
   edges: WFEdge[];
   settings: WorkflowSettings;
   created_at?: string;
   updated_at?: string;
+  /**
+   * 导入 DSL 时被解析器丢弃的键(仅导入接口的响应带这个字段)。
+   * 空数组 = 没有键被忽略。
+   */
+  ignored_keys?: string[];
 }
 
 export type ExecutionState =

@@ -34,13 +34,38 @@ import (
 	"agentworkflow/workflow/validator"
 )
 
+// TemplateRenderer 是 prompt 模板渲染器。
+//
+// 运行期只用带错误返回的入口(RenderErr):渲染失败必须让节点失败,
+// 不能静默回退成原始模板 —— 否则用户以为提示词生效了,实际 Agent 收到
+// 的是一段**没渲染过的模板文本**,还照常返回 SUCCESS(约定 14)。
+//
+// 抽成接口而不是直接用 *template.Engine,原因只有一个:让"渲染失败 →
+// 节点失败"这条路径可测。template.Engine 的失败入口是渲染期 panic,
+// 而普通 DSL 输入无法稳定触发它(实测:畸形模板 "{{v"、会 panic 的
+// Formatter、空数据,RenderErr 一律返回 nil error),没有缝就只能靠
+// 注入一个会失败的渲染器来验证这条路径。
+type TemplateRenderer interface {
+	// Render 渲染模板并报告缺失变量(渲染失败时回退原始模板)。
+	//
+	// 运行期**不用**它(渲染失败必须可见,不能回退原始模板),保留这个
+	// 方法是为了不缩窄 Engine.Tpl 原来的公开能力:它是 *template.Engine
+	// 的方法,外部调用方不该因为这次收口而编译不过。
+	Render(tpl string, data map[string]any) (string, []string)
+	// RenderErr 渲染模板,渲染失败时返回 error。
+	RenderErr(tpl string, data map[string]any) (string, []string, error)
+}
+
+// 编译期断言:默认实现必须满足接口。
+var _ TemplateRenderer = (*template.Engine)(nil)
+
 // Engine 依赖注入:全部通过构造函数传入,无全局状态。
 type Engine struct {
 	Agents coreagent.Registry
 	Skills skill.Registry
 	Perms  *permission.Manager
 	CtxMgr *contextx.Manager
-	Tpl    *template.Engine
+	Tpl    TemplateRenderer
 	Bus    *event.Bus
 	Git    *git.Service
 	Repo   *persistence.DB

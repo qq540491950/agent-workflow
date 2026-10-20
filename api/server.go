@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"agentworkflow/event"
 	"agentworkflow/logx"
 	"agentworkflow/permission"
+	"agentworkflow/workflow/dsl"
 	"agentworkflow/workflow/model"
 )
 
@@ -152,7 +155,25 @@ func (s *Server) routes() {
 				fmt.Sprintf("导入内容超过 %d MB 上限", maxJSONBody>>20))
 		}
 		wf, err := s.app.Workflows.ImportYAML(string(body))
-		return writeJSON(w, wf, err)
+		if err != nil {
+			return writeJSON(w, wf, err)
+		}
+		// 附上"被忽略的键"清单:DSL 解析器把闭合结构里的未知键丢掉了
+		// (记入 Document.IgnoredKeys + WARN 日志),但 IgnoredKeys 不参与
+		// 序列化,用户此前**看不到** —— 导入成功 ≠ 每个设置都生效了。
+		//
+		// 响应形状:工作流字段仍在**顶层**(前端 api.importYAML 直接把响应
+		// 当 Workflow 用,契约不变),额外附加一个 ignored_keys 数组。
+		ignored := dslIgnoredKeys(body)
+		if len(ignored) == 0 {
+			return writeJSON(w, wf, nil)
+		}
+		out, err := workflowJSONMap(wf)
+		if err != nil {
+			return err
+		}
+		out["ignored_keys"] = ignored
+		return writeJSON(w, out, nil)
 	}))
 	s.mux.HandleFunc("GET /api/workflows/{id}/export", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		out, err := s.app.Workflows.ExportYAML(r.PathValue("id"))
@@ -678,7 +699,25 @@ func parseVersion(s string) (int, error) {
 // parseWorkflow 把请求体(map)转为 Workflow。
 // 结构非法(字段类型不符等)必须报错:此前丢弃 Unmarshal 错误,
 // 错类型字段会静默变成零值,产出空白/残缺工作流。
+//
+// **未知顶层键也必须报错**(UNKNOWN_FIELD):json.Unmarshal 默认宽松,多余
+// 的键被**静默丢弃** —— 用户提交了一份含多余键的 JSON,接口返回 200,
+// 用户以为那份设置生效了,实际根本没进模型(约定 14:静默丢弃 = 用户
+// 以为设置还在)。
+//
+// 与 DSL 顶层键策略同源:workflow/dsl 对文档顶层的未知键报
+// DSL_UNKNOWN_KEY(迭代 15),JSON 保存路径此前却没有对应行为 —— 同一份
+// 定义换个格式导入行为就不同。
+//
+// 前端发出的 payload 只含模型里的字段(设计器 toWorkflowModel / 新建
+// 工作流),因此严格化**不会**打破前端保存路径(见
+// TestFrontendSavePayloadsAreAccepted)。
 func parseWorkflow(m map[string]any) (*model.Workflow, error) {
+	if unknown := unknownTopLevelKeys(m); len(unknown) > 0 {
+		return nil, model.NewError(model.KindValidationError, "UNKNOWN_FIELD",
+			fmt.Sprintf("未知的顶层字段 %s(允许: %s)",
+				strings.Join(unknown, ", "), strings.Join(allowedTopLevelKeys(), ", ")))
+	}
 	raw, err := json.Marshal(m)
 	if err != nil {
 		return nil, badRequest("工作流结构非法: " + err.Error())
@@ -688,4 +727,77 @@ func parseWorkflow(m map[string]any) (*model.Workflow, error) {
 		return nil, badRequest("工作流结构非法: " + err.Error())
 	}
 	return &wf, nil
+}
+
+// workflowTopLevelKeys 是工作流 JSON 允许的顶层键集合。
+//
+// 唯一来源:model.Workflow 的 json tag(反射派生 —— 模型加字段这里自动
+// 生效,不会与模型漂移),外加两个特例:
+//
+//   - "permissions":DSL 根级段的正式写法(需求.md 第十八章),模型读它时
+//     映射到 Permission 字段(见 model.Workflow.UnmarshalJSON);
+//   - "ignored_keys":导入接口的**响应专用**字段(见 import 处理器)。
+//     保存时忽略它 —— 拒掉它会让"导入 → 原样回存"这种往返失败。
+var workflowTopLevelKeys = buildWorkflowTopLevelKeys()
+
+func buildWorkflowTopLevelKeys() map[string]bool {
+	out := map[string]bool{}
+	t := reflect.TypeOf(model.Workflow{})
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		out[name] = true
+	}
+	out["permissions"] = true
+	out["ignored_keys"] = true
+	return out
+}
+
+// allowedTopLevelKeys 返回允许的顶层键(排序后),用于错误信息。
+func allowedTopLevelKeys() []string {
+	out := make([]string, 0, len(workflowTopLevelKeys))
+	for k := range workflowTopLevelKeys {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// unknownTopLevelKeys 返回请求体里不被识别的顶层键(排序)。
+func unknownTopLevelKeys(m map[string]any) []string {
+	var out []string
+	for k := range m {
+		if !workflowTopLevelKeys[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// dslIgnoredKeys 解析 DSL 文本,返回"出现在文档里但被解析器丢弃"的键。
+//
+// 解析失败时返回 nil:真正的错误由 app 层的 ImportYAML 报出(这里不重复
+// 报错,避免两处错误语义不一致)。
+func dslIgnoredKeys(content []byte) []string {
+	doc, err := dsl.Parse(content)
+	if err != nil {
+		return nil
+	}
+	return doc.IgnoredKeys
+}
+
+// workflowJSONMap 把工作流展开成 map(便于在响应里附加额外字段)。
+func workflowJSONMap(wf *model.Workflow) (map[string]any, error) {
+	raw, err := json.Marshal(wf)
+	if err != nil {
+		return nil, badRequest("工作流序列化失败: " + err.Error())
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, badRequest("工作流序列化失败: " + err.Error())
+	}
+	return m, nil
 }

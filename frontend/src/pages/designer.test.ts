@@ -9,7 +9,9 @@ import {
   nodeEnabledInvalid,
   defaultConfigForType,
   legacyConditionExpression,
+  toWorkflowModel,
 } from "./Designer";
+import type { Workflow } from "@/lib/types";
 
 const nodes = (...ids: string[]): RFNode[] =>
   ids.map((id) => ({ id, type: "wf", position: { x: 0, y: 0 }, data: {} }));
@@ -85,5 +87,44 @@ describe("condition 节点的废弃 expression", () => {
     expect(legacyConditionExpression({})).toBe("");
     expect(legacyConditionExpression({ expression: 42 })).toBe("");
     expect(legacyConditionExpression({ expression: "" })).toBe("");
+  });
+});
+
+// 工作流级权限覆盖(后端 model.Workflow.Permission,JSON 键 "permission";
+// DSL 里写作根级 permissions 段)。
+//
+// 设计器**没有**这个字段的编辑入口(UI 不呈现它),但服务端返回的工作流
+// 里带着它 —— 而设计器的保存路径会**重建整个工作流对象**(只带固定字段
+// 清单)。此前清单里没有 permission:用户在画布上改点别的再点保存,服务端
+// 存的权限覆盖就被**静默抹掉**,而用户从头到尾没碰过它(约定 14:静默
+// 丢弃 = 用户以为设置还在,实际已经没了)。
+//
+// 这里锁住:保存时原样带回 permission(不做任何改写)。
+describe("工作流级权限覆盖不被保存丢掉", () => {
+  const base: Workflow = {
+    id: "wf-1",
+    name: "W",
+    description: "",
+    version: 3,
+    enabled: true,
+    variables: {},
+    nodes: [],
+    edges: [],
+    settings: { max_iterations: 5, on_loop_limit: "wait_user" },
+  };
+
+  it("保存时保留从服务端读到的 permission", () => {
+    const permission = { "claude-code": { filesystem: { write: false } } };
+    const model = toWorkflowModel({ ...base, permission }, [], []);
+    expect(model.permission).toEqual(permission);
+    // 真正发出去的 payload(序列化之后)必须带着这个字段
+    const payload = JSON.parse(JSON.stringify(model)) as Workflow;
+    expect(payload.permission).toEqual(permission);
+  });
+
+  it("没有权限覆盖时 payload 不带这个键", () => {
+    const model = toWorkflowModel(base, [], []);
+    expect(model.permission).toBeUndefined();
+    expect(JSON.stringify(model)).not.toContain("permission");
   });
 });

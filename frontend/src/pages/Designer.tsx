@@ -131,6 +131,55 @@ function sublabelOf(n: WFNode): string {
   }
 }
 
+// 把画布状态重建为提交给后端的工作流定义。
+//
+// **保存路径会用它整体替换工作流对象**:凡是这里没有的字段,都会被丢掉。
+// 因此凡是"服务端有、设计器不改写"的字段,都必须在这里原样带回 ——
+// 否则用户在画布上改点别的再点保存,那些字段就被静默抹掉(约定 14:
+// 静默丢弃 = 用户以为设置还在,实际已经没了)。
+//
+// 当前原样带回的字段:
+//
+//   - permission:工作流级权限覆盖。设计器**不提供**编辑入口(UI 不呈现),
+//     但服务端返回的工作流里带着它(YAML 导入 / 备份恢复都会写进去),
+//     漏掉就等于把用户没碰过的权限收紧抹掉。
+//
+// 导出以便单测锁定该行为(见 designer.test.ts)。
+export function toWorkflowModel(
+  wf: Workflow | null,
+  nodes: RFNode[],
+  edges: RFEdge[],
+): Workflow {
+  const wfNodes: WFNode[] = nodes.map((n) => ({
+    id: n.id,
+    name: String(n.data.label ?? n.id),
+    type: n.data.wtype as WFNode["type"],
+    position: { x: n.position.x, y: n.position.y },
+    config: (n.data.cfg as Record<string, unknown>) ?? {},
+  }));
+  const model: Workflow = {
+    id: wf?.id ?? "",
+    name: wf?.name ?? "",
+    description: wf?.description ?? "",
+    version: wf?.version ?? 0,
+    enabled: wf?.enabled ?? true,
+    variables: wf?.variables ?? {},
+    nodes: wfNodes,
+    edges: edges.map((e) => ({
+      from: e.source,
+      to: e.target,
+      condition: (e.data?.condition as string) || undefined,
+    })),
+    settings: wf?.settings ?? { max_iterations: 5, on_loop_limit: "wait_user" },
+  };
+  // 权限覆盖:有就原样带回(不解析、不改写),没有就不放这个键 ——
+  // 放一个 undefined 进去在桌面 IPC 路径上会变成"显式清空"。
+  if (wf?.permission !== undefined) {
+    model.permission = wf.permission;
+  }
+  return model;
+}
+
 // ---- Designer 页面 ----
 
 export default function Designer() {
@@ -233,28 +282,7 @@ function DesignerInner() {
   }
 
   function toModel(): Workflow {
-    const wfNodes: WFNode[] = nodes.map((n) => ({
-      id: n.id,
-      name: String(n.data.label ?? n.id),
-      type: n.data.wtype as WFNode["type"],
-      position: { x: n.position.x, y: n.position.y },
-      config: (n.data.cfg as Record<string, unknown>) ?? {},
-    }));
-    return {
-      id: wf?.id ?? "",
-      name: wf?.name ?? "",
-      description: wf?.description ?? "",
-      version: wf?.version ?? 0,
-      enabled: wf?.enabled ?? true,
-      variables: wf?.variables ?? {},
-      nodes: wfNodes,
-      edges: edges.map((e) => ({
-        from: e.source,
-        to: e.target,
-        condition: (e.data?.condition as string) || undefined,
-      })),
-      settings: wf?.settings ?? { max_iterations: 5, on_loop_limit: "wait_user" },
-    };
+    return toWorkflowModel(wf, nodes, edges);
   }
 
   // autoLayout 用 dagre 按连线方向重排节点(自上而下)
