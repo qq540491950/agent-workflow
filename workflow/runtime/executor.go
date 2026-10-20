@@ -277,6 +277,37 @@ func cfgStr(node *model.Node, key string) string {
 	return ""
 }
 
+// cfgStringList 读取字符串列表型节点配置。
+//
+// **必须认全所有切片形态**(与 cfgInt 同一族理由):配置值的类型随来源而变 ——
+//
+//	YAML / JSON 解析 → []any
+//	程序化构造(导入器、嵌入方、测试) → []string
+//
+// 此前 HITL 的 responses 只认 []any(`node.Config["responses"].([]any)`):
+// 值是 []string 时断言失败且被 `_` 吞掉 → 用户配置的选项列表**静默丢弃**、
+// 回落到默认四项,全程无报错(#256)。
+//
+// 返回空切片表示"没配"或"配的不是列表"(调用方决定怎么兜底)。
+func cfgStringList(node *model.Node, key string) []string {
+	v, ok := node.Config[key]
+	if !ok || v == nil {
+		return nil
+	}
+	switch list := v.(type) {
+	case []string:
+		return list
+	case []any:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			out = append(out, fmt.Sprint(item))
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // cfgInt 读取整数型节点配置。
 //
 // 数值类型随来源而变:YAML 整数是 int/uint64、JSON 整数是 float64、
@@ -741,8 +772,17 @@ func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *mod
 		// 代码里的标识符(token = getToken())原样保留 —— diff 的可读性
 		// 与审计证据不受影响(第八轮"artifact 不脱敏"的理由正是这个,
 		// 本轮改用形态判定而不是"整值替换"来同时满足两边)。
+		// 制品 ID 生成失败(熵源不可用)时不能退化成全零 ID ——
+		// 那会让每次 diff 落到同一条制品记录上(互相覆盖)。
+		// 与"落库失败"同口径:记错误、跳过制品,节点本身照常成功。
+		artifactID, err := newID("art")
+		if err != nil {
+			logx.Error("制品 ID 生成失败,已跳过制品落库", "execution", env.Exec.ID,
+				"node", node.ID, "error", err.Error())
+			return compiler.NodeOutcome{State: model.NodeSuccess, Output: out, Summary: "git " + op}
+		}
 		artifact := &model.Artifact{
-			ID: newID("art"), ExecutionID: env.Exec.ID, NodeID: node.ID,
+			ID: artifactID, ExecutionID: env.Exec.ID, NodeID: node.ID,
 			Name: "git-diff", ContentType: "text/x-diff",
 			Content:   coreagent.MaskCredentialValues(out),
 			CreatedAt: time.Now().Format(time.RFC3339Nano),
@@ -981,11 +1021,7 @@ func (e *Engine) runHumanNode(ctx context.Context, env *compiler.RunEnv, node *m
 	if prompt == "" {
 		prompt = "工作流需要人工确认"
 	}
-	responses, _ := node.Config["responses"].([]any)
-	var respNames []string
-	for _, r := range responses {
-		respNames = append(respNames, fmt.Sprint(r))
-	}
+	respNames := cfgStringList(node, "responses")
 	if len(respNames) == 0 {
 		respNames = []string{"approve", "reject", "continue", "instruction"}
 	}

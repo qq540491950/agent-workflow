@@ -15,6 +15,22 @@ import (
 	"agentworkflow/workflow/model"
 )
 
+// gitRaceIterations 是并发探针的写侧迭代数(#208)。
+//
+// **为什么要有下限**:迭代数太少 = 恒真的假保护 —— 去掉锁后 -race 仍全绿,
+// 比没有测试更危险(约定 14 的测试侧同款)。
+//
+// 实测(隔离副本,去掉 wdMu 的读写锁后跑 `go test -race`):
+//
+//	200 次 → 5/5 命中 DATA RACE
+//
+// 取 200:既能稳定命中,又几乎不拖慢门禁(整个循环 <1ms)。
+//
+// **更重要的是窗口形态**:旧写法靠 time.Sleep 建窗口,读写可能零重叠;
+// 现在用屏障(读者先就位)让读写**必然**重叠 —— 迭代数只是下限保障,
+// 屏障才是"重叠是确定的"这件事的保证。
+const gitRaceIterations = 200
+
 // newTempRepo 创建带一次提交的临时 git 仓库。
 func newTempRepo(t *testing.T) string {
 	t.Helper()
@@ -189,16 +205,25 @@ func TestCommitHookCancelPromptReturn(t *testing.T) {
 // 读它决定 cmd.Dir)。Go 字符串是 (ptr, len) 二元组,非原子:此前是裸
 // 导出字段,无锁并发读写是 DATA RACE,撕裂后可产生非法指针
 // (AGENTS.md 硬性约定 #15)。
+//
+// **读写窗口必须确定**(#208):旧写法是"写者跑固定次数 + time.Sleep(100ms)
+// 建窗口"—— 调度不巧时写者早已跑完,读者与写者**零重叠**,
+// -race 什么也报不出(实测:去掉锁仍全绿 = 恒真的假保护)。
+// 现在用**屏障**:读者先就位并持续自旋,写者才开始写 ——
+// 读写必然重叠,窗口 = 写者的循环时长。
 func TestWorkingDirConcurrentAccess(t *testing.T) {
 	s := New("/tmp/before")
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	stop := make(chan struct{})
 
 	// 读者:模拟执行协程
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
+		ready.Add(1)
 		go func() {
 			defer wg.Done()
+			ready.Done() // 就位信号:屏障 —— 写者开始写时读者已在自旋
 			for {
 				select {
 				case <-stop:
@@ -209,16 +234,17 @@ func TestWorkingDirConcurrentAccess(t *testing.T) {
 			}
 		}()
 	}
-	// 写者:模拟设置页反复改目录
+	ready.Wait()
+
+	// 写者:模拟设置页反复改目录(紧凑循环,迭代数足够让去锁后必红)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 200; i++ {
+		for i := 0; i < gitRaceIterations; i++ {
 			s.SetWorkingDir(fmt.Sprintf("/tmp/dir-%d", i))
 		}
+		close(stop) // 写者跑完 → 读者退出(窗口 = 写者的循环时长)
 	}()
-	time.Sleep(100 * time.Millisecond)
-	close(stop)
 	wg.Wait()
 
 	// 最终值必须是一个完整的字符串(不是撕裂的 ptr/len)
@@ -334,11 +360,14 @@ func TestRunMissingArguments(t *testing.T) {
 func TestBinConcurrentAccess(t *testing.T) {
 	s := New(t.TempDir())
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	stop := make(chan struct{})
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
+		ready.Add(1)
 		go func() {
 			defer wg.Done()
+			ready.Done() // 就位信号:屏障(见 TestWorkingDirConcurrentAccess)
 			for {
 				select {
 				case <-stop:
@@ -349,14 +378,14 @@ func TestBinConcurrentAccess(t *testing.T) {
 			}
 		}()
 	}
+	ready.Wait()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 200; i++ {
+		for i := 0; i < gitRaceIterations; i++ {
 			s.SetBin("git")
 		}
+		close(stop) // 写者跑完 → 读者退出
 	}()
-	time.Sleep(50 * time.Millisecond)
-	close(stop)
 	wg.Wait()
 }

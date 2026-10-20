@@ -47,7 +47,7 @@
 | --- | --- | --- |
 | GET | `/api/agents` | Agent 注册表(含权限策略与已配置模型) |
 | POST | `/api/agents/{id}/test` | 可用性测试(CLI 探测) |
-| GET | `/api/agents/{id}/config` | 读取运行配置(env 值以 `***` 掩码;**`extra_args` 里的值同样被掩码**)。**`behavior` 字段目前未掩码(登记为 #255,第十三轮修复中)** |
+| GET | `/api/agents/{id}/config` | 读取运行配置(env 值以 `***` 掩码;**`extra_args` 里的值同样被掩码**;**`behavior` 字段也已纳入掩码**,走键名 + 值形态规则,#255 已关闭) |
 | PUT | `/api/agents/{id}/config` | 保存配置并热重建适配器(env `***`=保留,空=删除) |
 | POST | `/api/agents/{id}/reset` | 清空运行配置,恢复适配器内置默认 |
 | POST | `/api/agents/{id}/permission` | 更新权限策略。整表读-改-写已加锁串行化,并发授权**不会互相覆盖** |
@@ -389,18 +389,26 @@ HTTP 状态码语义:
 > **未覆盖的格子必须写清理由**。将来谁改门槛,矩阵立刻变红,取舍必须被
 > **重新论证**一遍。
 
-### 11. `behavior` 字段尚未掩码(第十三轮修复中,登记为 #255)
+### 11. `behavior` 字段的掩码(第十三轮已修,#255)
 
-> **这是当前仍开放的一条**,写在这里是为了让"字段级的掩码覆盖面"可查。
+> **已关闭**(commit `aa88aee`)。写在这里是为了让"字段级的掩码覆盖面"可查 ——
+> 将来再加新字段时,这一节就是对照表。
 
 `GET /api/agents/{id}/config` 返回的 `AgentConfig` 里,`env` 的值与
-`extra_args` 里的凭据**都**被掩码为 `***`,但 **`behavior`(自由映射
-`map[string]any`)没有走掩码** → 该字段里若含凭据形态的值,会**原样返回**
-(约定 8 要求"API 返回掩码")。
+`extra_args` 里的凭据**都**被掩码为 `***`;**`behavior`(自由映射
+`map[string]any`)此前没有走掩码** → 该字段里若含凭据形态的值,会**原样返回**
+(违反约定 8"API 返回掩码")。
 
-**已知结论(第十三轮修)**:掩码要覆盖**全部**可能承载凭据的字段;
-`behavior` 是自由映射,不能按值形态**盲抹**(会毁掉合法配置),但**必须过
-一遍值的形态规则**。
+**现在的行为**:`AgentConfig.Masked()` 把 `behavior` 一并纳入掩码,走
+`logx.MaskValue` 的**键名 + 值形态**规则 —— `behavior` 是自由映射,不能按值
+形态**盲抹**(会毁掉合法配置),但**必须过一遍值的形态规则**。
+
+**回写语义(约定 5)**:前端打开配置拿到的是掩码副本,保存时会把整份配置
+原样回传 → `***` 哨兵必须按**同路径**换回已存值(`MergeMaskedBehavior`),
+否则用户只改了个模型名,就把凭据覆盖成了哨兵。同路径的必要性:`behavior`
+是嵌套的 `map[mode]map[field]value`,同名字段在不同 mode 下互相独立。
+
+**验证**:`agent/config_behavior_test.go`、`app/application/behavior_mask_test.go`。
 
 ## SSE 实时事件流(GET /api/events)
 

@@ -417,10 +417,26 @@ func (a *App) runSubworkflow(ctx context.Context, workflowID, task string, input
 	return nil, fmt.Errorf("子工作流超时")
 }
 
-func randHex(n int) string {
+// randRead 是 crypto/rand.Read 的间接层(**测试接缝**)。
+//
+// 为什么需要它:熵源失败必须能被测试复现 —— 生产环境里 crypto/rand 极少
+// 失败,但"失败即全零 ID"的后果是**覆盖既有工作流**(见 randHex)。
+var randRead = func(b []byte) (int, error) { return crypto_rand.Read(b) }
+
+// randHex 生成 n 字节随机数的十六进制串。
+//
+// **熵源失败必须让调用方知道**:此前是 `_, _ = crypto_rand.Read(b)` ——
+// 失败时 b 保持**全零**,于是工作流 ID 恒为 "wf-000000000000" →
+// 与既有工作流撞车 → SaveWorkflow 按 ID **覆盖** → 静默数据丢失
+// (约定 14 同族:该失败却成功)。
+//
+// 现在失败即返回错误:调用方(保存/复制/导入)直接失败,不动既有数据。
+func randHex(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = crypto_rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := randRead(b); err != nil {
+		return "", fmt.Errorf("生成随机 ID 失败(熵源不可用): %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // ScriptNodesAllowed 报告 script 节点是否已放行(供引擎门禁与设置页读取)。
@@ -632,7 +648,12 @@ func (s *WorkflowService) validateWorkflow(wf *model.Workflow) *validator.Result
 // 静默丢失(约定 #14 同族)。这里既记进日志(不丢),也随结果带回。
 func (s *WorkflowService) saveModel(wf *model.Workflow) (*model.Workflow, []validator.ValidationError, error) {
 	if wf.ID == "" {
-		wf.ID = "wf-" + strings.ToLower(randHex(6))
+		id, err := randHex(6)
+		if err != nil {
+			// 熵源不可用 → 拒绝保存。用全零 ID 继续 = 覆盖既有工作流。
+			return nil, nil, err
+		}
+		wf.ID = "wf-" + strings.ToLower(id)
 	}
 	// 保存前必须校验
 	res := s.validateWorkflow(wf)
@@ -710,7 +731,12 @@ func (s *WorkflowService) Duplicate(id string) (*model.Workflow, error) {
 	if err != nil {
 		return nil, err
 	}
-	wf.ID = "wf-" + strings.ToLower(randHex(6))
+	// 熵源不可用时必须失败:用全零 ID 继续 = 覆盖既有工作流(约定 14)。
+	newID, err := randHex(6)
+	if err != nil {
+		return nil, err
+	}
+	wf.ID = "wf-" + strings.ToLower(newID)
 	wf.Name = wf.Name + " (副本)"
 	wf.Version = 0
 	if err := s.app.Repo.SaveWorkflow(wf, false); err != nil {
@@ -745,7 +771,12 @@ func (s *WorkflowService) ImportYAML(content string) (*WorkflowResult, error) {
 	}
 	wf := doc.ToModel()
 	if existing, err := s.app.Repo.GetWorkflow(wf.ID); err == nil && existing != nil {
-		wf.ID = "wf-" + strings.ToLower(randHex(6))
+		// 熵源不可用时必须失败:用全零 ID 继续 = 覆盖既有工作流(约定 14)。
+		newID, err := randHex(6)
+		if err != nil {
+			return nil, err
+		}
+		wf.ID = "wf-" + strings.ToLower(newID)
 	}
 	wf.Version = 0
 	saved, warnings, err := s.saveModel(wf)

@@ -140,7 +140,11 @@ func (e *Engine) insertExecution(exec *model.Execution) error {
 			return err
 		}
 		if exists {
-			exec.ID = newID("exec")
+			newExecID, err := newID("exec")
+			if err != nil {
+				return err
+			}
+			exec.ID = newExecID
 			continue
 		}
 		if err := e.Repo.SaveExecution(maskedInsertExec(exec)); err != nil {

@@ -69,24 +69,57 @@ func TestMaskStructuredArgs(t *testing.T) {
 
 // 回归:SetLevel 运行中被设置页调用时替换全局 logger,
 // 与并发写日志曾是无锁数据竞争(现原子指针)。
+// logxRaceIterations 是并发探针的写侧迭代数(#208)。
+//
+// 下限保障:迭代数太少 = 恒真的假保护(去掉原子/锁后 -race 仍全绿)。
+// 实测(隔离副本,把 levelValue/logger 换回裸变量后跑 `go test -race`):
+// 200 次 → 5/5 命中 DATA RACE。纯内存写,整个循环 <1ms。
+const logxRaceIterations = 200
+
+// TestSetLevelConcurrent 验证日志级别的并发切换是安全的。
+//
+// **读写窗口必须确定**(#208):旧写法是两个 goroutine 各自跑固定次数,
+// 谁先跑完谁就结束 —— 读写可能**零重叠**,探针恒真。
+// 现在用**屏障**:读者(打日志)先就位并持续自旋,写者(切级别)才开始写 ——
+// 读写必然重叠,窗口 = 写者的循环时长。
 func TestSetLevelConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
+	stop := make(chan struct{})
 	levels := []string{"debug", "info", "warn", "error"}
-	wg.Add(2)
+
+	// 读者:持续打日志(读当前 logger 与级别)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		ready.Add(1)
+		go func() {
+			defer wg.Done()
+			ready.Done() // 就位信号:屏障 —— 写者开始写时读者已在自旋
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					Info("api_key=sk-secret 并发日志", "k", "v")
+					Error("token=abc")
+					_ = Levels()
+				}
+			}
+		}()
+	}
+	ready.Wait()
+
+	// 写者:切级别(重建 logger + 存级别)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 200; i++ {
+		defer close(stop) // 写者结束 → 读者退出
+		for i := 0; i < logxRaceIterations; i++ {
 			SetLevel(levels[i%len(levels)])
 		}
 	}()
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 200; i++ {
-			Info("api_key=sk-secret 并发日志", "k", "v")
-			Error("token=abc")
-		}
-	}()
 	wg.Wait()
+
 	// 收尾恢复默认级别
 	SetLevel("info")
 }

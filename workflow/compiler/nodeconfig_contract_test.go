@@ -117,6 +117,7 @@ type configReads struct {
 //
 //	node.Config["agent"]        —— 直接下标
 //	cfgStr(node, "agent")       —— 读取辅助函数(键是字面量参数)
+//	                            (认所有 cfg* 助手:cfgInt / cfgStringList …)
 //
 // 键是变量时(cfgStr(node, key))不计入:那是辅助函数自身,不是某个具体键。
 func collectConfigKeys(body *ast.BlockStmt) configReads {
@@ -153,7 +154,14 @@ func collectConfigKeys(body *ast.BlockStmt) configReads {
 		switch v := n.(type) {
 		case *ast.CallExpr:
 			ident, ok := v.Fun.(*ast.Ident)
-			if !ok || (ident.Name != "cfgStr" && ident.Name != "cfgInt") {
+			if !ok {
+				return true
+			}
+			// 认**所有** cfg* 配置读取辅助函数(cfgStr / cfgInt /
+			// cfgStringList …),而不是只认前两个:运行期重构(把配置读取
+			// 搬进新的辅助函数、改函数名)不应让本测试误报 —— 这正是本
+			// 测试开头"稳健性说明"的要求。新增 cfg* 助手无需改这里。
+			if !strings.HasPrefix(ident.Name, "cfg") {
 				return true
 			}
 			if len(v.Args) != 2 || rootIdent(v.Args[0]) != "node" {

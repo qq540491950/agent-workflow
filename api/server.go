@@ -567,6 +567,18 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		case ev := <-queue:
 			raw, err := json.Marshal(ev)
 			if err != nil {
+				// 序列化失败的事件**发不出去**。此前是 `continue`:
+				// 这一条事件不送达且**不留任何痕迹** —— 事件流里
+				// "少了一条",没人知道是哪条、为什么(约定 14 同族:
+				// 该送达却没送达 = 静默丢数据)。
+				//
+				// 现在至少记一条 WARN(可追溯:类型/执行 ID/节点/原因),
+				// 并且**继续**推流:一条坏事件不该掐断整条流。
+				logx.Warn("SSE 事件序列化失败,已跳过该事件",
+					"event_type", ev.Type,
+					"execution_id", ev.ExecutionID,
+					"node_id", ev.NodeID,
+					"error", err.Error())
 				continue
 			}
 			if !write("data: " + string(raw) + "\n\n") {

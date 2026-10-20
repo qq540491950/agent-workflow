@@ -209,10 +209,26 @@ func (e *Engine) onEventPersistFailed(ev event.UIEvent, err error) {
 	}))
 }
 
-func newID(prefix string) string {
+// randRead 是 crypto/rand.Read 的间接层(**测试接缝**)。
+//
+// 为什么需要它:熵源失败必须能被测试复现 —— 生产环境里 crypto/rand 极少
+// 失败,但"失败即全零 ID"会让执行/制品 ID 变成可预测的固定值
+// (见 newID)。
+var randRead = rand.Read
+
+// newID 生成带前缀的唯一 ID。
+//
+// **熵源失败必须让调用方知道**:此前是 `_, _ = rand.Read(b)` —— 失败时
+// b 保持**全零**,于是每次生成的 ID 完全相同("exec-00000000000000…")。
+// 对执行 ID 而言,后果是**撞车**:insertExecution 反复撞到同一 ID,
+// 重试 5 次后报"生成执行 ID 反复冲突";若真撞上既有执行,还会覆盖它。
+// 现在失败即返回错误:调用方直接失败,不产出可预测的 ID。
+func newID(prefix string) (string, error) {
 	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return prefix + "-" + hex.EncodeToString(b)
+	if _, err := randRead(b); err != nil {
+		return "", fmt.Errorf("runtime: 生成 %s ID 失败(熵源不可用): %w", prefix, err)
+	}
+	return prefix + "-" + hex.EncodeToString(b), nil
 }
 
 // Validate 在运行前再次校验(注册表信息已完备)。
@@ -294,8 +310,12 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 	for k, v := range variables {
 		vars[k] = v
 	}
+	execID, err := newID("exec")
+	if err != nil {
+		return nil, err
+	}
 	exec := &model.Execution{
-		ID:              newID("exec"),
+		ID:              execID,
 		WorkflowID:      wf.ID,
 		WorkflowVersion: wf.Version,
 		WorkflowName:    wf.Name,

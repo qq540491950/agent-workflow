@@ -4,7 +4,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 	"unicode/utf8"
 )
 
@@ -118,7 +117,19 @@ func TestSetMaxDiffChars(t *testing.T) {
 	}
 }
 
+// contextxRaceIterations 是并发探针的写侧迭代数(#208)。
+//
+// 下限保障:迭代数太少 = 恒真的假保护(去掉锁后 -race 仍全绿)。
+// 实测(隔离副本,去掉 Manager 的写锁后跑 `go test -race`):
+// 200 次 → 5/5 命中 DATA RACE。纯内存写,整个循环 <1ms。
+const contextxRaceIterations = 200
+
 // Build 的并发调用(约定 15:共享可变状态加锁)。
+//
+// **读写窗口必须确定**(#208):旧写法靠 time.Sleep(100ms) 建窗口 ——
+// 写者(200 次纯内存写,亚毫秒级)几乎必然在读者就位前就跑完,
+// 读写**零重叠**,-race 什么也报不出(恒真的假保护)。
+// 现在用**屏障**:读者先就位并持续自旋,写者才开始写 —— 读写必然重叠。
 func TestManagerConcurrentBuild(t *testing.T) {
 	m := NewManager()
 	ec := &ExecutionContext{
@@ -131,11 +142,14 @@ func TestManagerConcurrentBuild(t *testing.T) {
 		},
 	}
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	stop := make(chan struct{})
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
+		ready.Add(1)
 		go func() {
 			defer wg.Done()
+			ready.Done() // 就位信号:屏障 —— 写者开始写时读者已在自旋
 			for {
 				select {
 				case <-stop:
@@ -146,14 +160,14 @@ func TestManagerConcurrentBuild(t *testing.T) {
 			}
 		}()
 	}
+	ready.Wait()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 200; i++ {
+		defer close(stop) // 写者结束 → 读者退出
+		for i := 0; i < contextxRaceIterations; i++ {
 			m.SetMaxDiffChars(100 + i)
 		}
 	}()
-	time.Sleep(100 * time.Millisecond)
-	close(stop)
 	wg.Wait()
 }

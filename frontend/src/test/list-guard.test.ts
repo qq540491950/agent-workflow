@@ -110,6 +110,104 @@ function esc(s: string): string {
 }
 
 /**
+ * stripComments 把注释与字符串字面量的内容替换成**等长空格**。
+ *
+ * 为什么需要:守卫是**源码扫描**,注释里出现的代码形态会被当成真代码 ——
+ * 实测 components/layout.tsx 的注释"这一异常返回,execs.filter 会抛
+ * TypeError"让守卫把注释里的 execs.filter 当成了"未防御的使用"(误报)。
+ *
+ * 保持长度不变 → 所有偏移量仍然有效(调用点、绑定、使用的位置都对得上)。
+ */
+function stripComments(src: string): string {
+  const out = src.split("");
+  const n = src.length;
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to && k < n; k++) {
+      if (out[k] !== "\n") out[k] = " ";
+    }
+  };
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (c === "/" && next === "/") {
+      let j = i;
+      while (j < n && src[j] !== "\n") j++;
+      blank(i, j);
+      i = j;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      let j = i + 2;
+      while (j < n && !(src[j] === "*" && src[j + 1] === "/")) j++;
+      j = Math.min(j + 2, n);
+      blank(i, j);
+      i = j;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (src[j] === quote) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      blank(i, j);
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return out.join("");
+}
+
+/**
+ * enclosingArrayRange 返回包含 pos 的**数组字面量**的范围([ 的位置, ] 之后的位置)。
+ * 不在数组字面量里时返回 null。
+ *
+ * 为什么需要:解构赋值 `const [a, b] = await Promise.all([api.f(), api.g()])`
+ * 里,调用点的位置对应关系要靠**整个数组字面量**的元素顺序才能确定。
+ * 此前只取"调用点结束之前"的文本 → 数组没截全 → 位置对不上 →
+ * 退化成"全部变量名都当列表派生" → 非列表的返回值(比如 getExecution
+ * 的单个对象)也被当成列表 → 误报。
+ */
+function enclosingArrayRange(src: string, pos: number): [number, number] | null {
+  let depth = 0;
+  for (let i = pos; i >= 0; i--) {
+    const c = src[i];
+    if (c === "]") depth++;
+    else if (c === "[") {
+      if (depth === 0) {
+        const end = matchBracket(src, i, "[", "]");
+        return end < 0 ? null : [i, end];
+      }
+      depth--;
+    }
+  }
+  return null;
+}
+
+/** 返回与 open 位置的开括号匹配的闭括号之后的位置(找不到返回 -1) */
+function matchBracket(src: string, open: number, o: string, c: string): number {
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === o) depth++;
+    else if (src[i] === c) {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/**
  * 在 src[0, upto) 里找最靠近 upto 的赋值号位置。
  *
  * 跳过 ==、=>、>=、<=、!=、+= 等;遇到 ; { } 视为语句边界(返回 -1)——
@@ -189,6 +287,8 @@ interface ListBinding {
   offset: number;
   /** 定义处是否已经过 asArray */
   guarded: boolean;
+  /** 派生自哪个调用点(同一个调用点的多个派生共享它) */
+  callStart: number;
 }
 
 /**
@@ -203,6 +303,9 @@ interface ListBinding {
  * 再做一遍别名传播(const rows = x):x 是列表派生时,rows 也是。
  */
 function collectListBindings(src: string): ListBinding[] {
+  // 注释与字符串先抹平(内容换成等长空格,偏移量不变):
+  // 注释里的代码形态不是代码,扫描它会误报。
+  src = stripComments(src);
   const bindings: ListBinding[] = [];
   const seen = new Set<string>();
   const add = (b: ListBinding) => {
@@ -231,12 +334,18 @@ function collectListBindings(src: string): ListBinding[] {
             method,
             offset: assign,
             guarded: wrapper.includes("asArray"),
+            callStart,
           });
         } else {
           // 解构:按 Promise.all([…]) 的元素位置对应变量名。
-          const after = src.slice(assign + 1, callEnd);
-          const arrOpen = after.indexOf("[");
-          const elements = arrOpen >= 0 ? arrayElements(after, arrOpen) : [];
+          //
+          // 元素来自**包含该调用点的数组字面量**(而不是"调用点之前"的
+          // 文本):后者会把数组截断 → 位置对不上 → 退化成"全部变量名
+          // 都当列表派生" → 非列表返回值(如 getExecution 的单个对象)
+          // 也被当成列表 → 误报。
+          const range = enclosingArrayRange(src, callStart);
+          const elements =
+            range !== null ? arrayElements(src, range[0]) : [];
           if (elements.length === target.names.length) {
             elements.forEach((el, i) => {
               const method2 = listCallIn(el);
@@ -246,13 +355,14 @@ function collectListBindings(src: string): ListBinding[] {
                   method: method2,
                   offset: assign,
                   guarded: false,
+                  callStart,
                 });
               }
             });
           } else {
             // 位置对不上(默认值/展开/嵌套):保守地把全部名字当列表派生。
             target.names.forEach((n) =>
-              add({ name: n, method, offset: assign, guarded: false }),
+              add({ name: n, method, offset: assign, guarded: false, callStart }),
             );
           }
         }
@@ -271,7 +381,7 @@ function collectListBindings(src: string): ListBinding[] {
         tail,
       );
     if (cb) {
-      add({ name: cb[1], method, offset: callEnd, guarded: false });
+      add({ name: cb[1], method, offset: callEnd, guarded: false, callStart });
     }
   }
 
@@ -296,6 +406,7 @@ function collectListBindings(src: string): ListBinding[] {
         method,
         offset: cm.index!,
         guarded: argText.includes("asArray"),
+        callStart: cm.index!,
       });
     }
   }
@@ -310,11 +421,13 @@ function collectListBindings(src: string): ListBinding[] {
       const key = `${m[1]}@${m.index}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const src2 = bindings.find((b) => b.name === m[2]);
       bindings.push({
         name: m[1],
-        method: bindings.find((b) => b.name === m[2])?.method ?? "list",
+        method: src2?.method ?? "list",
         offset: m.index,
         guarded: false,
+        callStart: src2?.callStart ?? m.index,
       });
       changed = true;
     }
@@ -327,41 +440,199 @@ function collectListBindings(src: string): ListBinding[] {
 /**
  * 找出"列表派生变量未经 asArray 就被当作列表用"的调用点。
  *
- * 判定依据:
- *   - 变量被当列表用:后接 .map/.forEach/… 之一,或按数字下标取值;
- *   - 变量没有防御:定义处不是 asArray(…)(…),且定义之后没有任何
+ * 判定依据(按**使用**判定,不是按"出现"判定):
+ *   - 变量被当列表用:
+ *       ① 后接 .map/.forEach/… 之一(遍历/按索引取/取长度);
+ *       ② 按数字下标取值(x[0]);
+ *       ③ **作为实参传给函数**(setRows(x) / f(x))—— 这是 #210 的最后一块:
+ *          此前只判 ①②,而 `api.listX().then((x) => setRows(x))` 里 x 后面
+ *          跟的是 ")" → 放行 → 丢掉 asArray 不会被发现。
+ *          为什么 ③ 也算"当列表用":setRows(x) 之后渲染处必然要遍历它,
+ *          x 若是 null 或对象就抛 TypeError —— 与 ① 是同一类故障。
+ *   - 变量没有防御:定义处不是 asArray(…)(…),且**第一次使用之前**没有任何
  *     asArray(变量) / asArray<T>(变量) 形式的防御。
+ *
+ * 顺序也重要:防御必须出现在使用**之前** —— 先 setRows(rows) 再
+ * asArray(rows) 是无效防御(渲染早就拿到未防御的值了)。
  */
 function findUnguardedListUses(src: string, bindings: ListBinding[]): string[] {
   const violations: string[] = [];
+  src = stripComments(src); // 同上:注释不是代码
+  const ranges = asArrayRanges(src);
   for (const b of bindings) {
     if (b.guarded) continue;
-    const guardedRe = new RegExp(
-      `asArray(?:<[^(]*>)?\\(\\s*${esc(b.name)}\\b`,
-      "g",
+    const uses = findListUses(src, b.name, b.offset, ranges);
+    if (uses.length === 0) continue;
+    if (bindingIsGuarded(src, ranges, b, uses[0])) continue;
+    violations.push(
+      `${b.method} → 变量 ${b.name}(第 ${b.offset} 字符处定义,"${uses[0].kind}")未经 asArray 就被当作列表使用`,
     );
-    let guarded = false;
-    for (const g of src.matchAll(guardedRe)) {
-      if (g.index! >= b.offset) {
-        guarded = true;
-        break;
-      }
-    }
-    if (guarded) continue;
+  }
+  return violations;
+}
 
-    const useRe = new RegExp(
-      `\\b${esc(b.name)}\\s*(?:\\?\\.\\s*)?(?:\\.\\s*(?:${LIST_MEMBERS.join("|")})\\b|\\[\\s*\\d)`,
-      "g",
-    );
-    for (const u of src.matchAll(useRe)) {
-      if (u.index! < b.offset) continue;
+/**
+ * bindingIsGuarded:绑定的**第一次使用之前**是否有 asArray 防御。
+ *
+ * 顺序也重要:防御必须出现在使用**之前** —— 先 setRows(rows) 再
+ * asArray(rows) 是无效防御(渲染早就拿到未防御的值了)。
+ */
+function bindingIsGuarded(
+  src: string,
+  ranges: Array<[number, number]>,
+  b: ListBinding,
+  firstUse: ListUse,
+): boolean {
+  const guardedRe = new RegExp(`asArray(?:<[^(]*>)?\\(\\s*${esc(b.name)}\\b`, "g");
+  for (const g of src.matchAll(guardedRe)) {
+    if (g.index! >= b.offset && g.index! < firstUse.index) return true;
+  }
+  return false;
+}
+
+/**
+ * findUnguardedCallSites:逐**调用点**判定"这个列表接口的结果有没有过 asArray"。
+ *
+ * 为什么要有"逐调用点"这一层(#210):
+ *   - 文件级判定("这个文件里出现过 asArray 就算过")太粗:同一个文件里
+ *     两个调用点,一个防御了、另一个没防御,文件级判定照样放行;
+ *   - 绑定级判定(findUnguardedListUses)已经能抓到"未防御的使用",
+ *     但它按**变量**报告,看不出是哪个调用点带来的。
+ *
+ * 判据:调用点的结果要么
+ *   ① 本身被 asArray 包裹(asArray(await api.listX())),要么
+ *   ② 流出到一个**受保护**的绑定(定义处自带 asArray,或首次使用前有 asArray)。
+ * 两条都不满足 → 该调用点判违规。
+ */
+function findUnguardedCallSites(src: string): string[] {
+  const masked = stripComments(src);
+  const ranges = asArrayRanges(masked);
+  const bindings = collectListBindings(src);
+  const violations: string[] = [];
+  for (const m of masked.matchAll(CALL_RE)) {
+    const method = m[1];
+    const callStart = m.index!;
+    // ① 调用点本身在 asArray 里 → 已防御
+    if (ranges.some(([s, e]) => callStart > s && callStart < e)) continue;
+    // ② 结果流出的绑定必须受保护
+    const derived = bindings.filter((b) => b.callStart === callStart);
+    for (const b of derived) {
+      if (b.guarded) continue;
+      const uses = findListUses(masked, b.name, b.offset, ranges);
+      if (uses.length === 0) continue; // 派生出来但没被当列表用 → 无风险
+      if (bindingIsGuarded(masked, ranges, b, uses[0])) continue;
       violations.push(
-        `${b.method} → 变量 ${b.name}(第 ${u.index} 字符处)未经 asArray 就被当作列表使用`,
+        `api.${method}() 的结果(变量 ${b.name})未经 asArray 就被当作列表使用`,
       );
-      break;
     }
   }
   return violations;
+}
+
+/** 一次"当列表用"的形态 */
+interface ListUse {
+  index: number;
+  kind: string;
+}
+
+/** 控制关键字:出现在 "(" 前时,后面跟的表达式不是"函数实参" */
+const CONTROL_KEYWORDS = new Set([
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "return",
+  "await",
+  "typeof",
+]);
+
+/**
+ * asArrayRanges 返回源码里所有 asArray(...) 调用的区间。
+ *
+ * 用途:判断某处代码是不是**在 asArray 里** —— 在 asArray 里的出现是
+ * "防御",不是"使用"(asArray(x) 里的 x 正是被防御的那个值)。
+ * 支持泛型写法 asArray<T>(x)。
+ */
+function asArrayRanges(src: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const re = /\basArray\b/g;
+  for (const m of src.matchAll(re)) {
+    let i = m.index! + m[0].length;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    // 跳过泛型参数
+    if (src[i] === "<") {
+      let depth = 0;
+      for (; i < src.length; i++) {
+        if (src[i] === "<") depth++;
+        else if (src[i] === ">") {
+          depth--;
+          if (depth === 0) {
+            i++;
+            break;
+          }
+        }
+      }
+      while (i < src.length && /\s/.test(src[i])) i++;
+    }
+    if (src[i] !== "(") continue;
+    const end = matchParen(src, i);
+    if (end < 0) continue;
+    out.push([m.index!, end]);
+  }
+  return out;
+}
+
+/**
+ * findListUses 找出变量 name 在 from 之后所有"当列表用"的位置。
+ *
+ * ranges = asArray 调用区间:落在 asArray 里的出现**不算**使用
+ * (那正是防御本身)。
+ */
+function findListUses(
+  src: string,
+  name: string,
+  from: number,
+  ranges: Array<[number, number]>,
+): ListUse[] {
+  const uses: ListUse[] = [];
+  const inAsArray = (idx: number) =>
+    ranges.some(([s, e]) => idx > s && idx < e);
+  const ident = new RegExp(`\\b${esc(name)}\\b`, "g");
+  for (const m of src.matchAll(ident)) {
+    const idx = m.index!;
+    if (idx < from) continue;
+    if (inAsArray(idx)) continue; // 在 asArray 里 = 防御,不是使用
+    const after = src.slice(idx + name.length);
+    const before = src.slice(0, idx);
+    // ① 成员访问:x.map / x.length / x?.map
+    const member = /^\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/.exec(after);
+    if (member && LIST_MEMBERS.includes(member[1])) {
+      uses.push({ index: idx, kind: `x.${member[1]}` });
+      continue;
+    }
+    // ② 数字下标:x[0]
+    if (/^\s*\[\s*\d/.test(after)) {
+      uses.push({ index: idx, kind: "x[数字]" });
+      continue;
+    }
+    // ③ 作为实参传给函数:setRows(x) / f(x, …)
+    //    判据:紧邻的前一个非空白字符是 "(" 或 ",",
+    //    且 "(" 前面不是控制关键字(if/for/while/… —— 那是条件判断,不是传参)。
+    const trimmed = before.replace(/\s+$/, "");
+    const prev = trimmed.slice(-1);
+    if (prev === "(" || prev === ",") {
+      if (prev === "(") {
+        const head = trimmed.slice(0, -1).replace(/\s+$/, "");
+        const fn = /([A-Za-z_$][\w$]*)$/.exec(head);
+        if (fn && CONTROL_KEYWORDS.has(fn[1])) continue; // if (x) 不是传参
+        if (!fn) continue; // (x) 是分组括号,不是调用
+      }
+      uses.push({ index: idx, kind: "作为实参传给函数" });
+      continue;
+    }
+  }
+  return uses;
 }
 
 async function sourceFiles(dir: string): Promise<string[]> {
@@ -417,6 +688,30 @@ describe("约定 7:列表接口先过 asArray 再 .map", () => {
     expect(missing).toEqual([]);
   });
 
+  // 补"回调形参 → 状态 setter"这条链的盲区(#210 的最后一块):
+  //   api.listX().then((x) => setRows(x))
+  //
+  // 此前"当列表用"的判据只有 `x.<列表成员>` 或 `x[数字]`,而这里 x 后面
+  // 跟的是 ")" → 判定放行 → 丢掉 asArray 不会被发现(实测:把 Dashboard
+  // 两个调用点的 asArray 去掉,守卫 4 条用例全绿)。
+  //
+  // 为什么"直接把列表结果交给状态 setter"就是"当列表用":setRows(x) 之后
+  // 渲染处必然要遍历它(rows.map / rows.length)—— x 若是 null 或对象,
+  // 抛 TypeError,整页白屏。与 .map 链是同一类故障。
+  it("列表结果直接交给状态 setter 时必须判违规(去掉 asArray 不得放行)", () => {
+    const unguarded = [
+      "useEffect(() => {",
+      '  api.listExecutions("", 50).then((x) => setRows(x));',
+      "}, []);",
+    ].join("\n");
+    const violations = findUnguardedListUses(unguarded, collectListBindings(unguarded));
+    expect(violations.length).toBeGreaterThan(0);
+
+    // 有防御的写法不得误报(防"永远判违规"的假修法)。
+    const guarded = unguarded.replace("setRows(x)", "setRows(asArray(x))");
+    expect(findUnguardedListUses(guarded, collectListBindings(guarded))).toEqual([]);
+  });
+
   // 补"先赋值再 .map"的盲区:原守卫只看调用点之后的链,结果一旦交给变量
   // 链上就没有 .map 了,于是绕过。约定 7 要求的是"使用前必须过 asArray"。
   it("列表接口结果被赋值给变量后,使用前必须过 asArray", async () => {
@@ -435,6 +730,27 @@ describe("约定 7:列表接口先过 asArray 再 .map", () => {
     // 防空转:扫描器的识别逻辑退化时(接口改名/赋值形式变化),绑定会扫不到,
     // 上面的"没有违规"就会恒真通过。绑定数下限把它变成红灯。
     expect(bindingCount).toBeGreaterThan(3);
+  });
+
+  // 逐**调用点**判定(#210):文件级判定太粗 —— 同一文件里两个调用点,
+  // 一个防御了、另一个没防御,文件级判定照样放行。
+  // 这一条把判定下沉到调用点:每个列表接口的调用点,它的结果要么
+  // 本身被 asArray 包裹,要么流出一个受保护的绑定。
+  it("每个列表调用点的结果都必须过 asArray(逐调用点判定)", async () => {
+    const files = await sourceFiles(SRC);
+    const violations: string[] = [];
+    let callSites = 0;
+    for (const file of files) {
+      const src = await readFile(file, "utf8");
+      callSites += [...src.matchAll(CALL_RE)].length;
+      for (const v of findUnguardedCallSites(src)) {
+        violations.push(`${path.relative(SRC, file)}: ${v}`);
+      }
+    }
+    expect(violations).toEqual([]);
+    // 防空转:调用点扫不到(接口改名/正则失效)时,上面的"没有违规"会恒真
+    // 通过。实测当前仓库有 15 处列表调用点,取 10 作下限。
+    expect(callSites).toBeGreaterThanOrEqual(10);
   });
 
   // 守卫自身的盲区回归(不是产品代码的缺陷,是**判定逻辑**的缺陷):
@@ -489,5 +805,19 @@ describe("约定 7:列表接口先过 asArray 再 .map", () => {
       const violations = findUnguardedListUses(src, collectListBindings(src));
       expect(violations.length).toBeGreaterThan(0);
     }
+
+    // 文件级判定的盲区:同一个文件里**一个调用点有防御、另一个没有**。
+    // 文件级判定("这个文件里出现过 asArray 就算过")会放行;逐调用点
+    // 判定必须抓到没防御的那一个。
+    const mixed = [
+      "useEffect(() => {",
+      "  api.listAgents().then((x) => setAgents(asArray(x)));",
+      "  api.listSkills().then((y) => setSkills(y));",
+      "}, []);",
+    ].join("\n");
+    expect(mixed).toContain("asArray"); // 前置:文件里确实有 asArray
+    const mixedViolations = findUnguardedCallSites(mixed);
+    expect(mixedViolations.length).toBeGreaterThan(0);
+    expect(mixedViolations.join(" ")).toContain("listSkills");
   });
 });

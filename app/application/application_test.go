@@ -603,16 +603,24 @@ func TestSetPermissionPropagatesReadError(t *testing.T) {
 // 经 SetEnabled 写。此前是裸 map,同进程内并发读写在生产环境是
 // "concurrent map read and map write" runtime fatal(recover 无效,
 // 整应用退出),-race 下是 DATA RACE。
+//
+// **读写窗口必须确定**(#208):旧写法是"写者跑固定次数 + time.Sleep(150ms)
+// 建窗口"—— 写者(每次落库)可能几十毫秒就跑完,读者与写者**零重叠**,
+// -race 什么也报不出(恒真的假保护)。
+// 现在用**屏障**:读者先就位并持续自旋,写者才开始写 —— 读写必然重叠。
 func TestSkillDisabledConcurrentAccess(t *testing.T) {
 	a := newTestApp(t)
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	stop := make(chan struct{})
 
 	// 读者:模拟执行协程持续查询禁用状态
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
+		ready.Add(1)
 		go func() {
 			defer wg.Done()
+			ready.Done() // 就位信号:屏障 —— 写者开始写时读者已在自旋
 			for {
 				select {
 				case <-stop:
@@ -620,15 +628,17 @@ func TestSkillDisabledConcurrentAccess(t *testing.T) {
 				default:
 					_ = a.Engine.IsSkillDisabled("log")
 					_ = a.SkillDisabled("submit")
-					_ = a.SkillSvc.List()
 				}
 			}
 		}()
 	}
+	ready.Wait()
+
 	// 写者:模拟 REST 开关反复切换
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer close(stop) // 写者结束(含提前返回)→ 读者退出
 		for i := 0; i < 50; i++ {
 			if err := a.SkillSvc.SetEnabled("log", i%2 == 0); err != nil {
 				t.Errorf("SetEnabled: %v", err)
@@ -637,9 +647,6 @@ func TestSkillDisabledConcurrentAccess(t *testing.T) {
 		}
 	}()
 
-	// 等写者结束再停读者
-	time.Sleep(150 * time.Millisecond)
-	close(stop)
 	wg.Wait()
 }
 
@@ -668,32 +675,40 @@ func TestSkillSetEnabledPersistsBeforeMemory(t *testing.T) {
 //
 // 迭代数太小 = 恒真的假保护(去掉锁仍全绿,比没有测试更危险);太大又拖慢
 // 门禁。这里取 3000:比"能稳定命中的最小值"高一个数量级以上的余量,
-// 而写循环本身只占 ~1ms —— 整个测试仍由 150ms 的观察窗口主导
-// (实测:3000 次 Settings.Update(含落库)要 2.6s,混合写只要 0.15s)。
+// 而写循环本身只占 ~1ms(混合写 0.15s)。
+//
+// **窗口形态同样重要**(#208):迭代数只保证"命中概率",**屏障**才保证
+// "读写必然重叠" —— 两者缺一,探针都可能恒真。
 const logLevelRaceIterations = 3000
 
 // TestLogLevelConcurrentAccess 验证 Settings.Info 与 Settings.Update
 // 并发时 LogLevel 无数据竞争(此前是无锁裸 string 字段)。
 //
-// 此前迭代数只有 20:把 logLevelMu 的读写锁去掉后,-race **仍全绿**
-// (实测 0/5 命中)—— 恒真的假保护。现在写侧分两路:
+// 写侧分两路:
 //
 //  1. setLogLevel:Settings.Update 真正写 a.logLevel 的地方(真正的争用
 //     点),迭代 logLevelRaceIterations 次;
 //  2. Settings.Update:公开路径(落库 + 应用日志级别 + 写内存态),每 100
 //     次迭代来一次 —— 端到端语义仍然被覆盖。
 //
-// 读侧保持 4 个 goroutine 持续读(Settings.Info + LogLevelValue),
-// 观察窗口 150ms。
+// **读写窗口必须确定**(#208):旧写法靠 time.Sleep(150ms) 建窗口 ——
+// 写者早已跑完时读写**零重叠**,-race 什么也报不出(恒真的假保护)。
+// 现在用**屏障**:读者先就位并持续自旋,写者才开始写 —— 读写必然重叠,
+// 窗口 = 写者的循环时长(不再由 sleep 撞运气)。
+//
+// 读侧 4 个 goroutine 持续读(Settings.Info + LogLevelValue)。
 func TestLogLevelConcurrentAccess(t *testing.T) {
 	a := newTestApp(t)
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	stop := make(chan struct{})
 
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
+		ready.Add(1)
 		go func() {
 			defer wg.Done()
+			ready.Done() // 就位信号:屏障 —— 写者开始写时读者已在自旋
 			for {
 				select {
 				case <-stop:
@@ -705,9 +720,11 @@ func TestLogLevelConcurrentAccess(t *testing.T) {
 			}
 		}()
 	}
+	ready.Wait()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer close(stop) // 写者结束 → 读者退出
 		levels := []string{"debug", "info", "warn", "error"}
 		for i := 0; i < logLevelRaceIterations; i++ {
 			level := levels[i%len(levels)]
@@ -717,8 +734,6 @@ func TestLogLevelConcurrentAccess(t *testing.T) {
 			}
 		}
 	}()
-	time.Sleep(150 * time.Millisecond)
-	close(stop)
 	wg.Wait()
 }
 

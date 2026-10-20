@@ -62,6 +62,7 @@ WIN_OUT=""
 WIN_LOG=""
 WIN_VET_LOG=""
 WIN_CHECK_DIR=""
+USAGE_CHECK_DIR=""
 GOFMT_OUT=""
 GOFMT_ERR=""
 EMBED_PLACEHOLDER=""
@@ -73,6 +74,7 @@ cleanup() {
 	if [ -n "$WIN_VET_LOG" ]; then rm -f "$WIN_VET_LOG"; fi
 	if [ -n "$WIN_OUT" ]; then rm -rf "$WIN_OUT"; fi
 	if [ -n "$WIN_CHECK_DIR" ]; then rm -rf "$WIN_CHECK_DIR"; fi
+	if [ -n "$USAGE_CHECK_DIR" ]; then rm -rf "$USAGE_CHECK_DIR"; fi
 	if [ -n "$GOFMT_OUT" ]; then rm -f "$GOFMT_OUT"; fi
 	if [ -n "$GOFMT_ERR" ]; then rm -f "$GOFMT_ERR"; fi
 	# 占位文件:只在它**仍是**我们放的那一个时才清掉(按内容比对)。
@@ -480,6 +482,68 @@ ORPHAN_CANDIDATES=$(
 ORPHAN_COUNT=$(printf '%s\n' "$ORPHAN_CANDIDATES" | grep -c . || true)
 echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推导)"
 
+# ---- 门禁自检的公共设施(断言助手 + 场景计数)---------------------------
+# 为什么要有这一层:**门禁自检本身也是代码**,同样会被改坏、被删掉、被改成
+# 恒真。本项目历史上最贵的一次教训就是"门禁看上去在跑,其实某道防线
+# 早就没了"。因此自检必须自己站得住:
+#
+#   ① **双向断言**:同一道防线既要断言"坏情况必须红",也要断言"好情况
+#      必须绿"。只有红方向是**恒真**的(检查无论对错都失败也算"成功");
+#      只有绿方向又挡不住"检查被改成永远红"。两个方向合起来,防线被
+#      neuter(改成恒真或恒假)时**必然**有一侧变红。
+#   ② **场景计数**:每条自检场景都计数,结束时与期望值比对 ——
+#      删掉一条自检调用(手滑/重构)→ 计数对不上 → 门禁红。
+#   ③ **助手防空转**:断言助手自己也被断言(见下方 meta 守卫)——
+#      助手被改成恒真 → meta 守卫立刻红。
+#
+# 计数变量的赋值发生在**函数体内**(不是子 shell),因此计数能真正累加。
+selfcheck_count=0
+# 期望的自检场景条数。**新增或删除任何一条自检场景,都必须同步改这里** ——
+# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 16 条:
+#   1-3  交叉检查:windows 测试文件对照 / 测试文件类型错 / 源文件类型错
+#   4-9  孤儿包检查:windows·freebsd·js 各一条绿 + 一条红
+#   10   孤儿包检查:目录混包(两个 package 名)必须被抓
+#   11   目标平台枚举:必须是 go 工具全集(不是手写清单)
+#   12   目标平台枚举断言的反向对照:三平台手写清单必须通不过
+#   13-16 第 6 步"真实用例"判定:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓
+#          / 反向对照(对正常包断言"必须在报告里"必须失败)
+SELFCHECK_EXPECTED=16
+
+# selfcheck_ok <标签> <命令...> —— 断言命令必须**成功**(绿方向)。
+selfcheck_ok() {
+	sc_label="$1"
+	shift
+	selfcheck_count=$((selfcheck_count + 1))
+	if ! "$@"; then
+		fail "门禁自检失败:[$sc_label] 本该通过的命令失败了 —— 自检或它守护的防线已失效"
+	fi
+}
+
+# selfcheck_red <标签> <命令...> —— 断言命令必须**失败**(红方向)。
+selfcheck_red() {
+	sc_label="$1"
+	shift
+	selfcheck_count=$((selfcheck_count + 1))
+	if "$@"; then
+		fail "门禁自检失败:[$sc_label] 本该被抓住的坏情况却通过了 —— 这道防线没有生效"
+	fi
+}
+
+# meta 守卫:断言助手自己必须真的能判对错。
+#
+# 上面两个助手若被改成恒真(例如 selfcheck_red 永远判定"失败"),所有自检
+# 都会失去意义 —— 而这正是"自检恒真"这类失效最难被发现的原因:它不会
+# 让门禁变红,只会让门禁**永远绿**。
+#
+# 用**子 shell** 跑:助手判定失败时会 fail → exit → 只退出子 shell,
+# 主流程不受影响;子 shell 里的计数也随之丢弃(不会污染场景计数)。
+if ( selfcheck_red "meta-guard-red" true ) >/dev/null 2>&1; then
+	fail "门禁自检失败:断言助手失效 —— 对必然成功的命令断言'必须失败'却通过了(自检恒真)"
+fi
+if ( selfcheck_ok "meta-guard-ok" false ) >/dev/null 2>&1; then
+	fail "门禁自检失败:断言助手失效 —— 对必然失败的命令断言'必须通过'却通过了(自检恒真)"
+fi
+
 # ---- 门禁自检:本步骤的防线必须真的能抓到平台专属文件的类型错误 ------
 # 目的:证明上面那道防线**有效**,而不是"看上去在跑"。
 # 做法:在 /tmp 里造一个**隔离的最小模块**(不碰工作区),用**同一个**
@@ -505,22 +569,16 @@ printf 'package main\n\nfunc main() {}\n' >"$WIN_CHECK_DIR/cmd/selftest/main.go"
 
 # 1. 对照组:类型正确的 windows 测试文件 → 必须通过
 printf '//go:build windows\n\npackage pkg\n\nvar good string = "ok"\n' >"$WIN_CHECK_DIR/pkg/zz_windows_test.go"
-if ! win_check "$WIN_CHECK_DIR" ./...; then
-	fail "门禁自检失败:对照组(类型正确的 //go:build windows 测试文件)就让交叉检查失败 —— 自检本身不可信"
-fi
+selfcheck_ok "交叉检查对照:类型正确的 //go:build windows **测试文件**必须通过(否则下面两条红断言是恒真的)" win_check "$WIN_CHECK_DIR" ./...
 
 # 2. 含类型错误的 windows **测试**文件 → 必须失败(go build 看不见这一类)
 printf '//go:build windows\n\npackage pkg\n\nvar bad string = 42\n' >"$WIN_CHECK_DIR/pkg/zz_windows_test.go"
-if win_check "$WIN_CHECK_DIR" ./...; then
-	fail "门禁自检失败://go:build windows 的**测试文件**里的类型错误没有被交叉检查发现(go build 不编译 _test.go,只有 vet 能抓)"
-fi
+selfcheck_red "交叉检查://go:build windows 的**测试文件**里的类型错误必须被抓(go build 不编译 _test.go,只有 vet 能抓)" win_check "$WIN_CHECK_DIR" ./...
 
 # 3. 含类型错误的 windows **源**文件 → 必须失败(第八轮的盲区,回归确认)
 rm -f "$WIN_CHECK_DIR/pkg/zz_windows_test.go"
 printf '//go:build windows\n\npackage pkg\n\nvar Bad string = 42\n' >"$WIN_CHECK_DIR/pkg/zz_windows.go"
-if win_check "$WIN_CHECK_DIR" ./...; then
-	fail "门禁自检失败://go:build windows 的**源**文件里的类型错误没有被交叉检查发现"
-fi
+selfcheck_red "交叉检查://go:build windows 的**源文件**里的类型错误必须被抓" win_check "$WIN_CHECK_DIR" ./...
 rm -f "$WIN_CHECK_DIR/pkg/zz_windows.go"
 
 # ---- 门禁自检:孤儿包检查本身必须真的能抓到类型错误 ----------------------
@@ -551,13 +609,9 @@ orphan_selfcheck() {
 	osc_pkg="$4"
 	mkdir -p "$WIN_CHECK_DIR/$osc_dir"
 	printf '//go:build %s\n\npackage %s\n\nvar Good string = "ok"\n' "$osc_build" "$osc_pkg" >"$WIN_CHECK_DIR/$osc_dir/only_$osc_dir.go"
-	if ! orphan_check "$WIN_CHECK_DIR" "./..." "$osc_dir"; then
-		fail "门禁自检失败:孤儿包检查把一个**类型正确**的 //go:build $osc_build 包判成失败 —— 检查本身不可信"
-	fi
+	selfcheck_ok "孤儿包检查对照:类型正确的 //go:build $osc_build 孤儿包必须通过(否则下面的红断言是恒真的)" orphan_check "$WIN_CHECK_DIR" "./..." "$osc_dir"
 	printf '//go:build %s\n\npackage %s\n\nvar Bad string = 42\n' "$osc_build" "$osc_pkg" >"$WIN_CHECK_DIR/$osc_dir/only_$osc_dir.go"
-	if orphan_check "$WIN_CHECK_DIR" "./..." "$osc_dir"; then
-		fail "门禁自检失败:孤儿包(只含 //go:build $osc_build 文件的包)里的类型错误没有被孤儿包检查发现"
-	fi
+	selfcheck_red "孤儿包检查:只含 //go:build $osc_build 文件的孤儿包里的类型错误必须被抓" orphan_check "$WIN_CHECK_DIR" "./..." "$osc_dir"
 	rm -rf "$WIN_CHECK_DIR/$osc_dir"
 	echo "   自检通过: //go:build $osc_build 的孤儿包(类型正确 → 通过 / 类型错误 → 被抓)"
 }
@@ -565,7 +619,53 @@ orphan_selfcheck() {
 orphan_selfcheck "windows" "windows" "winonly" "winonly"
 orphan_selfcheck "freebsd" "freebsd" "fbonly" "fbonly"
 orphan_selfcheck "js" "js" "jsonly" "jsonly"
-echo "OK(自检:类型正确的孤儿包通过 / 含类型错误的孤儿包被抓)"
+
+# ---- 门禁自检:目录"混包"必须被抓 ---------------------------------------
+# 一个目录里出现**两个不同的 package 名**(例如重构时把两个文件并进同一
+# 目录却忘了改包名)—— 这是实打实的编译错误,不是"平台问题"。
+#
+# 为什么它危险:它长得**像**"这个平台没有可编译文件"。go list 会把
+# .Error 填成 "found packages X (...) and Y (...) in ...";如果检查把这类
+# 错误当成"build constraints exclude all Go files"而跳过,这个包就永远
+# 没有任何人编译、永远不会被发现 —— 与 #251 的绕过同族。
+#
+# 绿方向由上面的 freebsd 孤儿包对照场景提供(**同一条代码路径**:orphan_check
+# 对一个 freebsd-only 目录),这里只补红方向(成本:一次枚举 ≈1s)。
+orphan_mixed_selfcheck() {
+	om_dir="mixedpkg"
+	mkdir -p "$WIN_CHECK_DIR/$om_dir"
+	printf '//go:build freebsd\n\npackage mixedone\n\nvar Good string = "ok"\n' >"$WIN_CHECK_DIR/$om_dir/a.go"
+	printf '//go:build freebsd\n\npackage mixedtwo\n\nvar Also string = "ok"\n' >"$WIN_CHECK_DIR/$om_dir/b.go"
+	selfcheck_red "孤儿包检查:同一目录里两个 package 名(混包)必须被抓,不能被当成'该平台没有文件'跳过" orphan_check "$WIN_CHECK_DIR" "./..." "$om_dir"
+	rm -rf "$WIN_CHECK_DIR/$om_dir"
+}
+orphan_mixed_selfcheck
+
+# ---- 门禁自检:目标平台枚举必须是 go 工具的全集 -------------------------
+# 防的是"有人把手写清单换回去"。三条孤儿包场景(freebsd / js)能挡住
+# "枚举只剩 windows",但**挡不住**"枚举被换成一份含 freebsd / js、
+# 却漏掉其余冷门平台的手写清单"—— 那种情况下三条自检照样绿,而
+# //go:build plan9 / openbsd / solaris 的孤儿包仍然隐形。
+# 因此把**集合规模**钉死:目标数与不同 GOOS 数都要有下限。
+enum_assert_ok() {
+	ea_list="$1"
+	ea_targets=$(printf '%s\n' "$ea_list" | grep -c . || true)
+	ea_goos=$(printf '%s\n' "$ea_list" | cut -d/ -f1 | sort -u | grep -c . || true)
+	[ "$ea_targets" -ge 40 ] || return 1
+	[ "$ea_goos" -ge 13 ] || return 1
+	for ea_t in windows/amd64 freebsd/amd64 js/wasm; do
+		printf '%s\n' "$ea_list" | grep -qxF "$ea_t" || return 1
+	done
+	return 0
+}
+selfcheck_ok "目标平台枚举必须是 go 工具的全集(go tool dist list),不是手写清单(>=40 个目标 / >=13 个 GOOS,且含 windows·freebsd·js)" enum_assert_ok "$ALL_TARGETS"
+# 反向对照:一份"只有三个常见平台"的手写清单必须**通不过**这条断言 ——
+# 它通不过,才说明断言真的在数集合规模(而不是恒真)。
+selfcheck_red "枚举断言必须能判负:三平台手写清单必须通不过" enum_assert_ok "windows/amd64
+linux/amd64
+darwin/amd64"
+
+echo "OK(自检:类型正确的孤儿包通过 / 含类型错误的孤儿包被抓 / 混包被抓 / 平台枚举是全集)"
 
 # ---- 真正的孤儿包检查(工作区) -------------------------------------------
 if ! orphan_check "$ROOT" "$PKGS" $ORPHAN_CANDIDATES; then
@@ -631,7 +731,15 @@ step "6/9" "每个包都必须有真实执行的用例"
 # 另:必须同时看到该包自己的 `=== RUN` 行,才算"测试框架真的跑过用例"。
 # 否则用例自己往 stdout 打印一行 "--- PASS: xxx" 就能骗过检查(误判成
 # 有真实用例)。看不到 RUN 行 → 该包的 PASS 一律不计数(fail closed)。
-MISSING=$(awk -v pkgs="$CHECK_PKGS" '
+#
+# 抽成 real_usage_report 而不是就地写死:门禁与**自检**必须走**同一条代码
+# 路径** —— 自检若自己另写一套判定,将来有人把这里的判据改坏,自检照样
+# 绿,盲区就又回来了(与 win_check 抽函数的理由同源)。
+#
+# real_usage_report <测试日志> <包列表(空格分隔)>
+#   输出"缺少真实执行用例"的清单(每行 "  <pkg>: <原因>");空输出 = 全部达标。
+real_usage_report() {
+	awk -v pkgs="$2" '
 BEGIN {
 	n = split(pkgs, a, " ")
 	for (i = 1; i <= n; i++) if (a[i] != "") want[a[i]] = 1
@@ -671,9 +779,91 @@ END {
 		if (s != "ok") printf "  %s: %s\n", p, reason[s]
 	}
 }
-' "$TEST_LOG" | sort)
+' "$1" | sort
+}
+MISSING=$(real_usage_report "$TEST_LOG" "$CHECK_PKGS")
 [ -z "$MISSING" ] || fail "以下包缺少真实执行的用例:$MISSING"
+
+# ---- 门禁自检:第 6 步的判定本身必须真的能抓到 0 用例 / 全 skip ---------
+# 为什么必须有这一段:第 6 步是门禁里**最复杂**的一段判定(PASS/SKIP/RUN
+# 三种行 + "no tests to run" 文本 + "必须看到 RUN 行"的 fail closed 兜底)。
+# 它守护的正是 #252 的绕过场景本身 —— 一个只含 t.Skip() 的新包。
+# 如果这一段被改坏(例如有人删掉 `--- SKIP:` 的计数、或把 RUN 行的兜底
+# 去掉),**没有任何测试会发现**:工作区里的每个包都有真用例,判定逻辑
+# 错了也照样全绿。
+#
+# 做法:在 /tmp 里造一个**隔离的最小模块**,跑**真的** `go test -v`,
+# 把**真的**输出喂给**同一个** real_usage_report,断言三件事:
+#   1. 正常包(有真正执行的用例)→ **不得**被报出来(防空转/防误报);
+#   2. 0 用例包(测试文件里没有 Test 函数)→ 必须被报出来,原因含"0 个真实用例";
+#   3. 全 skip 包(唯一的用例被 t.Skip 跳过)→ 必须被报出来,原因含"t.Skip"。
+#
+# 隔离模块放在 /tmp:仓库里造坏包会污染 go list 的包集合与第 1 步的
+# gofmt 清单。go.mod 的 go 指令取自仓库自己的 go.mod(不硬编码版本号)。
+# 成本:一次小模块的 `go test` ≈ 1s(实测)。
+USAGE_CHECK_DIR=$(mktemp -d /tmp/awo-verify-usagecheck.XXXXXX)
+mkdir -p "$USAGE_CHECK_DIR/good" "$USAGE_CHECK_DIR/zero" "$USAGE_CHECK_DIR/skip"
+printf 'module awo/usagecheck\n\ngo %s\n' "$SELF_GO_VER" >"$USAGE_CHECK_DIR/go.mod"
+printf 'package good\n\nimport "testing"\n\nfunc TestGood(t *testing.T) { _ = 1 }\n' >"$USAGE_CHECK_DIR/good/good_test.go"
+printf 'package zero\n\nfunc helperOnly() {}\n' >"$USAGE_CHECK_DIR/zero/zero_test.go"
+printf 'package skip\n\nimport "testing"\n\nfunc TestSkipped(t *testing.T) { t.Skip("环境不具备") }\n' >"$USAGE_CHECK_DIR/skip/skip_test.go"
+USAGE_LOG="$USAGE_CHECK_DIR/test.log"
+if ! ( cd "$USAGE_CHECK_DIR" && go test -count=1 -v ./... ) >"$USAGE_LOG" 2>&1; then
+	# 隔离模块自己跑不起来 = 自检环境不可用 → 必须红,不能静默跳过
+	cat "$USAGE_LOG" >&2
+	fail "门禁自检失败:隔离模块的 go test 自身失败(自检环境不可用 —— 必须红,不能静默跳过)"
+fi
+USAGE_PKGS="awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip"
+USAGE_REPORT=$(real_usage_report "$USAGE_LOG" "$USAGE_PKGS")
+
+# usage_expect <包> <报告> <期望在报告里? yes|no> [原因关键字]
+#
+# 返回 0 = 符合期望;返回 1 = 不符合。
+#
+# **为什么是一个函数而不是两个**:两个方向必须走**同一个**判定函数 ——
+# 否则"正向函数被改成恒真"这类失效就没人发现(断言助手只能守住
+# selfcheck_ok / selfcheck_red 本身,守不住它们调用的判定函数)。
+# 下面第 4 条场景就是**反向对照**:同一个函数,对"正常包"断言"必须在报告里"
+# 必须失败 —— 它失败,才说明这个函数真的在区分。
+usage_expect() {
+	ue_pkg="$1"
+	ue_rep="$2"
+	ue_want="$3"
+	ue_reason="$4"
+	ue_found=1
+	if printf '%s\n' "$ue_rep" | grep -qE "^  $ue_pkg: "; then
+		ue_found=0
+	fi
+	if [ "$ue_want" = "yes" ]; then
+		[ "$ue_found" -eq 0 ] || return 1
+		if [ -n "$ue_reason" ]; then
+			printf '%s\n' "$ue_rep" | grep -qE "^  $ue_pkg: .*$ue_reason" || return 1
+		fi
+		return 0
+	fi
+	[ "$ue_found" -eq 1 ] || return 1
+	return 0
+}
+selfcheck_ok "第 6 步判定:正常包(有真正执行的用例)不得被误报" usage_expect "awo/usagecheck/good" "$USAGE_REPORT" "no"
+selfcheck_ok "第 6 步判定:0 用例包必须被抓(否则'新增一个空测试包'就能绕过门禁)" usage_expect "awo/usagecheck/zero" "$USAGE_REPORT" "yes" "0 个真实用例"
+selfcheck_ok "第 6 步判定:全 t.Skip 包必须被抓(#252 的绕过场景本身)" usage_expect "awo/usagecheck/skip" "$USAGE_REPORT" "yes" "t\.Skip"
+# 反向对照:同一个判定函数,对**正常包**断言"必须在报告里"必须失败 ——
+# 它若通过,说明这个函数根本没有在区分(恒真),上面三条就都是空转。
+selfcheck_red "第 6 步判定必须能区分:正常包不在报告里 → 断言'在报告里'必须失败" usage_expect "awo/usagecheck/good" "$USAGE_REPORT" "yes"
+rm -rf "$USAGE_CHECK_DIR"
+USAGE_CHECK_DIR=""
+
+# ---- 自检场景计数守卫(防"自检被删 → 门禁恒绿")-------------------------
+# 每条自检场景都会给 selfcheck_count 加一;这里的期望值见 SELFCHECK_EXPECTED
+# 的注释。**少一条 → 门禁红**(有人删掉了自检调用却没改期望值);
+# **多一条 → 门禁红**(新增了自检却忘了同步期望值)。
+# 守卫的边界:它挡得住"手滑/重构误删",挡不住"有人同时改了脚本和期望值"
+# —— 那已经不是疏忽,是刻意绕过,靠 code review 与 git 历史发现。
+[ "$selfcheck_count" -eq "$SELFCHECK_EXPECTED" ] ||
+	fail "门禁自检失败:实际执行了 $selfcheck_count 条自检场景,期望 $SELFCHECK_EXPECTED 条 —— 有自检被删掉,或新增后没同步 SELFCHECK_EXPECTED"
+
 echo "OK($CHECK_COUNT 个包均有真实执行并通过的用例)"
+echo "   自检通过:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓"
 end_step
 
 step "7/9" "前端 lint / 构建 / vitest"

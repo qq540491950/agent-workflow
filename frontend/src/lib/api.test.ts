@@ -18,6 +18,9 @@ const wfList = vi.fn();
 const wfSavePayload = vi.fn();
 const wfImportYAML = vi.fn();
 const wfGet = vi.fn();
+const wfDelete = vi.fn();
+const wfDuplicate = vi.fn();
+const wfSetEnabled = vi.fn();
 const wfVersions = vi.fn();
 const wfVersionDSL = vi.fn();
 const wfExportYAML = vi.fn();
@@ -30,11 +33,18 @@ const exNodes = vi.fn();
 const exEvents = vi.fn();
 const exArtifacts = vi.fn();
 const exStats = vi.fn();
+const exProvideInput = vi.fn();
+const exDelete = vi.fn();
+const exRetryNode = vi.fn();
+const exCancel = vi.fn();
 const agList = vi.fn();
 const agGetConfig = vi.fn();
 const agUpdateConfig = vi.fn();
 const skList = vi.fn();
 const gtStatus = vi.fn();
+const gtDiff = vi.fn();
+const gtLog = vi.fn();
+const gtCommit = vi.fn();
 const stExportBackup = vi.fn();
 const stRestoreBackup = vi.fn();
 const stInfo = vi.fn();
@@ -63,6 +73,9 @@ vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () =>
       SavePayload: (...a: unknown[]) => wfSavePayload(...a),
       ImportYAML: (...a: unknown[]) => wfImportYAML(...a),
       Get: (...a: unknown[]) => wfGet(...a),
+      Delete: (...a: unknown[]) => wfDelete(...a),
+      Duplicate: (...a: unknown[]) => wfDuplicate(...a),
+      SetEnabled: (...a: unknown[]) => wfSetEnabled(...a),
       Versions: (...a: unknown[]) => wfVersions(...a),
       VersionDSL: (...a: unknown[]) => wfVersionDSL(...a),
       ExportYAML: (...a: unknown[]) => wfExportYAML(...a),
@@ -97,6 +110,10 @@ vi.mock("@bindings/agentworkflow/app/application/executionservice.js", () =>
       Events: (...a: unknown[]) => exEvents(...a),
       Artifacts: (...a: unknown[]) => exArtifacts(...a),
       Stats: (...a: unknown[]) => exStats(...a),
+      ProvideInput: (...a: unknown[]) => exProvideInput(...a),
+      Delete: (...a: unknown[]) => exDelete(...a),
+      RetryNode: (...a: unknown[]) => exRetryNode(...a),
+      Cancel: (...a: unknown[]) => exCancel(...a),
     },
   ),
 );
@@ -161,6 +178,9 @@ vi.mock("@bindings/agentworkflow/app/application/gitservice.js", () =>
     ["Status", "Diff", "Log", "Commit", "SetWorkingDir"],
     {
       Status: (...a: unknown[]) => gtStatus(...a),
+      Diff: (...a: unknown[]) => gtDiff(...a),
+      Log: (...a: unknown[]) => gtLog(...a),
+      Commit: (...a: unknown[]) => gtCommit(...a),
     },
   ),
 );
@@ -196,6 +216,9 @@ beforeEach(() => {
   wfSavePayload.mockReset();
   wfImportYAML.mockReset();
   wfGet.mockReset();
+  wfDelete.mockReset();
+  wfDuplicate.mockReset();
+  wfSetEnabled.mockReset();
   wfVersions.mockReset();
   wfVersionDSL.mockReset();
   wfExportYAML.mockReset();
@@ -208,11 +231,18 @@ beforeEach(() => {
   exEvents.mockReset();
   exArtifacts.mockReset();
   exStats.mockReset();
+  exProvideInput.mockReset();
+  exDelete.mockReset();
+  exRetryNode.mockReset();
+  exCancel.mockReset();
   agList.mockReset();
   agGetConfig.mockReset();
   agUpdateConfig.mockReset();
   skList.mockReset();
   gtStatus.mockReset();
+  gtDiff.mockReset();
+  gtLog.mockReset();
+  gtCommit.mockReset();
   stExportBackup.mockReset();
   stRestoreBackup.mockReset();
   stInfo.mockReset();
@@ -536,6 +566,218 @@ describe("desktop 模式读接口契约(迭代 14B)", () => {
     await expect(api.gitStatus()).resolves.toMatchObject({ branch: "main" });
     expect(gtStatus).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// 双模式契约:写类分支(迭代 17)。
+//
+// 迭代 14B 补的 20 条断言只覆盖**读接口**;写类分支(删除/运行/人工输入/
+// 提交/重试/取消/git 写操作)此前**一条断言都没有** —— 把桌面分支的
+// `wf.Delete(id)` 改成 `wf.Get(id)`、或把 web 分支的 method 从 DELETE
+// 改成 POST,66 条用例照样全绿。
+//
+// 写类分支的漂移代价比读接口更高:
+//   - 删执行:DELETE 变 POST → 后端**不删**却返回 200 → 用户以为删掉了;
+//   - 人工输入:body 形状漂移 → 恢复时读不到答复 → 执行卡在等待;
+//   - git commit:body 字段名漂移 → 提交信息为空 → 提交出空 message。
+//
+// 每条用例都钉死两件事:调了哪个绑定/端点 + 带了什么参数,
+// 并断言桌面分支**不发 HTTP**(否则就是偷偷走了另一条路)。
+describe("双模式契约:写类分支(迭代 17)", () => {
+  async function desktopApi() {
+    callByID.mockResolvedValue([]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    return { api, fetchMock };
+  }
+
+  async function webApi(body: unknown = {}) {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify(body),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    return { api, fetchMock };
+  }
+
+  it("工作流:deleteWorkflow 走 wf.Delete(id)/ HTTP DELETE", async () => {
+    wfDelete.mockResolvedValue(undefined);
+    const { api, fetchMock } = await desktopApi();
+    await api.deleteWorkflow("wf-1");
+    expect(wfDelete).toHaveBeenCalledWith("wf-1");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi();
+    await web.api.deleteWorkflow("wf-1");
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/workflows/wf-1",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("工作流:duplicateWorkflow 走 wf.Duplicate(id)/ HTTP POST duplicate", async () => {
+    wfDuplicate.mockResolvedValue({ id: "wf-2" });
+    const { api, fetchMock } = await desktopApi();
+    await api.duplicateWorkflow("wf-1");
+    expect(wfDuplicate).toHaveBeenCalledWith("wf-1");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi({ id: "wf-2" });
+    await web.api.duplicateWorkflow("wf-1");
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/workflows/wf-1/duplicate",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("工作流:setEnabled 走 wf.SetEnabled(id, enabled)/ HTTP POST enable", async () => {
+    wfSetEnabled.mockResolvedValue({ id: "wf-1" });
+    const { api, fetchMock } = await desktopApi();
+    await api.setEnabled("wf-1", true);
+    expect(wfSetEnabled).toHaveBeenCalledWith("wf-1", true);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi({ id: "wf-1" });
+    await web.api.setEnabled("wf-1", false);
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/workflows/wf-1/enable?value=false",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("执行:runWorkflow 走 ex.Run(id, task, variables)/ HTTP POST run", async () => {
+    exRun.mockResolvedValue({ id: "exec-1" });
+    const { api, fetchMock } = await desktopApi();
+    await api.runWorkflow("wf-1", "任务", { a: 1 });
+    expect(exRun).toHaveBeenCalledWith("wf-1", "任务", { a: 1 });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi({ id: "exec-1" });
+    await web.api.runWorkflow("wf-1", "任务", { a: 1 });
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/workflows/wf-1/run",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ task: "任务", variables: { a: 1 } }),
+      }),
+    );
+  });
+
+  it("执行:provideInput 走 ex.ProvideInput(id, response)/ HTTP POST input", async () => {
+    exProvideInput.mockResolvedValue({ id: "exec-1" });
+    const { api, fetchMock } = await desktopApi();
+    await api.provideInput("exec-1", { response: "approve" });
+    expect(exProvideInput).toHaveBeenCalledWith("exec-1", { response: "approve" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi({ id: "exec-1" });
+    await web.api.provideInput("exec-1", { response: "approve" });
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/executions/exec-1/input",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ response: "approve" }),
+      }),
+    );
+  });
+
+  it("执行:deleteExecution 走 ex.Delete(id)/ HTTP DELETE", async () => {
+    exDelete.mockResolvedValue(undefined);
+    const { api, fetchMock } = await desktopApi();
+    await api.deleteExecution("exec-1");
+    expect(exDelete).toHaveBeenCalledWith("exec-1");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi();
+    await web.api.deleteExecution("exec-1");
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/executions/exec-1",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("执行:retryExecution 走 ex.RetryNode(id, skip)/ HTTP POST retry", async () => {
+    exRetryNode.mockResolvedValue({ id: "exec-1" });
+    const { api, fetchMock } = await desktopApi();
+    await api.retryExecution("exec-1", true);
+    expect(exRetryNode).toHaveBeenCalledWith("exec-1", true);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi({ id: "exec-1" });
+    await web.api.retryExecution("exec-1", true);
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/executions/exec-1/retry",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ skip: true }),
+      }),
+    );
+  });
+
+  it("执行:cancelExecution 走 ex.Cancel(id)/ HTTP POST cancel", async () => {
+    exCancel.mockResolvedValue(undefined);
+    const { api, fetchMock } = await desktopApi();
+    await api.cancelExecution("exec-1");
+    expect(exCancel).toHaveBeenCalledWith("exec-1");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi();
+    await web.api.cancelExecution("exec-1");
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/executions/exec-1/cancel",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("Git:gitCommit 走 gt.Commit(message)/ HTTP POST commit", async () => {
+    gtCommit.mockResolvedValue("提交成功\n");
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.gitCommit("feat: x")).resolves.toBe("提交成功\n");
+    expect(gtCommit).toHaveBeenCalledWith("feat: x");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi({ output: "提交成功\n" });
+    await expect(web.api.gitCommit("feat: x")).resolves.toBe("提交成功\n");
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/git/commit",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ message: "feat: x" }),
+      }),
+    );
+  });
+
+  it("Git:gitDiff 走 gt.Diff(staged)/ HTTP GET diff", async () => {
+    gtDiff.mockResolvedValue("diff --git a b");
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.gitDiff(true)).resolves.toBe("diff --git a b");
+    expect(gtDiff).toHaveBeenCalledWith(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi({ diff: "diff --git a b" });
+    await expect(web.api.gitDiff(true)).resolves.toBe("diff --git a b");
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/git/diff?staged=true",
+      expect.anything(),
+    );
+  });
+
+  it("Git:gitLog 走 gt.Log(limit)/ HTTP GET log", async () => {
+    gtLog.mockResolvedValue([{ hash: "abc" }]);
+    const { api, fetchMock } = await desktopApi();
+    await api.gitLog(5);
+    expect(gtLog).toHaveBeenCalledWith(5);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const web = await webApi([]);
+    await web.api.gitLog(5);
+    expect(web.fetchMock).toHaveBeenCalledWith(
+      "/api/git/log?limit=5",
+      expect.anything(),
+    );
   });
 });
 
