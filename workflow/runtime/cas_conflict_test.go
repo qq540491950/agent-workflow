@@ -167,8 +167,17 @@ edges: []
 		t.Fatal("抢占裁决失败:执行状态已不是 RUNNING")
 	}
 	// 用户点取消:ctx 被取消 → 执行走取消分支
-	if err := eng.Cancel(context.Background(), exec.ID); err != nil {
-		t.Fatalf("cancel: %v", err)
+	//
+	// 注意(迭代 19 / P1-1):此时库里的状态已被"另一个写者"裁决成
+	// CANCELLED —— 那是**终态**,按新语义"取消一个已终态的执行"必须
+	// 返回明确错误(INVALID_TRANSITION),不能返回 200 假成功。
+	// 本用例要验的是**取消分支的 CAS 冲突处理**,不是 Cancel 的返回值;
+	// ctx 仍会被取消(引擎在终态分支里也会停掉还在跑的协程),执行照样
+	// 走取消分支,冲突照样被计数。
+	if err := eng.Cancel(context.Background(), exec.ID); err == nil {
+		t.Fatal("取消一个已终态(CANCELLED)的执行返回了 nil(200 假成功)")
+	} else if code := errCode(err); code != "INVALID_TRANSITION" {
+		t.Fatalf("cancel 错误码 = %q, want INVALID_TRANSITION(err=%v)", code, err)
 	}
 
 	// 等执行收尾(取消分支的 CAS 必然冲突)

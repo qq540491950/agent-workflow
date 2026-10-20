@@ -505,9 +505,9 @@ selfcheck_count=0
 #   10   孤儿包检查:目录混包(两个 package 名)必须被抓
 #   11   目标平台枚举:必须是 go 工具全集(不是手写清单)
 #   12   目标平台枚举断言的反向对照:三平台手写清单必须通不过
-#   13-16 第 6 步"真实用例"判定:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓
-#          / 反向对照(对正常包断言"必须在报告里"必须失败)
-SELFCHECK_EXPECTED=16
+#   13-17 第 6 步"真实用例"判定:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓
+#          / 伪造输出包被抓 / 反向对照(对正常包断言"必须在报告里"必须失败)
+SELFCHECK_EXPECTED=17
 
 # selfcheck_ok <标签> <命令...> —— 断言命令必须**成功**(绿方向)。
 selfcheck_ok() {
@@ -701,120 +701,218 @@ echo "OK"
 end_step
 
 step "6/9" "每个包都必须有真实执行的用例"
-# 逐包核对第 5 步的测试结果行 **+ 真正执行过的用例数**。
+# 逐包核对"至少有一条**真正执行并通过**的顶层用例"。
 #
-# go test 的输出变体:
-#   ok   <pkg> 0.12s                    → 有用例
-#   ok   <pkg> 0.00s [no tests to run]  → 包在,但一条用例都没跑(静默 0 用例)
-#   ?    <pkg> [no test files]           → 包里根本没有测试文件
-#   FAIL <pkg> 0.12s                    → 测试失败(第 5 步已拦,这里是兜底)
-#   ok   <pkg> (cached)                 → 有用例(只是命中缓存)
+# ---- 判据:框架事件,不是文本输出 ----------------------------------------
+# `go test -json` 每行是一个扁平 JSON 对象,框架给每个用例发一条事件:
+#   {"Action":"run","Package":"p","Test":"TestX"}        用例开始
+#   {"Action":"pass","Package":"p","Test":"TestX"}       顶层用例**通过**
+#   {"Action":"skip","Package":"p","Test":"TestX"}       顶层用例被跳过
+#   {"Action":"pass","Package":"p","Elapsed":0.007}      **包**整体通过(Test 为空)
+#   {"Action":"fail","Package":"p","Elapsed":0.001}      **包**整体失败
+#   {"Action":"skip","Package":"p","Elapsed":0}           **包**没有测试文件
+#   {"Action":"output","Package":"p","Test":"TestX","Output":"...\n"} 只是输出
 #
-# **"有 ok 行"不等于"有真实用例"**(迭代 14B 修的绕过):
-# 一个只含 `t.Skip()` 的新包,输出同样是 `ok <pkg> 0.00s` —— 门禁据此
-# 判"有真实用例"并全绿(终审实测:9 步全绿 = 绕过)。而 `t.Skip()` 掉的
-# 用例**什么都没验证**:包看起来有测试,实际一条没跑,将来它自己坏了也
-# 不会有人发现。
+# 达标 ⇔ 存在至少一个 Action=="pass" 且 Test **非空**、且 Test **不含 "/"**
+#        (顶层用例名里没有 "/",只有子用例名才有)的事件。
 #
-# 因此本步要求:**至少有一条真正执行并通过的用例**(第 5 步用 -v 才会
-# 打印 `--- PASS:` / `--- SKIP:`,两者在不带 -v 的输出里无法区分)。
-# 判定口径:
-#   - 有 `--- PASS:` 行 → 真有用例(通过);
-#   - 只有 `--- SKIP:` 行 → **全部被跳过**(新原因:skipall);
-#   - 一条 `--- PASS:`/`--- SKIP:` 都没有 → 0 个真实用例(zero)。
+# **只看顶层用例**:子用例的 pass 事件(T="TestX/sub")**不代表**这个包有真
+# 用例 —— 一个"只跑了个子用例就自己 t.Skip"的包照样能拿到 pass 事件。
+# 迭代 14B 的文本口径只认行首(不缩进)的 `--- PASS:` 行,也就是只认顶层
+# 用例;这里保持同一口径,不顺手放宽。
 #
-# 匹配用 awk 的"第二列精确等于包路径",不用正则/前缀匹配:
-# `agentworkflow` 是 `agentworkflow/api` 的前缀,前缀匹配会把两个包搞混。
-# `--- PASS:` / `--- SKIP:` 只认**行首无缩进**的顶层用例(子用例带缩进;
-# 父用例被跳过时子用例也算跳过,按父用例计数即可)。
+# **为什么伪造骗不过**:用例自己 fmt.Println 出来的
+# `=== RUN   Fake` / `--- PASS: Fake (0.00s)` 在 JSON 里只会落进
+# Action=="output" 事件的 Output 字段 —— 框架**不会**为它生成 pass 事件。
+# 判据只数框架事件、不看输出文本,伪造就失效了。
 #
-# 另:必须同时看到该包自己的 `=== RUN` 行,才算"测试框架真的跑过用例"。
-# 否则用例自己往 stdout 打印一行 "--- PASS: xxx" 就能骗过检查(误判成
-# 有真实用例)。看不到 RUN 行 → 该包的 PASS 一律不计数(fail closed)。
+# 迭代 14B 用的是**解析文本**(`--- PASS:` 行),那个判据能被用例自己的
+# Println 骗过(终审实测:伪造包 RUN=2/PASS=1/SKIP=1 → 放行;第 13 轮
+# 加的"必须看到 === RUN"被同一手法击穿)。本步因此换成事件判定。
+
+# ---- JSON 字段取值:唯一实现(下面几个 awk 共用同一份)--------------------
 #
-# 抽成 real_usage_report 而不是就地写死:门禁与**自检**必须走**同一条代码
-# 路径** —— 自检若自己另写一套判定,将来有人把这里的判据改坏,自检照样
-# 绿,盲区就又回来了(与 win_check 抽函数的理由同源)。
-#
-# real_usage_report <测试日志> <包列表(空格分隔)>
-#   输出"缺少真实执行用例"的清单(每行 "  <pkg>: <原因>");空输出 = 全部达标。
-real_usage_report() {
-	awk -v pkgs="$2" '
-BEGIN {
-	n = split(pkgs, a, " ")
-	for (i = 1; i <= n; i++) if (a[i] != "") want[a[i]] = 1
-	reason["zero"]    = "0 个真实用例(测试文件里没有 Test 函数,或被 build 标签跳过)"
-	reason["skipall"] = "全部用例都被 t.Skip 跳过(没有一条真正执行过 —— 看着有测试,实际什么都没验证)"
-	reason["nofiles"] = "没有测试文件([no test files])"
-	reason["fail"]    = "测试失败"
-	reason["missing"] = "测试结果行缺失(包没进测试列表?)"
+# 为什么可以这么"暴力"地找字段:go test -json 每行是**扁平** JSON 对象,
+# 字段用 `,` 分隔,而**值里的引号一定被转义成 \"**。于是:
+#   - 值内部不可能出现未转义的 `"` → 序列 `,"键":"` 只可能出现在真正的键位置;
+#   - 用例自己打印的 `"Action":"pass"` 在 JSON 里是 `\"Action\":\"pass\"`,
+#     中间夹着反斜杠 → 不含 `"Action":"` 这个子串 → 骗不过这里的解析。
+# 取不到字段 → 该行被忽略 → 事件统计偏保守 → fail closed。
+JSON_GET_FN='
+function jget(line, key,   pat, p, i, c, out) {
+	pat = "\"" key "\":\""
+	p = index(line, pat)
+	if (p == 0) return ""
+	p += length(pat)
+	out = ""
+	for (i = p; i <= length(line); i++) {
+		c = substr(line, i, 1)
+		if (c == "\\") { out = out c substr(line, i + 1, 1); i++; continue }
+		if (c == "\"") break
+		out = out c
+	}
+	return out
 }
-/^=== RUN / { nrun++; next }
-/^--- PASS: / { npass++; next }
-/^--- SKIP: / { nskip++; next }
-/^--- FAIL: / { nfail++; next }
-/^(ok|FAIL|\?)[[:space:]]/ {
-	if ($2 in want) {
+'
+
+# json_good_pkgs <json 日志> → 每行一个"有顶层 pass 事件"的包
+json_good_pkgs() {
+	awk "$JSON_GET_FN"'
+	{
+		if (jget($0, "Action") != "pass") next
+		tst = jget($0, "Test")
+		if (tst == "") next
+		if (tst ~ /\//) next
+		pkg = jget($0, "Package")
+		if (pkg != "" && !seen[pkg]++) print pkg
+	}
+	' "$1"
+}
+
+# usage_candidates <文本日志> → 每行一个候选用例名(只作 -run 模式用)
+#
+# **只作提示**:取错不会让判定出错(兜底运行会补齐),取多只是多跑几个用例。
+# 名字只保留 [A-Za-z0-9_](Go 的顶层用例名就是标识符)—— 用例自己伪造的
+# RUN 行可能带奇怪字符,一律丢弃,免得拼出非法正则让整次运行失败。
+usage_candidates() {
+	awk '
+	/^=== RUN   / { if (!got) { cand = $3; got = 1 }; next }
+	/^(ok|FAIL|\?)[[:space:]]/ {
 		p = $2
-		if ($1 == "ok") st[p] = "ok"
-		else if ($1 == "FAIL") st[p] = "fail"
-		else st[p] = "nofiles"
-		if (index($0, "no tests to run") > 0) st[p] = "zero"
-		# 框架没跑过任何用例 → PASS 行不可信(可能是用例自己打印的)
-		np[p] = (nrun > 0) ? npass : 0
-		ns[p] = nskip
-		nrun = 0
-		npass = 0
-		nskip = 0
-		nfail = 0
+		if (p in seen) next
+		seen[p] = 1
+		if (got) print cand
+		got = 0; cand = ""
 		next
 	}
+	' "$1" | grep -E '^[A-Za-z0-9_]+$' | sort -u || true
 }
-END {
-	for (p in want) {
-		s = (p in st) ? st[p] : "missing"
-		if (s == "ok") {
-			if (np[p] == 0) s = (ns[p] > 0) ? "skipall" : "zero"
-		}
-		if (s != "ok") printf "  %s: %s\n", p, reason[s]
+
+# real_usage_verdict <工作目录> <包列表> <文本日志>
+#   → 打印"缺少真实执行用例"的清单(每行 "  <pkg>: <原因>");空输出 = 全部达标。
+#
+# 门禁与**自检**走同一个函数 —— 自检若自己另写一套判定,将来有人把这里
+# 改坏(例如把判据改回解析文本),自检照样绿,盲区就又回来了(与 win_check
+# 抽函数的理由同源)。
+#
+# 两段式执行(性能):
+#   ① **窄化运行**:用文本日志里每个包的第一条 "=== RUN" 名做 -run 模式,
+#      每个包只跑 1 个用例。框架事件照样权威(出现顶层 pass 事件就证明
+#      这个包真的有通过的用例),但执行时间从"整包"降到"一个用例"。
+#   ② **兜底运行**:窄化运行没能证明的包(候选用例被跳过 / 名字对不上 /
+#      包没跑起来),整包再跑一次 JSON,拿完整事件。
+# 判据始终是"框架顶层 pass 事件";两段的结果合并后统一判定。
+# 工具链缺失 / 输出为空 / 解析不出事件 → 一律判红(fail closed),不跳过。
+real_usage_verdict() {
+	rv_dir="$1"
+	rv_pkgs="$2"
+	rv_text="$3"
+	rv_log1=$(mktemp /tmp/awo-verify-json1.XXXXXX)
+	rv_log2=$(mktemp /tmp/awo-verify-json2.XXXXXX)
+	rv_good=""
+
+	# ① 窄化运行:每个包只跑它的第一个候选用例
+	rv_cands=$(usage_candidates "$rv_text" | awk 'NR > 1 { printf "|" } { printf "%s", $0 }' || true)
+	if [ -n "$rv_cands" ] && [ -n "$rv_pkgs" ]; then
+		( cd "$rv_dir" && go test -count=1 -json -timeout 300s -run "^($rv_cands)\$" $rv_pkgs ) >"$rv_log1" 2>&1 || true
+		rv_good=$(json_good_pkgs "$rv_log1" | tr '\n' ' ' || true)
+	fi
+
+	# ② 兜底运行:窄化没证明的包,整包再跑一次(拿完整事件)
+	rv_rest=""
+	for rv_p in $rv_pkgs; do
+		case " $rv_good " in
+		*" $rv_p "*) continue ;;
+		esac
+		rv_rest="$rv_rest $rv_p"
+	done
+	if [ -n "$rv_rest" ]; then
+		( cd "$rv_dir" && go test -count=1 -json $rv_rest ) >"$rv_log2" 2>&1 || true
+		rv_good="$rv_good $(json_good_pkgs "$rv_log2" | tr '\n' ' ' || true)"
+	fi
+
+	# ③ 报告:达标的包不出现;其余从**兜底运行的完整事件**里取原因
+	#    (窄化运行的事件是残缺的,不能用来定原因 —— 例如候选用例被单独跑时
+	#     失败,整包跑却是过的。)
+	awk -v goodlist=" $rv_good " -v pkgs="$rv_pkgs" "$JSON_GET_FN"'
+	BEGIN {
+		n = split(pkgs, a, " ")
+		for (i = 1; i <= n; i++) if (a[i] != "") want[a[i]] = 1
+		reason["zero"]    = "0 个真实用例(测试文件里没有 Test 函数,或被 build 标签跳过)"
+		reason["skipall"] = "全部用例都被 t.Skip 跳过(没有一条真正执行过 —— 看着有测试,实际什么都没验证)"
+		reason["nofiles"] = "没有测试文件([no test files])"
+		reason["fail"]    = "测试失败"
+		reason["missing"] = "测试结果行缺失(包没进测试列表?)"
 	}
+	{
+		act = jget($0, "Action"); if (act == "") next
+		pkg = jget($0, "Package"); if (pkg == "") next
+		tst = jget($0, "Test")
+		if (act == "pass") {
+			if (tst != "" && tst !~ /\//) goodpkg[pkg] = 1
+			else if (tst == "") ppass[pkg] = 1
+		} else if (act == "fail") {
+			pfail[pkg] = 1
+		} else if (act == "skip") {
+			if (tst != "") tskip[pkg] = 1; else pskip[pkg] = 1
+		}
+	}
+	END {
+		for (p in want) {
+			if (index(goodlist, " " p " ") > 0) continue
+			if (p in goodpkg) continue
+			if (p in pfail) s = "fail"
+			else if (p in tskip) s = "skipall"
+			else if (p in pskip) s = "nofiles"
+			else if (p in ppass) s = "zero"
+			else s = "missing"
+			printf "  %s: %s\n", p, reason[s]
+		}
+	}
+	' "$rv_log2" | sort
+	rm -f "$rv_log1" "$rv_log2"
 }
-' "$1" | sort
-}
-MISSING=$(real_usage_report "$TEST_LOG" "$CHECK_PKGS")
+MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
+	fail "第 6 步判定执行失败(拿不到 go test -json 事件 —— 必须红,不能静默跳过)"
 [ -z "$MISSING" ] || fail "以下包缺少真实执行的用例:$MISSING"
 
-# ---- 门禁自检:第 6 步的判定本身必须真的能抓到 0 用例 / 全 skip ---------
-# 为什么必须有这一段:第 6 步是门禁里**最复杂**的一段判定(PASS/SKIP/RUN
-# 三种行 + "no tests to run" 文本 + "必须看到 RUN 行"的 fail closed 兜底)。
-# 它守护的正是 #252 的绕过场景本身 —— 一个只含 t.Skip() 的新包。
-# 如果这一段被改坏(例如有人删掉 `--- SKIP:` 的计数、或把 RUN 行的兜底
-# 去掉),**没有任何测试会发现**:工作区里的每个包都有真用例,判定逻辑
-# 错了也照样全绿。
+# ---- 门禁自检:第 6 步的判定本身必须真的能抓到 0 用例 / 全 skip / 伪造输出 -
+# 为什么必须有这一段:第 6 步是门禁里**最复杂**的一段判定(框架事件 + 顶层/
+# 子用例的区分 + 窄化/兜底两段执行)。它守护的正是 #252 的绕过场景本身 ——
+# 一个只含 t.Skip() 的新包。如果这一段被改坏(把判据改回解析文本、或把
+# pass 事件的条件放宽),**没有任何测试会发现**:工作区里的每个包都有真
+# 用例,判定逻辑错了也照样全绿。
 #
-# 做法:在 /tmp 里造一个**隔离的最小模块**,跑**真的** `go test -v`,
-# 把**真的**输出喂给**同一个** real_usage_report,断言三件事:
+# 做法:在 /tmp 里造一个**隔离的最小模块**,跑**真的** `go test`,
+# 把**真的**输出喂给**同一个** real_usage_verdict,断言五件事:
 #   1. 正常包(有真正执行的用例)→ **不得**被报出来(防空转/防误报);
 #   2. 0 用例包(测试文件里没有 Test 函数)→ 必须被报出来,原因含"0 个真实用例";
-#   3. 全 skip 包(唯一的用例被 t.Skip 跳过)→ 必须被报出来,原因含"t.Skip"。
+#   3. 全 skip 包(唯一的用例被 t.Skip 跳过)→ 必须被报出来,原因含"t.Skip";
+#   4. **伪造输出包**(用例自己打印 "=== RUN" / "--- PASS:" 行,真实结果是被
+#      t.Skip 跳过)→ 必须被报出来 —— 这正是本轮修的绕过(终审 P2-1)。
+#   5. 反向对照(对正常包断言"必须在报告里"必须失败)。
 #
 # 隔离模块放在 /tmp:仓库里造坏包会污染 go list 的包集合与第 1 步的
 # gofmt 清单。go.mod 的 go 指令取自仓库自己的 go.mod(不硬编码版本号)。
-# 成本:一次小模块的 `go test` ≈ 1s(实测)。
+# 成本:两次小模块的 `go test` ≈ 2s(实测)。
 USAGE_CHECK_DIR=$(mktemp -d /tmp/awo-verify-usagecheck.XXXXXX)
-mkdir -p "$USAGE_CHECK_DIR/good" "$USAGE_CHECK_DIR/zero" "$USAGE_CHECK_DIR/skip"
+mkdir -p "$USAGE_CHECK_DIR/good" "$USAGE_CHECK_DIR/zero" "$USAGE_CHECK_DIR/skip" "$USAGE_CHECK_DIR/fake"
 printf 'module awo/usagecheck\n\ngo %s\n' "$SELF_GO_VER" >"$USAGE_CHECK_DIR/go.mod"
 printf 'package good\n\nimport "testing"\n\nfunc TestGood(t *testing.T) { _ = 1 }\n' >"$USAGE_CHECK_DIR/good/good_test.go"
 printf 'package zero\n\nfunc helperOnly() {}\n' >"$USAGE_CHECK_DIR/zero/zero_test.go"
 printf 'package skip\n\nimport "testing"\n\nfunc TestSkipped(t *testing.T) { t.Skip("环境不具备") }\n' >"$USAGE_CHECK_DIR/skip/skip_test.go"
-USAGE_LOG="$USAGE_CHECK_DIR/test.log"
-if ! ( cd "$USAGE_CHECK_DIR" && go test -count=1 -v ./... ) >"$USAGE_LOG" 2>&1; then
+# 伪造包:用例被 t.Skip 跳过(什么都没验证),却自己打印框架格式的行 ——
+# 迭代 14B 的文本判据会放行它,本轮的框架事件判据必须抓住它。
+printf 'package fake\n\nimport (\n\t"fmt"\n\t"testing"\n)\n\nfunc TestForged(t *testing.T) {\n\tfmt.Println("=== RUN   Forged")\n\tfmt.Println("--- PASS: Forged (0.00s)")\n\tt.Skip("环境不具备")\n}\n' >"$USAGE_CHECK_DIR/fake/fake_test.go"
+USAGE_TEXT_LOG="$USAGE_CHECK_DIR/test.log"
+if ! ( cd "$USAGE_CHECK_DIR" && go test -count=1 -v ./... ) >"$USAGE_TEXT_LOG" 2>&1; then
 	# 隔离模块自己跑不起来 = 自检环境不可用 → 必须红,不能静默跳过
-	cat "$USAGE_LOG" >&2
+	cat "$USAGE_TEXT_LOG" >&2
 	fail "门禁自检失败:隔离模块的 go test 自身失败(自检环境不可用 —— 必须红,不能静默跳过)"
 fi
-USAGE_PKGS="awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip"
-USAGE_REPORT=$(real_usage_report "$USAGE_LOG" "$USAGE_PKGS")
+USAGE_PKGS="awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip awo/usagecheck/fake"
+USAGE_REPORT=$(real_usage_verdict "$USAGE_CHECK_DIR" "$USAGE_PKGS" "$USAGE_TEXT_LOG") ||
+	fail "门禁自检失败:第 6 步判定函数自身执行失败(自检环境不可用 —— 必须红,不能静默跳过)"
 
 # usage_expect <包> <报告> <期望在报告里? yes|no> [原因关键字]
 #
@@ -823,7 +921,7 @@ USAGE_REPORT=$(real_usage_report "$USAGE_LOG" "$USAGE_PKGS")
 # **为什么是一个函数而不是两个**:两个方向必须走**同一个**判定函数 ——
 # 否则"正向函数被改成恒真"这类失效就没人发现(断言助手只能守住
 # selfcheck_ok / selfcheck_red 本身,守不住它们调用的判定函数)。
-# 下面第 4 条场景就是**反向对照**:同一个函数,对"正常包"断言"必须在报告里"
+# 下面第 5 条场景就是**反向对照**:同一个函数,对"正常包"断言"必须在报告里"
 # 必须失败 —— 它失败,才说明这个函数真的在区分。
 usage_expect() {
 	ue_pkg="$1"
@@ -847,8 +945,9 @@ usage_expect() {
 selfcheck_ok "第 6 步判定:正常包(有真正执行的用例)不得被误报" usage_expect "awo/usagecheck/good" "$USAGE_REPORT" "no"
 selfcheck_ok "第 6 步判定:0 用例包必须被抓(否则'新增一个空测试包'就能绕过门禁)" usage_expect "awo/usagecheck/zero" "$USAGE_REPORT" "yes" "0 个真实用例"
 selfcheck_ok "第 6 步判定:全 t.Skip 包必须被抓(#252 的绕过场景本身)" usage_expect "awo/usagecheck/skip" "$USAGE_REPORT" "yes" "t\.Skip"
+selfcheck_ok "第 6 步判定:伪造 '=== RUN'/'--- PASS' 输出的包必须被抓(用例自己打印的行不是框架事件 —— 终审 P2-1 的绕过本身)" usage_expect "awo/usagecheck/fake" "$USAGE_REPORT" "yes"
 # 反向对照:同一个判定函数,对**正常包**断言"必须在报告里"必须失败 ——
-# 它若通过,说明这个函数根本没有在区分(恒真),上面三条就都是空转。
+# 它若通过,说明这个函数根本没有在区分(恒真),上面几条就都是空转。
 selfcheck_red "第 6 步判定必须能区分:正常包不在报告里 → 断言'在报告里'必须失败" usage_expect "awo/usagecheck/good" "$USAGE_REPORT" "yes"
 rm -rf "$USAGE_CHECK_DIR"
 USAGE_CHECK_DIR=""
@@ -863,7 +962,7 @@ USAGE_CHECK_DIR=""
 	fail "门禁自检失败:实际执行了 $selfcheck_count 条自检场景,期望 $SELFCHECK_EXPECTED 条 —— 有自检被删掉,或新增后没同步 SELFCHECK_EXPECTED"
 
 echo "OK($CHECK_COUNT 个包均有真实执行并通过的用例)"
-echo "   自检通过:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓"
+echo "   自检通过:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓 / 伪造输出包被抓"
 end_step
 
 step "7/9" "前端 lint / 构建 / vitest"

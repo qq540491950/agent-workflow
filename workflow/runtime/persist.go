@@ -20,7 +20,9 @@ package runtime
 // 必然覆盖 state 列,而 state 列的裁决权必须留在 CAS 手里。
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -203,6 +205,37 @@ func (e *Engine) currentState(id string) model.ExecutionState {
 		return "?"
 	}
 	return cur.State
+}
+
+// loadExecState 只读执行记录的**状态列**。
+//
+// 为什么不用 GetExecution:取消只需要"库里现在是哪个状态"这一个事实,
+// 而 GetExecution 会把 snapshot_json / state_json 一并解析(大对象 +
+// JSON 解码)。轻量查询顺带避开一个坑:state_json 损坏时 GetExecution
+// 直接报错,那样连"取消"都做不了(状态机管不了,人还能管)。
+//
+// 状态不存在 → NOT_FOUND(与 persistence.GetExecution 的错误码一致,
+// API 层据此回 404)。
+//
+// 引擎未绑定持久层 → DB_ERROR:这条路径在生产里不可达(NewEngine 一定
+// 拿得到 repo),但不能让它 panic。注意**不要引入新的错误码**:前端有
+// 一道守卫(frontend/src/lib/api.test.ts:错误码全集守卫)要求后端的
+// 每个错误码都有中文提示,新码会让前端门禁变红。
+func (e *Engine) loadExecState(id string) (model.ExecutionState, error) {
+	if e.Repo == nil {
+		return "", model.NewError(model.KindStateError, "DB_ERROR",
+			"引擎未绑定持久层,无法取消执行")
+	}
+	var state string
+	err := e.Repo.SQL().QueryRow(`SELECT state FROM executions WHERE id=?`, id).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", model.NewError(model.KindValidationError, "NOT_FOUND",
+			fmt.Sprintf("执行 %q 不存在", id))
+	}
+	if err != nil {
+		return "", err
+	}
+	return model.ExecutionState(state), nil
 }
 
 // ---- JSON 编码助手(与 persistence 的编码保持一致) ----

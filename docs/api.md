@@ -38,7 +38,7 @@
 | GET | `/api/executions/{id}/export` | 导出完整记录 JSON(附件下载)。响应头 `Cache-Control: no-store`;其中的节点明细同样已脱敏 |
 | POST | `/api/executions/{id}/input` | 人工输入并恢复 `{response, instruction}` |
 | POST | `/api/executions/{id}/retry` | 失败执行恢复 `{skip: bool}`。空 body 合法(等价 `skip=false`);body 非空而解析失败返回 400(此前静默变 `skip=false`,「跳过失败节点」实际会重跑失败 Agent) |
-| POST | `/api/executions/{id}/cancel` | 取消执行 |
+| POST | `/api/executions/{id}/cancel` | 取消执行。**三种语义**(第十五轮变更):**运行中** → 200;**已终态** → **400 `INVALID_TRANSITION`**;**不存在** → 404。详见"第 12 节" |
 | DELETE | `/api/executions/{id}` | 删除记录(级联) |
 
 ## Agents / Skills
@@ -70,7 +70,7 @@
 | --- | --- | --- |
 | GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关 |
 | POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改)。**`log_level` 只接受 `debug`/`info`/`warn`/`error`**(大小写不敏感,落库归一为小写),非法值返回 400 —— 不再静默回落 info(界面显示的级别与实际生效的级别会不一致)。**`git_working_dir` 的"缺省"与"空串"是两种语义**:请求体里**没有该字段** = 保持原值不变;**显式传空串** = **清除**(落库空串 + 回到启动默认目录)。**先全量校验、后统一落库** —— 任一项非法则一项都不改 |
-| GET | `/api/backup` | 导出备份(工作流 + Agent 配置,含明文敏感环境变量)。响应头 `Cache-Control: no-store`,避免明文 API Key 留在浏览器/代理的磁盘缓存里 |
+| GET | `/api/backup` | 导出备份(工作流 + Agent 配置)。**含明文,范围是三类**:`agent_configs` 整份原样(`env` / `behavior` / `extra_args`)+ **工作流定义本体**(含工作流 `variables`)。约定 8 允许备份导出含明文(它是唯一例外),但**请按"整个文件都是敏感的"对待**。响应头 `Cache-Control: no-store`,避免明文 API Key 留在浏览器/代理的磁盘缓存里 |
 | POST | `/api/backup/restore` | 恢复备份。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝;**本机不存在的 Agent 也计入 `agent_configs_invalid` 且不落库**(此前计入"已恢复"是假成功:配置永远不会被应用)。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` / **`agent_configs_unknown_ids`** |
 | GET | `/api/events` | **SSE** 实时事件流(UIEvent;连接即达响应头,15s keepalive) |
 | GET | `/api/events/all?type=&limit=` | 跨执行审计事件(支持类型前缀过滤) |
@@ -150,6 +150,7 @@ HTTP 状态码语义:
 | `INVALID_LOOP_LIMIT` | 校验错误 | `settings.on_loop_limit` 的取值不在白名单(`fail` / `wait_user`)。校验期就报出,不再静默落回 `wait_user`(那会让"循环超限"变成"暂停等人",用户以为程序卡住了) |
 | `PERMISSION_OVERRIDE_LOOSENS` | 校验错误 / 运行错误 | `permissions:` 段试图**放宽**全局已禁用的能力。**有效权限 = 全局实时策略 ∧ permissions 段(只收紧)** —— 放宽尝试在**校验期**就报出;运行期遇到历史工作流里的放宽写法同样报出并按拒绝处理 |
 | `INVALID_PERMISSION_OVERRIDE` | 校验错误 | `permissions:` 段的**结构**非法(如未知字段、类型不对)。与 `PERMISSION_OVERRIDE_LOOSENS` 区分:前者是"写错了",后者是"想放开" |
+| `INVALID_TRANSITION` | 400(取消执行) | **状态迁移非法**。取消一个**已终态**(`COMPLETED` / `FAILED` / `CANCELLED`)的执行时返回 —— 取消一个已经结束的运行是"取消失败",不是幂等删除。**约定 6 的"幂等返回 200"只适用于删除资源**,不适用于状态迁移。详见"第 12 节" |
 
 > **第十轮新增的三个码**(`UNSUPPORTED_AGENT_SETTING` / `INVALID_LOOP_LIMIT` /
 > `PERMISSION_OVERRIDE_LOOSENS`)均已进前端 `CODE_HINTS` 码表,并受**双向守卫**
@@ -163,7 +164,7 @@ HTTP 状态码语义:
 > `POST /api/workflows/validate` 响应的 `errors[].code` / `warnings[].code`
 > 数组里;HTTP 错误体的 `code` 在响应体顶层。同一个字符串在两处都可能出现。
 
-## 契约变化(第四/五/七/十/十二轮)
+## 契约变化(第四/五/七/十/十二/十三/十五轮)
 
 ### 1. 导入响应带 `ignored_keys`
 
@@ -297,12 +298,29 @@ HTTP 状态码语义:
 
 ### 7. Agent 配置的 `extra_args` 回写语义(第十轮变更)
 
+### 7. Agent 配置的 `extra_args` 回写语义(第十轮变更;第十五轮补"值形态"那一半)
+
 `extra_args` 里的凭据值在 GET 时**掩码**为 `***`(约定 8)。此前**没有回写
 语义** → 用户打开配置拿到掩码 → 只改模型 → 保存 → **真实 API Key 被覆盖成
 字面量 `***`** → 之后每次 CLI 调用带 `--api-key ***` → 鉴权失败,而用户看到的
 是"已保存"。
 
-**现在的口径:按参数名对齐合并**(不是按下标对齐)。
+**掩码的判据:参数名 ∪ 值形态**(第十五轮,登记为 #265)。
+
+| 判据 | 例子 | 处理 |
+| --- | --- | --- |
+| **参数名**指向凭据 | `--api-key sk-x`、`--token=sk-x` | 整个值 → `***`(名字就是线索,与值长什么样无关) |
+| **值的形态**是凭据(名字不敏感) | `--header "Authorization: Bearer ghp_xxx"`、`--foo sk-ant-xxx` | 整个值 → `***` |
+| 两者都不是 | `--description "some text"`、`--model claude-sonnet-4-5` | **原样保留**(不误伤) |
+
+> **值形态的规则只有一份**:`logx/credential.go`(约定 13 的同源精神)。
+> `extra_args` 侧只取它的**判断**,不另写一份形态判定。
+> **判定对象是整个参数值**(值里含凭据形态 → 整个值替换为 `***`),
+> 不是就地替换其中的子串 —— 全仓的 `***` 只表示"这个值被掩了,回写时沿用
+> 已存值";半掩半明的值回写时无法判断"这一段是不是掩码",而且就地替换会
+> 改写用户自己的原文(`rotate ghp_xxx soon` 变成 `rotate *** soon`)。
+
+**回写的口径:按参数名对齐合并**(不是按下标对齐)。
 
 | 情形 | 处理 |
 | --- | --- |
@@ -315,8 +333,20 @@ HTTP 状态码语义:
 > **为什么拒绝按下标对齐**:增删一个参数后,下标全部错位 → A 的凭据会被写到
 > B 的**参数名**上 → 凭据泄漏到第三方服务,或鉴权莫名失败。参数名对齐时
 > 同源归一 `--api-key` / `--api_key` / `--API-Key` 视为同一个参数。
+>
+> **掩码与合并必须是同一个口径**:掩码认得的,合并也必须认得 —— 否则
+> "按形态被掩的 `***`"回传时找不到原值 → 凭据被丢弃(Agent 每次调用都不带
+> 鉴权参数,而用户只看到"已保存")。
 
-下发 CLI 前会**剔除字面量 `***`**(防旧脏数据)。
+**已存值按原文保存(含引号)**:参数不经 shell,引号是参数值的一部分 ——
+`--api-key "sk-x"` 回来必须是 `--api-key "sk-x"`,不是 `--api-key sk-x`。
+
+**布尔开关不是值**:`--api-key --verbose` 里 `--verbose` 是**另一个选项**
+(不带值),不得被当成 `--api-key` 的值掩掉或合并掉;`-5` 这类**负数**同理
+(它常是 `--offset` 的值)。
+
+下发 CLI 前会**剔除字面量 `***`**(防旧脏数据)—— **所有会被掩码的值位**
+(不只凭据名)都剔。
 
 ### 8. 设置与权限的语义(第十轮变更)
 
@@ -409,6 +439,41 @@ HTTP 状态码语义:
 是嵌套的 `map[mode]map[field]value`,同名字段在不同 mode 下互相独立。
 
 **验证**:`agent/config_behavior_test.go`、`app/application/behavior_mask_test.go`。
+
+### 12. 取消执行的三种语义(第十五轮变更)
+
+> 登记于 `docs/OPTIMIZATION.md` #264(取消)与 #268(取消先到、协程后启动)。
+> **第十五轮尚未提交**,但接口层的语义已按本节实现。
+
+`POST /api/executions/{id}/cancel` 的返回值由**库里执行记录的状态**决定
+(约定 4 的唯一裁决来源),**不看进程内的句柄**:
+
+| 库里的状态 | HTTP | `code` | 含义 |
+| --- | --- | --- | --- |
+| `RUNNING`(且执行协程还活着) | **200** | — | 取消成功。状态由执行协程收尾时 CAS 落成 `CANCELLED`,`workflow.cancelled` 事件也由它发出 |
+| `COMPLETED` / `FAILED` / `CANCELLED` | **400** | `INVALID_TRANSITION` | **取消失败**。取消一个**已经结束**的运行不是幂等删除 —— 约定 6 的"幂等返回 200"只适用于**删除资源**,不适用于状态迁移 |
+| 不存在 | **404** | `NOT_FOUND` | 执行 ID 不存在 |
+| `CREATED` / `PAUSED` / `WAITING_USER` | **200** | — | 走 CAS 裁决:落成 `CANCELLED` 并发 `workflow.cancelled` 事件。并发取消**只产生一次**状态变更与事件 |
+
+> **为什么不能用"句柄在不在"判断**:终态是**先写库**的,执行协程的句柄由
+> `defer` 摘除 —— 两者之间有 ≈**210µs** 的窗口(终态事件同步落库那段)。
+> 窗口内取消一个**已经完成**的执行会走"运行中"快路径 → API 回 200"已取消",
+> 而执行**早已 COMPLETED**(实测:紧密轮询 **40/40** 次都能落进窗口,
+> 修前 40/40 拿到 200 假成功;修后 40/40 命中窗口但 **0/40** 假成功)。
+> **修法**:快路径也**先读库里的状态**。
+
+> **库里 `RUNNING` 但句柄已摘除**(执行协程收尾时终态提交 CAS 冲突,状态停在
+> `RUNNING`)→ 仍然**可以被取消**。否则用户只能看着一个永远"运行中"的执行
+> 干瞪眼。
+
+**取消先到、协程后启动**:若取消请求在执行协程**启动之前**到达(例如
+Resume / Retry 的 CAS 已把状态落成 `RUNNING`、但句柄还没注册),协程
+**启动即核对库里的状态** —— 已是 `CANCELLED` 就立刻收尾,**不做任何节点
+执行**。否则库里写着"已取消",副作用却已经发生(约定 14 同族的"状态与事实
+不符")。
+
+**并发取消**:状态变更走 CAS,只产生一次 `CANCELLED` 与一次
+`workflow.cancelled` 事件(约定 4)。
 
 ## SSE 实时事件流(GET /api/events)
 

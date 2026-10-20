@@ -408,32 +408,103 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 	return snapshot, nil
 }
 
-// Cancel 取消执行(运行中的通过 context 取消;等待用户的直接标记取消)。
+// Cancel 取消执行。
+//
+// **三种场景各自的结论**(前端 ExecutionMonitor 依赖它:取消按钮只在
+// RUNNING/WAITING_USER 时出现,失败时弹 toast 提示原因):
+//
+//   - **运行中**(RUNNING):取消 ctx,返回 nil(成功)。状态由执行协程收尾时
+//     CAS 落成 CANCELLED,workflow.cancelled 事件也由它发出。
+//   - **已终态**(COMPLETED / FAILED / CANCELLED):返回 INVALID_TRANSITION
+//     明确错误。取消一个已经结束的运行是"取消失败",不是幂等删除 ——
+//     约定 6 的"幂等返回 200"只适用于删除资源。
+//   - **不存在**:NOT_FOUND(404)。
+//
+// ---- 为什么必须查库(终审复审 P1-1) ----
+//
+// e.cancels 里的句柄由 execute 协程的 defer 摘除,而**终态是先写库的** ——
+// 于是存在一个窗口:
+//
+//	终态写库 → (事件同步落库) → execute 返回 → defer 摘除 e.cancels
+//
+// 窗口内取消一个**已经完成**的执行会走"运行中"快路径,只 cancel() 就
+// return nil → API 回 200 假成功("已取消"其实没发生,执行早已 COMPLETED)。
+//
+// 窗口宽度 ≈ 几百微秒(终态事件同步落库那段):实测紧密轮询 40/40 次都能
+// 落进窗口(见 api/cancel_semantics_test.go 的端到端复刻:改前 40/40
+// 拿到 200,改后 0/40)。
+//
+// 修法:快路径也**先读库里的状态**(唯一裁决来源,约定 4)——
+// 已终态 → 明确错误;运行中 → 照旧取消 ctx。
 func (e *Engine) Cancel(ctx context.Context, executionID string) error {
-	e.mu.Lock()
-	cancel, running := e.cancels[executionID]
-	e.mu.Unlock()
-	if running {
-		cancel()
-		return nil
+	// 库里是唯一裁决来源(约定 4):先读状态,再决定怎么取消。
+	state, err := e.loadExecState(executionID)
+	if err != nil {
+		return err // 不存在 → NOT_FOUND(404)
 	}
-	// 非运行路径用 CAS:并发取消只产生一次状态变更与事件
+
+	switch state {
+	case model.ExecutionCompleted, model.ExecutionFailed, model.ExecutionCancelled:
+		// 终态执行不可再取消 → 明确错误(不是 200 假成功)。
+		//
+		// 但协程可能还在收尾(终态已落库、defer 还没摘除句柄):
+		// 仍然把 ctx 取消掉,让它尽快收尾 —— 只是**不**把这次取消说成成功。
+		e.stopRun(executionID)
+		return model.NewError(model.KindStateError, "INVALID_TRANSITION",
+			fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, state))
+	case model.ExecutionRunning:
+		e.mu.Lock()
+		cancel, running := e.cancels[executionID]
+		e.mu.Unlock()
+		if running {
+			// 运行中:取消 ctx。状态与 workflow.cancelled 事件由执行协程
+			// 收尾时 CAS 落定(并发取消只产生一次状态变更与事件)。
+			cancel()
+			return nil
+		}
+		// 库里是 RUNNING 却没有活跃句柄:执行协程已收尾(终态提交 CAS
+		// 冲突时状态会停在 RUNNING)。ctx 已无处可取消 → 走下面的 CAS 裁决。
+	}
+
+	// 其余场景(CREATED / PAUSED / WAITING_USER,或 RUNNING 但无句柄):
+	// 用 CAS 裁决 —— 并发取消只产生一次状态变更与事件。
+	//
+	// 含 RUNNING:库里是运行中却没有句柄的"卡死"执行(终态提交 CAS 冲突
+	// 时状态会停在 RUNNING)也必须能被用户取消,否则用户只能看着一个
+	// 永远"运行中"的执行干瞪眼。
 	ok, err := e.Repo.CasExecutionState(executionID,
-		[]model.ExecutionState{model.ExecutionCreated, model.ExecutionPaused, model.ExecutionWaitingUser},
+		[]model.ExecutionState{model.ExecutionCreated, model.ExecutionPaused,
+			model.ExecutionWaitingUser, model.ExecutionRunning},
 		model.ExecutionCancelled)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		exec, err := e.loadExec(executionID)
+		// 并发裁决:别人(执行协程/崩溃恢复/显式重试)已经落定了状态 ——
+		// 按**当前**状态给出明确错误(而不是笼统的"取消失败")。
+		cur, err := e.loadExecState(executionID)
 		if err != nil {
 			return err
 		}
 		return model.NewError(model.KindStateError, "INVALID_TRANSITION",
-			fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, exec.State))
+			fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, cur))
 	}
 	e.Bus.Emit(event.New(event.WorkflowCancelled, executionID, "", nil))
 	return nil
+}
+
+// stopRun 停掉还在跑的执行协程(如果还有活跃句柄)。
+//
+// 终态执行也可能还有活跃句柄:终态先写库,协程的 defer 才摘除句柄
+// (窗口 ≈ 几百微秒)。此时取消改变不了终态,但仍应把协程停掉 ——
+// 它可能还在收尾(发事件/落库),留着只会空转。
+func (e *Engine) stopRun(executionID string) {
+	e.mu.Lock()
+	cancel, running := e.cancels[executionID]
+	e.mu.Unlock()
+	if running {
+		cancel()
+	}
 }
 
 // setExecState 写执行记录的状态快照 —— **状态写入的统一入口**。
@@ -578,6 +649,21 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 			e.failExecution(exec, fmt.Sprintf("执行 panic: %v", r))
 		}
 	}()
+
+	// 启动即核对状态:若这条执行在**协程启动之前**就已被取消
+	// (取消请求先到、协程后启动的窗口 —— Resume/Retry 的 CAS 把状态改成
+	// RUNNING 之后、句柄注册之前),必须立刻收尾,不能把工作流跑完。
+	//
+	// 为什么这是必须的:取消走 CAS 把状态落成 CANCELLED 后,协程若照常跑
+	// 完,终态提交会撞上一个已被裁决的状态 → CAS 失败 → 库里留着
+	// "已取消",可活其实干完了 —— **状态与事实不符**(约定 14 的同族)。
+	// 用户看到"已取消",副作用却已经发生。
+	//
+	// 协程启动**之后**的取消不需要这条:那时 ctx 会被取消,执行循环立刻
+	// 退出(见下方事件循环的 ctx.Err() 判断)。
+	if st, err := e.loadExecState(exec.ID); err == nil && st == model.ExecutionCancelled {
+		return
+	}
 
 	// snapshot_json 为空/损坏时 GetExecution 会静默留 nil(历史数据或
 	// 写入中断),此处显式失败而不是在下面解引用时 panic。
