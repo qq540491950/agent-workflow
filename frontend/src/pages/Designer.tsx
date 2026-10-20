@@ -323,7 +323,7 @@ function DesignerInner() {
             label: nodeMeta[type]?.label ?? type,
             sublabel: "",
             wtype: type,
-            cfg: defaultConfig(type),
+            cfg: defaultConfigForType(type),
             running: false,
             done: false,
             failed: false,
@@ -644,12 +644,18 @@ function DesignerInner() {
   );
 }
 
-function defaultConfig(type: string): Record<string, unknown> {
+// 新建节点的默认配置。
+//
+// condition 节点**不再**预填 expression:路由条件写在**连线**上
+// (edge.condition),运行期与编译器都不读节点上的表达式 —— 预填一个
+// 不生效的表达式,只会让人以为"填了就生效"(约定 13:校验期与运行期同源,
+// UI 也不得呈现运行期不读的配置)。
+//
+// 导出以便单测锁定该行为(见 designer.test.ts)。
+export function defaultConfigForType(type: string): Record<string, unknown> {
   switch (type) {
     case "agent":
       return { agent: "mock-claude", mode: "plan" };
-    case "condition":
-      return { expression: 'decision == "APPROVED"' };
     case "git":
       return { operation: "diff" };
     case "human":
@@ -657,6 +663,18 @@ function defaultConfig(type: string): Record<string, unknown> {
     default:
       return {};
   }
+}
+
+// 遗留的 condition 节点配置里若还留着 expression,返回它的值(空串 = 没有)。
+//
+// 存量 DSL 里可能已经写了 config.expression(旧版 UI 会预填)。该键已废弃:
+// 运行期不读取。UI 给出提示,而不是继续渲染一个填了也没用的输入框 ——
+// 留着输入框会让人以为路由由它驱动。
+//
+// 导出以便单测锁定(见 designer.test.ts)。
+export function legacyConditionExpression(cfg: Record<string, unknown>): string {
+  const v = cfg.expression;
+  return typeof v === "string" ? v : "";
 }
 
 // 生成不与现有节点冲突的节点 ID。
@@ -831,14 +849,19 @@ function NodePropertyPanel({
       )}
 
       {type === "condition" && (
-        <Row label="Expression(可用: decision / status / iteration)">
-          <Input
-            className="font-mono text-xs"
-            placeholder={'decision == "APPROVED"'}
-            value={String(cfg.expression ?? "")}
-            onChange={(e) => setCfg("expression", e.target.value)}
-          />
-        </Row>
+        <div className="space-y-2">
+          <div className="text-xs text-muted-foreground">
+            条件节点本身无副作用:路由由**连线上的条件**决定。
+            选中一条连线 → 「条件表达式」,按声明顺序求值,第一个成立的分支被执行。
+            可用变量:decision, status, output, iteration。
+          </div>
+          {legacyConditionExpression(cfg) !== "" && (
+            <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">
+              该节点残留 expression 配置(已废弃):运行期不读取它,不影响路由。
+              条件请写到连线上;保存不受影响。
+            </p>
+          )}
+        </div>
       )}
 
       {type === "skill" && (

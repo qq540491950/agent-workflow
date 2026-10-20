@@ -195,6 +195,13 @@ edges:
 	}
 }
 
+// TestInvalidExpression 边上的条件表达式语法非法必须报错。
+//
+// 条件写在**边上**才是运行期真正读的路由条件(edge.condition),
+// 所以这里用边来测 INVALID_EXPRESSION。
+//
+// 注意:condition **节点**上的 expression 已废弃(运行期不读),
+// 它不再报 INVALID_EXPRESSION —— 见 TestConditionNodeExpressionDeprecatedNotBlocking。
 func TestInvalidExpression(t *testing.T) {
 	yml := `
 workflow:
@@ -204,16 +211,59 @@ nodes:
   - id: a
     type: human
   - id: b
-    type: condition
-    expression: "decision ==== "
+    type: human
 edges:
   - from: a
+    condition: "decision ==== "
     to: b
 `
 	wf := mustWf(t, yml)
 	res := Validate(wf, nil, nil)
 	if !has(res, "INVALID_EXPRESSION") {
 		t.Fatalf("expected INVALID_EXPRESSION: %+v", res.Errors)
+	}
+}
+
+// TestDeprecatedConditionExpressionDoesNotBlockSave condition 节点上
+// 已废弃的 expression 不得阻断保存工作流。
+//
+// 校验期**不得**因为这个没有作用的字段拒绝保存工作流 —— 那正是约定 #13
+// 的反例("用户被自己的校验器挡住"):填错一个不起作用的字段就存不了。
+// 正确做法是发一条警告,告诉用户条件要写在连线上。
+//
+// (同包的 nodeconfig_test.go 里另有一条同名意图的用例,锁的是
+// "警告码 + 定位到节点"这一面。)
+func TestDeprecatedConditionExpressionDoesNotBlockSave(t *testing.T) {
+	yml := `
+workflow:
+  id: cond-deprecated
+  name: Cond Deprecated
+nodes:
+  - id: a
+    type: human
+  - id: gate
+    type: condition
+    expression: "decision ==== "
+edges:
+  - from: a
+    to: gate
+`
+	wf := mustWf(t, yml)
+	res := Validate(wf, nil, nil)
+	if !res.Valid {
+		t.Errorf("废弃的 expression 不得阻断保存: %+v", res.Errors)
+	}
+	if has(res, "INVALID_EXPRESSION") {
+		t.Errorf("废弃的 expression 不得再报 INVALID_EXPRESSION: %+v", res.Errors)
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if w.Code == "DEPRECATED_NODE_CONFIG" && w.Node == "gate" {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("应给出 DEPRECATED_NODE_CONFIG 警告: %+v", res.Warnings)
 	}
 }
 

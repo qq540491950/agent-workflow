@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -89,8 +90,15 @@ func TestExecutionReadOutMasksSecrets(t *testing.T) {
 // 返回给调用方的副本,不得改坏运行期仍在用的状态。
 //
 // 这一点很关键:StateData 是会话状态快照,运行期会在恢复时把它回放进
-// 一次执行。若读出口把**库里的**那份原地改了,恢复后的执行就会拿到
+// 一次执行。若读出口把**传入的那份**原地改了,恢复后的执行就会拿到
 // 被遮蔽过的状态(语义被改写)。
+//
+// **语义变更说明(迭代 13)**:此前本用例断言"库里的 state_json 仍是明文",
+// 那条断言与新语义(落库即脱敏,约定 #8)直接冲突 —— 库里留明文正是本轮
+// 要修的缺陷(state_json 是节点明细之外的第四条泄漏通道:落库原样写 +
+// API 原样返回)。因此断言改为两条更强的不变式:
+//  1. 落库的快照已脱敏(库里没有明文);
+//  2. 读出口的脱敏是纯函数:不改传入的 map(运行期还在用同一份结构)。
 func TestExecutionReadOutDoesNotCorruptRuntimeState(t *testing.T) {
 	a := newTestApp(t)
 	wf := &model.Workflow{
@@ -117,15 +125,72 @@ func TestExecutionReadOutDoesNotCorruptRuntimeState(t *testing.T) {
 	if _, err := a.Executions.Get(exec.ID); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	// 直接查库:库里那份必须仍然是原样的(脱敏只发生在返回副本上)。
-	// 若读出口改动了库里的状态,恢复路径就会拿到被遮蔽的状态(语义被改写)。
+	// 库里那份必须是**脱敏后**的:落库即脱敏(约定 #8)。
+	// 审计文件/备份 DB 直接取 state_json,明文落在这里就是泄漏。
 	var rawState string
 	if err := a.Repo.SQL().QueryRow(
 		`SELECT state_json FROM executions WHERE id=?`, exec.ID).Scan(&rawState); err != nil {
 		t.Fatalf("读取库里的状态快照: %v", err)
 	}
-	if !strings.Contains(rawState, secretValue) {
-		t.Errorf("读出口脱敏改动了库里的状态快照: %s", rawState)
+	if strings.Contains(rawState, secretValue) {
+		t.Errorf("落库的 state_json 含凭据明文: %s", rawState)
+	}
+
+	// 读出口的脱敏不得就地改传入的结构(运行期还在用同一份 map)。
+	live := &model.Execution{StateData: map[string]any{
+		"output": "cli stderr: ANTHROPIC_API_KEY=" + secretValue,
+	}}
+	original := live.StateData // 保留原 map 引用:脱敏后 exec.StateData 会被换成新副本
+	maskExecution(live)
+	if !strings.Contains(fmt.Sprint(original["output"]), secretValue) {
+		t.Errorf("读出口脱敏就地改了传入的状态(运行期会读到被遮蔽的值): %v",
+			original["output"])
+	}
+	if strings.Contains(fmt.Sprint(live.StateData["output"]), secretValue) {
+		t.Errorf("读出口返回的副本仍含凭据明文: %v", live.StateData["output"])
+	}
+}
+
+// TestExecutionStateDataMaskedInDatabase 锁住 P1-1 的落库侧:
+// executions.state_json 不得含凭据明文(节点明细之外的第四条通道)。
+func TestExecutionStateDataMaskedInDatabase(t *testing.T) {
+	a := newTestApp(t)
+	wf := &model.Workflow{
+		ID:      "wf-secret3",
+		Name:    "Secret3",
+		Enabled: true,
+		Nodes: []model.Node{
+			{ID: "plan", Type: model.NodeTypeAgent, Config: map[string]any{
+				"agent": "mock-claude", "mode": "plan",
+			}},
+		},
+	}
+	if _, err := a.Workflows.Save(wf); err != nil {
+		t.Fatalf("保存工作流: %v", err)
+	}
+	exec, err := a.Executions.Run(context.Background(), wf.ID,
+		"带上 ANTHROPIC_API_KEY="+secretValue, nil)
+	if err != nil {
+		t.Fatalf("运行: %v", err)
+	}
+	waitExecutionState(t, a, exec.ID, model.ExecutionCompleted)
+
+	// 落库的会话状态快照
+	var rawState string
+	if err := a.Repo.SQL().QueryRow(
+		`SELECT state_json FROM executions WHERE id=?`, exec.ID).Scan(&rawState); err != nil {
+		t.Fatalf("读取库里的状态快照: %v", err)
+	}
+	if strings.Contains(rawState, secretValue) {
+		t.Errorf("state_json 落库含凭据明文: %s", rawState)
+	}
+	// API 读出口(Get = GET /api/executions/{id} 的数据来源)
+	got, err := a.Executions.Get(exec.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if containsSecret(got.StateData) {
+		t.Errorf("执行详情读出口含凭据明文: %s", mustJSON(got.StateData))
 	}
 }
 

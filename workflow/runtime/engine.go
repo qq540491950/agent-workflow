@@ -67,6 +67,9 @@ type Engine struct {
 	// persistFailGuard 防止"落库失败 → 发 runtime.error 事件 → 该事件
 	// 落库又失败 → 再发 …"的递归(发事件时置位,期间不再发)。
 	persistFailGuard atomic.Bool
+	// stateCommitFailures 统计"状态迁移未落库"的次数(CAS 冲突或落库错误)。
+	// 状态没落库 = 事件流与 DB 可能不一致(约定 #14),必须可观测。
+	stateCommitFailures atomic.Int64
 }
 
 // EscalateStats 返回 Escalate 事件分类计数(预期内 / 异常)。
@@ -77,6 +80,11 @@ func (e *Engine) EscalateStats() (int64, int64) {
 
 // EventPersistFailures 返回事件落库失败次数(审计流缺记录的计数)。
 func (e *Engine) EventPersistFailures() int64 { return e.eventPersistFailures.Load() }
+
+// StateCommitFailures 返回状态迁移未落库的次数(CAS 冲突/落库错误)。
+// 计数 > 0 说明有过"状态没落库"的时刻 —— 事件流与 DB 在那一刻不一致,
+// 靠"不发终态事件"保持自洽(见 commitTerminal)。
+func (e *Engine) StateCommitFailures() int64 { return e.stateCommitFailures.Load() }
 
 // RunningCount 返回正在执行的执行协程数。
 func (e *Engine) RunningCount() int64 { return e.running.Load() }
@@ -588,8 +596,7 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 			e.failExecution(exec, fmt.Sprintf("工作流执行超时(%ds)", exec.Snapshot.Settings.TimeoutSeconds))
 			return
 		}
-		_ = e.transitionAndSave(exec, model.ExecutionCancelled)
-		e.Bus.Emit(event.New(event.WorkflowCancelled, exec.ID, exec.CurrentNodeID, nil))
+		e.commitCancelled(exec)
 		return
 	default:
 	}
@@ -598,8 +605,7 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 	if hasAbort {
 		switch s := fmt.Sprint(abort); {
 		case s == "WAIT_USER":
-			_ = e.transitionAndSave(exec, model.ExecutionWaitingUser)
-			e.Bus.Emit(event.New(event.WorkflowWaitingUser, exec.ID, exec.CurrentNodeID, nil))
+			e.commitTerminal(exec, model.ExecutionWaitingUser, event.WorkflowWaitingUser, nil)
 			return
 		case strings.HasPrefix(s, "FAILED:"):
 			msg := fmt.Sprint(exec.StateData["_error"])
@@ -617,11 +623,10 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 		e.failExecution(exec, lastErr.Error())
 		return
 	}
-	_ = e.transitionAndSave(exec, model.ExecutionCompleted)
-	e.Bus.Emit(event.New(event.WorkflowCompleted, exec.ID, exec.CurrentNodeID, map[string]any{
+	e.commitTerminal(exec, model.ExecutionCompleted, event.WorkflowCompleted, map[string]any{
 		"nodes":      exec.NodeStates,
 		"iterations": exec.Iterations,
-	}))
+	})
 }
 
 // collectResult 把 ADK 会话状态同步回 Execution 记录。
@@ -687,9 +692,82 @@ func (e *Engine) failExecution(exec *model.Execution, msg string) {
 	if err := e.transitionAndSave(exec, model.ExecutionFailed); err != nil {
 		// 状态冲突 = 库里已经是别的终态(如用户已取消):不覆盖,
 		// 但错误原因仍要留下,否则用户只看到"已取消"却不知道为何失败。
-		logx.Warn("执行失败状态落库未生效", "execution", exec.ID, "error", err.Error())
+		//
+		// 事件流与 DB 必须一致(约定 #14):状态没落库就不能发 workflow.failed
+		// ——否则事件流说"失败"、库里却是别的终态,审计流与 UI 互相打架。
+		// 改发 runtime.error 说明"这次失败没能落成失败态"。
+		e.stateCommitFailures.Add(1)
+		cur := e.currentState(exec.ID)
+		logx.Error("执行失败状态落库未生效", "execution", exec.ID,
+			"current", cur, "error", err.Error())
+		e.Bus.Emit(event.New("runtime.error", exec.ID, exec.CurrentNodeID, map[string]any{
+			"reason":        "state_commit_conflict",
+			"target_state":  string(model.ExecutionFailed),
+			"current_state": cur,
+			"error":         msg,
+		}))
+		// 失败原因仍要落库:saveMeta 只写非状态列,不会推翻别人的裁决。
+		e.save(exec)
+		return
 	}
 	e.Bus.Emit(event.New(event.WorkflowFailed, exec.ID, exec.CurrentNodeID, map[string]any{"error": msg}))
+}
+
+// commitTerminal 提交终态并按 CAS 结果决定**发不发**终态事件。
+//
+// **判断语义**(约定 #14:事件流与 DB 必须一致):
+//
+//	CAS 失败 = 库里的状态已被别的写者裁决(用户取消/显式重试/崩溃恢复)。
+//	处理方式:
+//
+//	 1. 放弃本次迁移 —— 绝不覆盖别人的裁决。"已完成"被改回"运行中"、
+//	    "已取消"被改回"运行中"是最伤用户信任的状态回退;
+//	 2. 不发终态事件 —— 状态没落库,事件流就不能替别人宣布这个终态。
+//	    否则事件流说"已完成"而库里还是"运行中":UI 与审计流互相打架,
+//	    事后也说不清到底是哪边说了算;
+//	 3. 分级记录 —— 终态路径上的冲突是**真异常**(库里不是我们期望的
+//	    运行中,说明有别的写者在我们不知道的地方裁决了这条执行):
+//	    记 ERROR + 发 runtime.error 事件,让问题可见。
+//
+// 取消路径的冲突另作处理(见 commitCancelled):那是预期竞态。
+func (e *Engine) commitTerminal(exec *model.Execution, to model.ExecutionState, evType string, payload map[string]any) {
+	err := e.transitionAndSave(exec, to)
+	if err == nil {
+		e.Bus.Emit(event.New(evType, exec.ID, exec.CurrentNodeID, payload))
+		return
+	}
+	e.stateCommitFailures.Add(1)
+	cur := e.currentState(exec.ID)
+	logx.Error("终态迁移未生效:状态已被其他写者裁决,不再发终态事件(事件流与 DB 保持一致)",
+		"execution", exec.ID, "to", string(to), "current", cur, "error", err.Error())
+	e.Bus.Emit(event.New("runtime.error", exec.ID, exec.CurrentNodeID, map[string]any{
+		"reason":        "state_commit_conflict",
+		"target_state":  string(to),
+		"current_state": cur,
+		"error":         err.Error(),
+	}))
+}
+
+// commitCancelled 提交"已取消"终态。
+//
+// 取消路径的 CAS 冲突是**预期竞态**:用户点了取消 vs 执行正好结束,
+// 或另一个写者(崩溃恢复/显式重试)已经裁决过这条执行。因此:
+//
+//   - 放弃迁移(不覆盖别人的裁决);
+//   - 不发 workflow.cancelled —— 状态没落库,事件流不能替别人宣布"已取消";
+//   - 记 WARN 即可:取消是用户高频操作,每次都报 ERROR 只会制造噪音,
+//     把真正的异常淹掉(约定 #14 要的是"别静默",不是"每次都 ERROR")。
+//
+// 可观测性靠计数(StateCommitFailures)与库里的状态,不需要 ERROR 日志。
+func (e *Engine) commitCancelled(exec *model.Execution) {
+	err := e.transitionAndSave(exec, model.ExecutionCancelled)
+	if err == nil {
+		e.Bus.Emit(event.New(event.WorkflowCancelled, exec.ID, exec.CurrentNodeID, nil))
+		return
+	}
+	e.stateCommitFailures.Add(1)
+	logx.Warn("取消状态未落库(预期竞态:状态已被其他写者裁决)",
+		"execution", exec.ID, "current", e.currentState(exec.ID), "error", err.Error())
 }
 
 // ---- 状态机 ----

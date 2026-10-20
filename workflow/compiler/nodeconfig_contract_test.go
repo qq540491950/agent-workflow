@@ -383,6 +383,28 @@ func TestValidatorOnlyKeysNotReadByRuntime(t *testing.T) {
 	}
 }
 
+// TestDeprecatedKeysNotReadByRuntime 已废弃的配置键不得被运行期读取。
+//
+// 现状:condition 节点的 expression 属于这一类 —— 路由条件在**边上**
+// (edge.condition),节点上的 expression 运行期与编译器都不读。
+//
+// 这条守卫的意义:一旦有人"顺手"让运行期读起这个键(比如把
+// condition 节点当成决策点),而校验期还在发"已废弃"的警告,用户就会被
+// 误导 —— 警告说"不影响执行结果",实际却影响。运行期一旦开始读它,
+// 这里立刻失败,提示把该键从 Deprecated 挪到 Optional/Required 并重估。
+func TestDeprecatedKeysNotReadByRuntime(t *testing.T) {
+	reads := runtimeConfigReads(t)
+	for _, nt := range model.AllNodeTypes() {
+		for _, k := range DeprecatedConfigKeys(nt) {
+			for fn, r := range reads {
+				if keysOf(r.nodeKeys)[k] {
+					t.Errorf("%s 节点的配置键 %q 已废弃,但运行期函数 %s 读了它(请把它挪到 Optional 并重估必填性)", nt, k, fn)
+				}
+			}
+		}
+	}
+}
+
 // TestGlobalConfigKeysMatchRuntime 全局键必须与运行期的读取一致。
 //
 // 两条约束:

@@ -74,12 +74,21 @@ type NodeConfigSpec struct {
 	// Optional 运行期会读取、但允许省略的键。
 	Optional []string
 	// ValidatorOnly 只有校验期使用、运行期完全不读的键。
+	ValidatorOnly []string
+	// Deprecated 是**已废弃**的键:运行期与编译器都不读,校验期也不再
+	// 要求它、更不会因为它而拒绝保存(只发一条警告)。
 	//
 	// 目前只有 condition 节点的 expression:路由条件在**边上**
-	// (edge.condition),节点上的 expression 运行期与编译器都不读。
-	// 保留它是为了继续做语法检查(拼错要报错),但不再作为必填项 ——
-	// 要求用户填一个没有作用的键,正是"校验期要求但运行期不读"的反例。
-	ValidatorOnly []string
+	// (edge.condition),节点上的 expression 从来没有生效过 ——
+	// 运行期把 condition 节点当"无副作用的直通节点"
+	// (workflow/runtime/executor.go 的 dispatchNode),路由由边条件决定。
+	//
+	// 为什么保留在契约表里而不是直接删掉:存量 DSL 里已经写了
+	// config.expression。删掉会让"这个键不再被识别"变成一次静默的行为
+	// 变更;留在表里并标注为废弃,校验期就能明确告诉用户"这个键没有作用,
+	// 条件要写在连线上",同时**不再**因为它挡住保存(约定 #13:校验期不得
+	// 要求用户填一个没有作用的键)。
+	Deprecated []string
 	// SubKeys 是 map 型配置键的子键(运行期读取的子键)。
 	SubKeys map[string][]string
 }
@@ -105,7 +114,8 @@ var nodeConfigSpecs = map[model.NodeType]NodeConfigSpec{
 		Optional: []string{"agent", "args"},
 	},
 	model.NodeTypeCondition: {
-		ValidatorOnly: []string{"expression"},
+		// expression 已废弃:路由条件在边上(edge.condition)。
+		Deprecated: []string{"expression"},
 	},
 	model.NodeTypeParallel: {},
 	model.NodeTypeMerge:    {},
@@ -139,6 +149,7 @@ func NodeConfigSpecFor(t model.NodeType) (NodeConfigSpec, bool) {
 		Required:      append([]string(nil), spec.Required...),
 		Optional:      append([]string(nil), spec.Optional...),
 		ValidatorOnly: append([]string(nil), spec.ValidatorOnly...),
+		Deprecated:    append([]string(nil), spec.Deprecated...),
 	}
 	if len(spec.SubKeys) > 0 {
 		out.SubKeys = make(map[string][]string, len(spec.SubKeys))
@@ -186,6 +197,16 @@ func ValidatorOnlyConfigKeys(t model.NodeType) []string {
 		return nil
 	}
 	return spec.ValidatorOnly
+}
+
+// DeprecatedConfigKeys 返回已废弃的键(副本):运行期与编译器都不读,
+// 校验期只发警告,不会因为它们拒绝保存工作流。
+func DeprecatedConfigKeys(t model.NodeType) []string {
+	spec, ok := NodeConfigSpecFor(t)
+	if !ok {
+		return nil
+	}
+	return spec.Deprecated
 }
 
 // globalConfigKeys 是所有节点类型都支持的全局配置键。

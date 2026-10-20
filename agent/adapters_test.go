@@ -77,9 +77,16 @@ func TestPiAdapterStructuredOutput(t *testing.T) {
 	if resp.Decision != agent.DecisionDone || resp.Summary != "fixed" {
 		t.Errorf("unexpected response: %+v", resp)
 	}
-	raw, _ := json.Marshal(resp)
-	if len(raw) == 0 {
-		t.Error("marshal failed")
+	// 序列化后的结构化输出必须真的带上 decision —— 上层靠它路由
+	// (约定 1:结构化 decision 驱动路由,禁止字符串猜测)。
+	// 原断言是 `len(raw) == 0`(json.Marshal 对普通结构体永不返回空串,
+	// 等于恒假),换成像样的断言。
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"decision":"DONE"`) {
+		t.Errorf("序列化结果应含结构化 decision: %s", raw)
 	}
 }
 

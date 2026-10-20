@@ -97,6 +97,18 @@ func (e *Engine) casStateAndSave(exec *model.Execution, from []model.ExecutionSt
 }
 
 // execMetaArgs 返回元信息列的值(顺序必须与 execMetaColumns 一致)。
+//
+// 错误文本与**会话状态快照**在落库前脱敏(与 logx 一致):节点失败原因与
+// 节点输出常带 CLI stderr,而 stderr 里常有 "ANTHROPIC_API_KEY=sk-..."
+// 这类凭据。落库前脱敏,审计文件/备份 DB 里就不会留明文(约定 #8)。
+//
+// state_json 的脱敏是**按键分类**的(见 state_mask.go):结构化键
+// (decision / node:<id>:status / _abort …)被运行期读取,用于路由与决策,
+// 必须原样保留;自由文本键(output / node:<id>:result / _error …)才脱敏。
+//
+// 注意:脱敏只作用于**落库的副本**,内存里的 exec.StateData / exec.Error
+// 保持原样 —— 它们会被 API 直接返回(由读出口负责掩码),运行期还要读
+// 它们做路由决策。
 func execMetaArgs(exec *model.Execution) []any {
 	return []any{
 		exec.CurrentNodeID,
@@ -106,7 +118,7 @@ func execMetaArgs(exec *model.Execution) []any {
 		logx.Mask(exec.Error),
 		marshalStrMap(exec.NodeStates),
 		marshalSnapshot(exec.Snapshot),
-		marshalAnyMap(exec.StateData),
+		marshalAnyMap(MaskStateData(exec.StateData)),
 	}
 }
 

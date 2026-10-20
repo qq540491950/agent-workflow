@@ -2,6 +2,7 @@ package validator
 
 import (
 	"sort"
+	"strings"
 	"testing"
 
 	"agentworkflow/workflow/compiler"
@@ -17,7 +18,9 @@ import (
 //     (前端属性面板的"启用节点"开关)后反而存不了工作流。
 //  2. condition 节点的 expression:运行期与编译器**都不读**它(路由只看边上的
 //     condition),校验器此前却把它列为必填 → 用户被要求填一个没有作用的键,
-//     而且会误以为这个表达式在驱动路由。
+//     而且会误以为这个表达式在驱动路由。expression 现已标注为**废弃**
+//     (compiler 契约表的 Deprecated 列表):不再必填,也不再因为它报错 ——
+//     只发一条警告,告诉用户条件要写在连线上。
 //  3. enabled 的取值类型:运行期只认布尔(false 才跳过)。写成字符串 "false"
 //     时运行期会**忽略它并照常执行节点**,而用户以为节点已禁用。
 //
@@ -85,6 +88,54 @@ nodes:
 	}
 }
 
+// TestConditionNodeExpressionDeprecatedNotBlocking condition 节点的
+// expression 已废弃(运行期与编译器都不读它,路由只看边上的 condition),
+// 因此**不得**再作为校验错误挡住保存。
+//
+// 这一条与本文件第 2 条缺陷(曾经把 expression 列为必填)是同一条线的两端:
+// 要求用户填一个没有作用的键 → 用户被自己的校验器挡住;
+// 因为填错一个没有作用的键而报错 → 同样被挡住。
+//
+// 改前断言:INVALID_EXPRESSION 必须是 **error**(workflow/validator/validator_test.go
+// 与本文件都这么写)。改后:它降级为**警告** DEPRECATED_NODE_CONFIG,
+// 工作流仍然 Valid —— 存量 DSL 里的 expression 继续被接受,只是被提示
+// "这个键没有作用,条件要写在连线上"。
+func TestConditionNodeExpressionDeprecatedNotBlocking(t *testing.T) {
+	wf := mustWf(t, `
+workflow:
+  id: cond-broken
+  name: Cond Broken
+nodes:
+  - id: a
+    type: human
+  - id: gate
+    type: condition
+    expression: "decision ==== "
+edges:
+  - from: a
+    to: gate
+`)
+	res := Validate(wf, agentResolver(nil), skillResolver(nil))
+	if has(res, "INVALID_EXPRESSION") {
+		t.Errorf("废弃的 expression 不得再报 INVALID_EXPRESSION: %+v", res.Errors)
+	}
+	if !res.Valid {
+		t.Errorf("废弃的 expression 不得阻断保存: %+v", res.Errors)
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if w.Code == "DEPRECATED_NODE_CONFIG" {
+			warned = true
+			if !strings.Contains(w.Message, "expression") {
+				t.Errorf("警告应点名废弃的键: %+v", w)
+			}
+		}
+	}
+	if !warned {
+		t.Errorf("应给出 DEPRECATED_NODE_CONFIG 警告: %+v", res.Warnings)
+	}
+}
+
 // TestConditionNodeExpressionNotRequired condition 节点的 expression
 // 运行期不读(路由只看边上的 condition),不应作为必填项。
 func TestConditionNodeExpressionNotRequired(t *testing.T) {
@@ -105,28 +156,11 @@ edges:
 	if has(res, "MISSING_EXPRESSION") {
 		t.Errorf("condition 节点的 expression 运行期不读,不应作为必填项: %+v", res.Errors)
 	}
-}
-
-// TestConditionNodeExpressionStillSyntaxChecked 回归:expression 仍然做语法
-// 检查(拼错了要报错),只是不再是必填项。
-func TestConditionNodeExpressionStillSyntaxChecked(t *testing.T) {
-	wf := mustWf(t, `
-workflow:
-  id: cond-broken
-  name: Cond Broken
-nodes:
-  - id: a
-    type: human
-  - id: gate
-    type: condition
-    expression: "decision ==== "
-edges:
-  - from: a
-    to: gate
-`)
-	res := Validate(wf, agentResolver(nil), skillResolver(nil))
-	if !has(res, "INVALID_EXPRESSION") {
-		t.Errorf("expression 语法错误仍应报 INVALID_EXPRESSION: %+v", res.Errors)
+	// 没有 expression 就没有废弃提示(没有可提示的东西)
+	for _, w := range res.Warnings {
+		if w.Code == "DEPRECATED_NODE_CONFIG" {
+			t.Errorf("未配置 expression 时不应给出废弃警告: %+v", res.Warnings)
+		}
 	}
 }
 

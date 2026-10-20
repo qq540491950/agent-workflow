@@ -14,6 +14,18 @@ type Document struct {
 	Edges      []Edge         `yaml:"edges" json:"edges,omitempty"`
 	Settings   Settings       `yaml:"settings" json:"settings,omitempty"`
 	Permission map[string]any `yaml:"permissions" json:"permissions,omitempty"`
+
+	// IgnoredKeys 记录"出现在文档里但被解析器丢弃"的键(路径形如
+	// "workflow.settings" / "settings.max_iteration")。
+	//
+	// 解析器对**闭合结构**(顶层 / workflow 段 / settings 段 / 单条边)里的
+	// 未知键是非严格的:键被丢掉,用户以为设置生效了,实际没有。
+	// 除 permissions 外的这类键不再阻断导入(存量 DSL 里确实存在这种写法,
+	// 直接报错会让它们导不进来),但必须**可观测**:记在这里 + WARN 日志。
+	//
+	// 不参与序列化(yaml:"-" / json:"-"):它是解析诊断,不是文档内容 ——
+	// 导出文本里出现它会让"导出→再导入"凭空多出一批 WARN。
+	IgnoredKeys []string `yaml:"-" json:"-"`
 }
 
 // WorkflowMeta 对应 workflow: 段。

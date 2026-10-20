@@ -761,13 +761,15 @@ func maskNode(n *model.ExecutionNode) {
 //   - error:执行失败原因(同样常带 CLI stderr);
 //   - task / variables:用户输入,事件流里已经脱敏,这里不能是例外。
 //
-// 只改**返回给调用方的副本**,不改库里的那份:
+// state_data 复用 runtime 的 MaskStateData(与落库侧**同一份**按键分类):
+// 结构化键(decision / node:<id>:status / _abort 等)被运行期读取,用于
+// 路由与决策,必须原样保留;两份实现各自演化就会出现"落库脱敏了、
+// 读出口又把状态改坏"的漂移(约定 #13 的同源精神)。
+//
+// 只改**返回给调用方的副本**,不改运行期正在用的结构:
 //   - Get/List/Export 读的是库里的新对象,改了不影响运行期;
 //   - Run/ProvideInput/RetryNode 返回的是引擎的深拷贝(cloneExec),
 //     同样与运行期不共享可变结构。
-//
-// 库里那份保持原样:恢复路径要把它回放进下一次执行,读出口脱敏不得
-// 改写执行语义(约定 8 的"备份导出含明文"是明文存在的唯一例外)。
 func maskExecution(exec *model.Execution) {
 	if exec == nil {
 		return
@@ -775,7 +777,7 @@ func maskExecution(exec *model.Execution) {
 	exec.Error = logx.Mask(exec.Error)
 	exec.Task = logx.Mask(exec.Task)
 	exec.Variables = maskAnyMap(exec.Variables)
-	exec.StateData = maskAnyMap(exec.StateData)
+	exec.StateData = wfruntime.MaskStateData(exec.StateData)
 }
 
 // maskAnyMap 对 map 做结构化脱敏(返回新 map,不改原对象)。

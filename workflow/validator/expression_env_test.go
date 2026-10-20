@@ -1,9 +1,8 @@
 package validator
 
 import (
+	"strings"
 	"testing"
-
-	"agentworkflow/workflow/dsl"
 )
 
 // 本文件锁定一条硬性约定(AGENTS.md #13):校验期与运行期的条件表达式
@@ -45,8 +44,12 @@ func TestStillRejectsBrokenExpression(t *testing.T) {
 	}
 }
 
-// TestConditionNodeExpressionAlsoSeesVariables condition 节点的
-// expression 走同一套 checkExpression,必须同样支持 variables。
+// TestConditionNodeExpressionAlsoSeesVariables condition 节点上**遗留**的
+// expression 走同一套表达式环境(同一份变量定义),必须同样支持 variables。
+//
+// expression 已废弃(运行期不读),但校验期仍会对它做语法检查(只是不再
+// 阻断保存)—— 所以"支持 variables"这条依然要成立,否则警告文案会误导
+// 用户说"语法非法",而同样的表达式写在连线上是合法的。
 func TestConditionNodeExpressionAlsoSeesVariables(t *testing.T) {
 	wf := mustWf(t, `
 workflow:
@@ -73,6 +76,12 @@ edges:
 	res := Validate(wf, agentResolver(nil), skillResolver(nil))
 	if has(res, "INVALID_EXPRESSION") {
 		t.Errorf("condition 节点也应支持 variables: %+v", res.Errors)
+	}
+	// 废弃警告里不应出现"语法也非法"(variables.* 是合法表达式)
+	for _, w := range res.Warnings {
+		if w.Code == "DEPRECATED_NODE_CONFIG" && strings.Contains(w.Message, "语法也非法") {
+			t.Errorf("variables.* 是合法表达式,不应被判语法非法: %+v", w)
+		}
 	}
 }
 
@@ -130,5 +139,4 @@ func TestValidatorEnvMatchesRuntimeEnv(t *testing.T) {
 	if _, known := vars["anything"]; known {
 		t.Error("variables 不应被固化为某组具体键")
 	}
-	_ = dsl.Parse // 保持与本包其它测试相同的依赖面
 }

@@ -17,37 +17,33 @@ func parse(data []byte) (*Document, error) {
 			return nil, model.NewError(model.KindValidationError, "DSL_PARSE_ERROR",
 				fmt.Sprintf("JSON 解析失败: %v", err))
 		}
+		// JSON 路径此前**完全没有**顶层键检查 —— YAML 会报错,JSON 静默接受,
+		// 同一份 DSL 换格式导入行为就不同。两条路径现在共用同一套校验。
+		raw, err := decodeRawJSON(trimmed)
+		if err != nil {
+			return nil, model.NewError(model.KindValidationError, "DSL_PARSE_ERROR",
+				fmt.Sprintf("JSON 解析失败: %v", err))
+		}
+		if err := checkDocumentKeys(doc, raw, jsonKeys); err != nil {
+			return nil, err
+		}
 	} else {
 		// 不使用 Strict 模式:节点 config 为开放结构(可扩展),仅对
-		// 顶层键做白名单检查以捕获拼写错误。
+		// 闭合结构(顶层 / workflow 段 / settings 段 / 单条边)做键校验。
 		if err := yaml.Unmarshal(trimmed, doc); err != nil {
 			return nil, model.NewError(model.KindValidationError, "DSL_PARSE_ERROR",
 				fmt.Sprintf("YAML 解析失败: %v", err))
 		}
-		if err := checkTopLevelKeys(trimmed); err != nil {
+		raw, err := decodeRawYAML(trimmed)
+		if err != nil {
+			return nil, model.NewError(model.KindValidationError, "DSL_PARSE_ERROR",
+				fmt.Sprintf("YAML 解析失败: %v", err))
+		}
+		if err := checkDocumentKeys(doc, raw, yamlKeys); err != nil {
 			return nil, err
 		}
 	}
 	return doc, nil
-}
-
-// checkTopLevelKeys 校验 YAML 顶层键拼写(节点 config 内字段保持开放)。
-func checkTopLevelKeys(data []byte) error {
-	var raw map[string]any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil // 已在上面报过错
-	}
-	allowed := map[string]bool{
-		"version": true, "workflow": true, "variables": true,
-		"nodes": true, "edges": true, "settings": true, "permissions": true,
-	}
-	for k := range raw {
-		if !allowed[k] {
-			return model.NewError(model.KindValidationError, "DSL_UNKNOWN_KEY",
-				fmt.Sprintf("未知的顶层字段 %q (允许: version, workflow, variables, nodes, edges, settings, permissions)", k))
-		}
-	}
-	return nil
 }
 
 func trimSpaceStart(b []byte) []byte {

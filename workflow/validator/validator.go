@@ -90,7 +90,7 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 		nodeIDs[n.ID] = true
 		nodeByID[n.ID] = n
 		// 节点类型配置检查
-		validateNodeConfig(n, agents, skills, addErr)
+		validateNodeConfig(n, agents, skills, addErr, addWarn)
 		// subworkflow 存在性(警告级别)
 		if n.Type == model.NodeTypeSubWorkflow && wfResolver != nil {
 			wid := ""
@@ -209,12 +209,22 @@ var missingConfigByKey = map[string]missingConfig{
 	"operation":   {code: "INVALID_GIT_OPERATION", message: "git 节点 %q 缺少 operation 配置"},
 }
 
+// deprecatedHints 是"已废弃配置键"的替代做法提示(键 → 提示语)。
+//
+// 键本身在 workflow/compiler/nodeconfig.go 的契约表里(唯一来源);
+// 这里只负责"怎么告诉用户正确的做法"。
+var deprecatedHints = map[string]string{
+	"expression": "路由条件要写在**连线**上(选中连线 → 条件表达式);节点上的表达式运行期不读取",
+}
+
 // validateNodeConfig 按节点类型检查必需配置。
 //
 // 必填配置的唯一来源是 compiler.NodeConfigSpecFor(运行期实际读取哪些键,
 // 契约表就写哪些键);本函数只保留校验器特有的检查:引用是否存在、
-// 取值是否在允许集合内、表达式语法。
-func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver, addErr func(code, node, format string, args ...any)) {
+// 取值是否在允许集合内、表达式语法、废弃键提示。
+func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver,
+	addErr func(code, node, format string, args ...any),
+	addWarn func(code, node, format string, args ...any)) {
 	str := func(key string) string {
 		if v, ok := n.Config[key]; ok {
 			if s, ok := v.(string); ok {
@@ -255,6 +265,30 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 		addErr("MISSING_CONFIG", n.ID, "节点 %q 缺少必填配置 %q", n.ID, key)
 	}
 
+	// 废弃配置键:运行期与编译器都不读(唯一来源:compiler.NodeConfigSpecFor
+	// 的 Deprecated 列表)。校验期**不再**要求它,也不再因为它拒绝保存 ——
+	// 要求用户填一个没有作用的键、或者因为填错一个没有作用的键而存不了
+	// 工作流,都是约定 #13 的反例("用户被自己的校验器挡住")。
+	//
+	// 这里只发一条**警告**:告诉用户这个键没有作用、正确的做法是什么。
+	// 存量工作流里已经写了它 → 不报错、不失效,只是提醒。
+	for _, key := range spec.Deprecated {
+		val := str(key)
+		if val == "" {
+			continue
+		}
+		msg := fmt.Sprintf("节点 %q 的配置键 %q 已废弃(运行期不读取,不影响执行结果)", n.ID, key)
+		if hint, ok := deprecatedHints[key]; ok {
+			msg += ";" + hint
+		}
+		// 语法仍然查(拼错时在警告里说明),但**不再**因此报错 ——
+		// 一个不起作用的字段写错了,不该挡住保存。
+		if err := expressionSyntaxError(val); err != nil {
+			msg += fmt.Sprintf(";该值语法也非法: %v", err)
+		}
+		addWarn("DEPRECATED_NODE_CONFIG", n.ID, "%s", msg)
+	}
+
 	switch n.Type {
 	case model.NodeTypeAgent:
 		if str("agent") != "" && agents != nil && !agents(str("agent")) {
@@ -263,12 +297,6 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 	case model.NodeTypeSkill:
 		if str("skill") != "" && skills != nil && !skills(str("skill")) {
 			addErr("SKILL_NOT_FOUND", n.ID, "节点 %q 引用了不存在的 Skill %q", n.ID, str("skill"))
-		}
-	case model.NodeTypeCondition:
-		// expression 运行期与编译器都不读(路由条件在**边上**),
-		// 所以不是必填项;但仍然做语法检查,拼错了要报错。
-		if expr := str("expression"); expr != "" {
-			checkExpression(expr, addErr, n.ID)
 		}
 	case model.NodeTypeGit:
 		// operation 的必填已由上面的通用循环报出;这里只查取值合法性
@@ -281,10 +309,18 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 
 // checkExpression 使用 expr 引擎做条件表达式语法检查。
 func checkExpression(expression string, addErr func(code, node, format string, args ...any), nodeID string) {
-	_, err := expr.Compile(expression, expr.Env(newExpressionEnv()))
-	if err != nil {
+	if err := expressionSyntaxError(expression); err != nil {
 		addErr("INVALID_EXPRESSION", nodeID, "条件表达式 %q 非法: %v", expression, err)
 	}
+}
+
+// expressionSyntaxError 返回表达式的语法错误(nil = 合法)。
+//
+// 校验环境与运行期同源(见 newExpressionEnv),因此这里判合法的表达式在
+// 运行期也一定合法(约定 #13)。
+func expressionSyntaxError(expression string) error {
+	_, err := expr.Compile(expression, expr.Env(newExpressionEnv()))
+	return err
 }
 
 // newExpressionEnv 构造与运行期同源的校验环境。

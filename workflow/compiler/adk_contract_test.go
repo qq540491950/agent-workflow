@@ -167,6 +167,13 @@ func TestADKContract_LoopAgentStopsAtMaxIterations(t *testing.T) {
 // TestADKContract_ParallelRequiresUniqueNames 钉死 lowerer.uniqueName 的
 // 存在理由:ADK 要求同一棵树内 Agent 名字唯一(用名字做 parentmap),
 // 重名会在运行时表现为"节点串了"或直接报错。
+//
+// 改前断言:**零断言**(只有 t.Log)—— 无论 ADK 怎么变、用例都不会红,
+// 属于"恒真测试"(虚假安全感)。改后是三条真实断言:
+//  1. ADK 当前**不**在构造期拒绝重名(钉死当前行为;若将来改为拒绝,这里
+//     会红,提醒我们 uniqueName 已成硬性要求);
+//  2. 重名子 Agent 发出的事件**无法区分**(Author 相同)—— 证明规避确有必要;
+//  3. 反面对照:名字不同 → 事件可区分(uniqueName 的价值所在)。
 func TestADKContract_ParallelRequiresUniqueNames(t *testing.T) {
 	dup1 := newFakeAgent("same", nil)
 	dup2 := newFakeAgent("same", nil)
@@ -175,44 +182,65 @@ func TestADKContract_ParallelRequiresUniqueNames(t *testing.T) {
 	})
 	// 钉死当前行为:ADK **不**在构造期拒绝重名(实测)。
 	// 之所以要钉:若将来 ADK 改为拒绝,这条会红,提醒我们"uniqueName 现在
-	// 成了硬要求"而非"仍然可选的保险"。而现在不拒绝,uniqueName 依然
-	// 必需 —— parentmap 按名字索引,重名会让事件路由到错误的父节点,
-	// 这类错误不会以任何异常形式暴露。
+	// 成了硬要求"而非"仍然可选的保险"。
 	if err != nil {
-		t.Logf("提示:ADK 现在会拒绝重名子 Agent(err=%v) —— lowerer.uniqueName "+
-			"已成为硬性要求", err)
-	} else {
-		t.Log("确认:ADK 当前不拒绝重名 —— uniqueName 仍必须保持(parentmap 按名字索引)")
+		t.Fatalf("ADK 现在拒绝重名子 Agent(%v) —— lowerer.uniqueName 已成为硬性要求,请同步本用例", err)
 	}
 
-	// 真正的断言:重名时事件仍能被路由 —— 本项目靠 uniqueName 规避,
-	// 这里验证规避是必要的(即重名确实会出问题,而不是无害的)。
+	// 真正的断言:重名子 Agent 发出的事件**无法区分**。
+	//
+	// ADK 用 Agent 名字做 parentmap 索引,事件也带 Agent 名(Author),
+	// 分支上下文按 "父名.子名" 拼出:两个同名子 Agent 的事件一模一样
+	// → 事件会串到错误的父节点,且不会以任何异常形式暴露。
+	// 本项目靠 lowerer.uniqueName 规避,故 uniqueName 必须保持。
+	authors := runParallelAuthors(t, "p2", "dup", "dup")
+	if len(authors) != 2 {
+		t.Fatalf("应收到 2 个事件,实际 %d(%v)", len(authors), authors)
+	}
+	if authors[0] != authors[1] {
+		t.Errorf("重名子 Agent 的事件本应无法区分(Author 相同),实际 %q vs %q —— "+
+			"ADK 的命名语义变了,请重新评估 lowerer.uniqueName 的必要性", authors[0], authors[1])
+	}
+	// 反面对照:名字不同 → 事件可区分(uniqueName 的价值就在这里)。
+	distinct := runParallelAuthors(t, "p2", "dup", "dup2")
+	if len(distinct) != 2 {
+		t.Fatalf("应收到 2 个事件,实际 %d(%v)", len(distinct), distinct)
+	}
+	if distinct[0] == distinct[1] {
+		t.Errorf("不同名的子 Agent 事件本应可区分,实际都是 %q —— ADK 的命名语义变了", distinct[0])
+	}
+}
+
+// runParallelAuthors 跑一个并行 Agent,返回各子 Agent 发出事件的 Author。
+func runParallelAuthors(t *testing.T, parent string, childNames ...string) []string {
+	t.Helper()
+	mk := func(name string) agent.Agent {
+		return newFakeAgent(name, func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(session.NewEventWithContext(ctx, ctx.InvocationID()), nil)
+			}
+		})
+	}
+	subs := make([]agent.Agent, 0, len(childNames))
+	for _, n := range childNames {
+		subs = append(subs, mk(n))
+	}
+	par, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: parent, SubAgents: subs},
+	})
+	if err != nil {
+		t.Fatalf("parallelagent.New: %v", err)
+	}
 	ctrl, cleanup := newFakeInvocation(t)
 	defer cleanup()
-	var branch atomic.Int32
-	named := newFakeAgent("dup", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-		return func(yield func(*session.Event, error) bool) {
-			// Branch 形如 "par.dup";两个同名 Agent 的 Branch 相同,
-			// 说明事件无法区分它们
-			branch.Store(1)
-			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
-			yield(ev, nil)
+	var authors []string
+	for ev, e := range par.Run(ctrl) {
+		if e != nil {
+			t.Fatalf("子 Agent 返回错误: %v", e)
 		}
-	})
-	dupA := newFakeAgent("dup", func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-		return func(yield func(*session.Event, error) bool) {
-			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
-			yield(ev, nil)
-		}
-	})
-	_ = named
-	par, perr := parallelagent.New(parallelagent.Config{
-		AgentConfig: agent.Config{Name: "p2", SubAgents: []agent.Agent{dupA, dupA}},
-	})
-	if perr == nil {
-		defer drain(par.Run(ctrl))
-		t.Log("确认:同名子 Agent 可被创建 —— 故 uniqueName 是编译期必须保持的")
+		authors = append(authors, ev.Author)
 	}
+	return authors
 }
 
 // ---- 测试脚手架 ----
@@ -506,11 +534,9 @@ func TestADKContract_StateSetNilAndMissingKey(t *testing.T) {
 		}
 	}
 	if !present {
-		t.Log("提示:All() 不再包含被 Set(nil) 的键 —— 若属实," +
-			"stateAccess.Delete 与 syncNodeStates 的语义需要重新评估")
-	} else {
-		t.Log("确认:All() 仍含被 Set(nil) 的键(nil 值也在内)—— " +
-			"故派生视图必须显式跳过 nil(#83)")
+		t.Errorf("All() 不再包含被 Set(nil) 的键 —— ADK v1.7.0 的 All() 是 map 快照(含 nil 值)。" +
+			"本项目的 stateAccess.Delete 用 Set(nil) 伪造删除、syncNodeStates 必须显式跳过 nil(#83)," +
+			"这两条约定都依赖它")
 	}
 }
 
@@ -557,9 +583,7 @@ func TestADKContract_TempPrefixStrippedFromEvents(t *testing.T) {
 	}
 	// 但实时状态里生效(updateSessionState 在 trim 之前)
 	if v, err := s.State().Get("temp:scratch"); err != nil || v == nil {
-		t.Logf("提示:temp: 键未进入实时状态 (v=%v err=%v)", v, err)
-	} else {
-		t.Log("确认:temp: 键影响实时状态但不进事件 —— " +
-			"故本项目**不能**给需要 Resume 恢复的状态加 temp: 前缀")
+		t.Errorf("temp: 键未进入实时状态 (v=%v err=%v) —— ADK 语义变了;"+
+			"本项目**不能**给需要 Resume 恢复的状态加 temp: 前缀(它会被从事件里剥掉,恢复时静默丢失)", v, err)
 	}
 }

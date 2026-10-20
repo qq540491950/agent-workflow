@@ -3,6 +3,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 )
@@ -89,6 +90,49 @@ type Workflow struct {
 	Settings   WorkflowSettings `json:"settings"`
 	CreatedAt  string           `json:"created_at,omitempty"`
 	UpdatedAt  string           `json:"updated_at,omitempty"`
+}
+
+// UnmarshalJSON 解析工作流定义,兼容两种权限段写法。
+//
+//   - "permission" :模型自身的 json tag(历史版本快照 snapshot_json 里
+//     就是这个键);
+//   - "permissions":DSL 根级段的正式写法(需求.md 第十八章,DSL 导出文本
+//     里也是它)。
+//
+// 此前只认单数:"permissions" 被 json.Unmarshal 当成未知字段**静默丢弃** ——
+// 用户在工作流里写了权限收紧,导入后运行期拿到的仍是默认宽松策略,没有任何
+// 提示(约定 14:该失败却成功 / 静默丢弃)。
+//
+// 输出侧不变(仍写 "permission"):既有 API 响应与历史快照的键名不动,
+// 读侧多认一个别名即可,两边都不丢数据。
+//
+// 两个键同时出现时报错而不是静默挑一个:挑错的那个正是"用户以为生效了"
+// 的假象来源。
+func (w *Workflow) UnmarshalJSON(data []byte) error {
+	type alias Workflow
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*w = Workflow(a)
+	var probe struct {
+		Permissions json.RawMessage `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	if len(probe.Permissions) == 0 || string(probe.Permissions) == "null" {
+		return nil
+	}
+	if w.Permission != nil {
+		return fmt.Errorf("model: 工作流同时出现 permission 与 permissions 两个权限段,只能保留一个")
+	}
+	var perm map[string]any
+	if err := json.Unmarshal(probe.Permissions, &perm); err != nil {
+		return fmt.Errorf("model: permissions 段结构非法: %w", err)
+	}
+	w.Permission = perm
+	return nil
 }
 
 // ExecutionState 是 Execution 的状态机状态。

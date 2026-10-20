@@ -82,6 +82,15 @@ func (e *Engine) MustRender(tpl string, data map[string]any) string {
 }
 
 // lookup 按 key 查找变量,支持 variable.xxx 前缀与直接变量名。
+//
+// 口径:**键在数据里 = 可解析**(值为 nil 时渲染成空串,不算"缺失");
+// 键不在数据里 = 缺失(进 missing 列表,调用方可告警)。
+//
+// 之所以按"键是否存在"而不是"值是否为 nil"判定:runtime 的 contextx
+// 总是把标准槽位(task / plan / iteration …)放进模板数据,上游还没产出时
+// 值是 nil。此时"缺失"应当只表示"这个键根本不存在"(拼错的名字),
+// 否则每个引用了未产出槽位的 prompt 都会刷告警(噪音),真正拼错的变量
+// 反而被淹没。
 func lookup(key string, data map[string]any) (any, bool) {
 	if strings.HasPrefix(key, "variable.") {
 		name := strings.TrimPrefix(key, "variable.")
