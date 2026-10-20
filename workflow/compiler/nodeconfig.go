@@ -1,0 +1,198 @@
+package compiler
+
+import "agentworkflow/workflow/model"
+
+// 本文件是"节点类型 → 配置契约"的**唯一定义**(AGENTS.md 硬性约定 #13:
+// 校验期与运行期必须同源 —— 条件表达式的可用变量集合、节点类型的必填配置
+// 结构各只有一份来源,compiler 与 validator 共用)。
+//
+// 此前有两份实现:
+//
+//   - 活的一份:workflow/validator 的 validateNodeConfig 内联 switch;
+//   - 死的一份:workflow/dsl 里那 7 个零引用的配置结构体(已过期:缺 model
+//     与 enabled,多出运行期从不读的 Env —— 还会把凭据引进 DSL 的诱惑)。
+//
+// 现在活的一份收敛到本文件,validator 直接消费(NodeConfigSpecFor),
+// dsl 的死结构体等待删除(见交付报告)。
+//
+// 本文件描述的是**运行期实际读取**的配置键。运行期实现在
+// workflow/runtime/executor.go,两者的同源性由
+// nodeconfig_contract_test.go 用 AST 扫描运行期源码做探针校验:
+// 运行期新增/删除配置键而本表未同步时,测试立即失败并指出该补哪一行。
+
+// NodeEnabledKey 是节点级开关的配置键。
+//
+// 运行期语义(workflow/runtime/executor.go 的 dispatchNode):值为布尔 false
+// 时该节点被跳过(置 SKIPPED,路由直通),一个配置键都不再读取;值为 true
+// 或缺省时节点照常执行。**只认布尔**:非布尔值会被忽略,节点仍然执行。
+const NodeEnabledKey = "enabled"
+
+// NodeEnabledState 描述节点级开关的取值状态。
+type NodeEnabledState int
+
+const (
+	// NodeEnabledDefault:未配置 enabled(等价于启用)。
+	NodeEnabledDefault NodeEnabledState = iota
+	// NodeEnabledOn:enabled=true(显式启用)。
+	NodeEnabledOn
+	// NodeEnabledOff:enabled=false —— 运行期跳过该节点。
+	NodeEnabledOff
+	// NodeEnabledInvalid:enabled 不是布尔 —— 运行期会忽略它并照常执行节点。
+	NodeEnabledInvalid
+)
+
+// NodeEnabledStateOf 解析节点配置里的 enabled 开关。
+//
+// ok 语义的展开:返回 NodeEnabledInvalid 表示"配了但类型不对",
+// 校验期必须报出来 —— 否则用户以为节点被禁用了,运行期却照常执行。
+func NodeEnabledStateOf(cfg map[string]any) NodeEnabledState {
+	v, exists := cfg[NodeEnabledKey]
+	if !exists {
+		return NodeEnabledDefault
+	}
+	b, isBool := v.(bool)
+	if !isBool {
+		return NodeEnabledInvalid
+	}
+	if !b {
+		return NodeEnabledOff
+	}
+	return NodeEnabledOn
+}
+
+// NodeConfigSpec 描述一种节点类型的配置契约。
+type NodeConfigSpec struct {
+	// Required 必填键:缺失(或为空串)即校验失败。
+	Required []string
+	// Optional 运行期会读取、但允许省略的键。
+	Optional []string
+	// ValidatorOnly 只有校验期使用、运行期完全不读的键。
+	//
+	// 目前只有 condition 节点的 expression:路由条件在**边上**
+	// (edge.condition),节点上的 expression 运行期与编译器都不读。
+	// 保留它是为了继续做语法检查(拼错要报错),但不再作为必填项 ——
+	// 要求用户填一个没有作用的键,正是"校验期要求但运行期不读"的反例。
+	ValidatorOnly []string
+	// SubKeys 是 map 型配置键的子键(运行期读取的子键)。
+	SubKeys map[string][]string
+}
+
+// nodeConfigSpecs 是"节点类型 → 配置契约"的唯一定义。
+//
+// 每一条都必须与运行期实际读取的键一致(nodeconfig_contract_test.go 探针校验)。
+var nodeConfigSpecs = map[model.NodeType]NodeConfigSpec{
+	model.NodeTypeAgent: {
+		Required: []string{"agent", "mode"},
+		Optional: []string{
+			"prompt", "instructions", "model", "working_dir",
+			"timeout_seconds", "retry",
+		},
+		SubKeys: map[string][]string{
+			// prompt 有两种写法:纯字符串,或 {template: ...}(运行期读 map 里的 template)。
+			"prompt": {"template"},
+			"retry":  {"max_attempts", "backoff"},
+		},
+	},
+	model.NodeTypeSkill: {
+		Required: []string{"skill"},
+		Optional: []string{"agent", "args"},
+	},
+	model.NodeTypeCondition: {
+		ValidatorOnly: []string{"expression"},
+	},
+	model.NodeTypeParallel: {},
+	model.NodeTypeMerge:    {},
+	model.NodeTypeHuman: {
+		Optional: []string{"prompt", "responses"},
+	},
+	model.NodeTypeScript: {
+		Required: []string{"command"},
+		Optional: []string{"shell", "timeout_seconds", "working_dir"},
+	},
+	model.NodeTypeGit: {
+		Required: []string{"operation"},
+		Optional: []string{"args"},
+	},
+	model.NodeTypeSubWorkflow: {
+		Required: []string{"workflow_id"},
+		Optional: []string{"input"},
+	},
+}
+
+// NodeConfigSpecFor 返回指定节点类型的配置契约(副本,调用方改不动内部定义)。
+//
+// 第二个返回值为 false 表示该节点类型未注册 —— 节点类型清单的唯一来源是
+// model.AllNodeTypes(),新增类型时必须同时在这里补一条契约。
+func NodeConfigSpecFor(t model.NodeType) (NodeConfigSpec, bool) {
+	spec, ok := nodeConfigSpecs[t]
+	if !ok {
+		return NodeConfigSpec{}, false
+	}
+	out := NodeConfigSpec{
+		Required:      append([]string(nil), spec.Required...),
+		Optional:      append([]string(nil), spec.Optional...),
+		ValidatorOnly: append([]string(nil), spec.ValidatorOnly...),
+	}
+	if len(spec.SubKeys) > 0 {
+		out.SubKeys = make(map[string][]string, len(spec.SubKeys))
+		for k, v := range spec.SubKeys {
+			out.SubKeys[k] = append([]string(nil), v...)
+		}
+	}
+	return out, true
+}
+
+// RequiredConfigKeys 返回该节点类型的必填配置键(副本)。
+func RequiredConfigKeys(t model.NodeType) []string {
+	spec, ok := NodeConfigSpecFor(t)
+	if !ok {
+		return nil
+	}
+	return spec.Required
+}
+
+// OptionalConfigKeys 返回该节点类型的可选配置键(副本)。
+func OptionalConfigKeys(t model.NodeType) []string {
+	spec, ok := NodeConfigSpecFor(t)
+	if !ok {
+		return nil
+	}
+	return spec.Optional
+}
+
+// KnownConfigKeys 返回该节点类型运行期会读取的全部配置键(必填 + 可选)。
+func KnownConfigKeys(t model.NodeType) []string {
+	spec, ok := NodeConfigSpecFor(t)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(spec.Required)+len(spec.Optional))
+	out = append(out, spec.Required...)
+	out = append(out, spec.Optional...)
+	return out
+}
+
+// ValidatorOnlyConfigKeys 返回只有校验期使用、运行期不读的键(副本)。
+func ValidatorOnlyConfigKeys(t model.NodeType) []string {
+	spec, ok := NodeConfigSpecFor(t)
+	if !ok {
+		return nil
+	}
+	return spec.ValidatorOnly
+}
+
+// globalConfigKeys 是所有节点类型都支持的全局配置键。
+var globalConfigKeys = []string{NodeEnabledKey}
+
+// GlobalConfigKeys 返回全局配置键(副本)。
+func GlobalConfigKeys() []string { return append([]string(nil), globalConfigKeys...) }
+
+// gitOperations 是 git 节点支持的 operation 取值。
+//
+// 与运行期 runGitNode 的 switch 同源:运行期只认这一组,校验期也只认这一组
+// —— 两边各写一份必然漂移(运行期加了 stash,校验期却说非法 → 用户被自己的
+// 校验器挡住)。
+var gitOperations = []string{"status", "diff", "log", "branch", "checkout", "commit"}
+
+// GitOperations 返回 git 节点支持的 operation 取值(副本)。
+func GitOperations() []string { return append([]string(nil), gitOperations...) }

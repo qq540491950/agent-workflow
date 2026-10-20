@@ -33,7 +33,10 @@ func requireClaudeCLI(t *testing.T) {
 	if err != nil {
 		t.Skip("本机未安装 claude CLI,跳过真实冒烟")
 	}
-	if out, err := exec.Command(bin, "--version").CombinedOutput(); err != nil {
+	// --version 必须带超时:CLI 异常时不能让整个测试进程挂死。
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, bin, "--version").CombinedOutput(); err != nil {
 		t.Skipf("claude CLI 不可用: %v (输出 %s)", err, out)
 	}
 }

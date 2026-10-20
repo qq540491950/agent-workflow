@@ -1120,23 +1120,13 @@ func (l *lowerer) matchBranch(branches []RouteBranch, st StateAccess) (int, bool
 	return -1, false
 }
 
-// expressionEnv 是条件表达式的求值环境(map 形状:variables 为任意键值)。
-// 必须是 map 别名而非具名类型:expr.Env 内部对 env 做类型断言,具名 map
-// 会 panic("interface conversion: ... not map[string]interface {}")。
-// 校验器(workflow/validator)有一份同源定义,两侧必须同步。
-type expressionEnv = map[string]any
-
 // EvalCondition 用 expr 引擎对状态求值条件表达式。
 // 可用变量: decision / status / output / iteration / variables.xxx。
+//
+// 可用变量集合的唯一来源是 conditionenv.go(校验期共用同一份定义),
+// 两侧不允许各写一份 —— 见 AGENTS.md 硬性约定 #13。
 func EvalCondition(expression string, st StateAccess, vars map[string]any) (bool, error) {
-	env := expressionEnv{
-		"decision":  stringOf(st, KeyDecision),
-		"status":    stringOf(st, KeyStatus),
-		"output":    stringOf(st, KeyOutput),
-		"iteration": intOf(st, KeyLoopCount),
-		"variables": vars,
-	}
-	return runCondition(expression, env)
+	return runCondition(expression, buildConditionEnv(st, vars, ""))
 }
 
 // evalConditionWithDecision 与 EvalCondition 相同,但 decision 取循环
@@ -1147,14 +1137,7 @@ func evalConditionWithDecision(expression string, st StateAccess, vars map[strin
 	if snap, ok := st.Get(KeyLoopDecision); ok && snap != nil && fmt.Sprint(snap) != "" {
 		decision = fmt.Sprint(snap)
 	}
-	env := expressionEnv{
-		"decision":  decision,
-		"status":    stringOf(st, KeyStatus),
-		"output":    stringOf(st, KeyOutput),
-		"iteration": intOf(st, KeyLoopCount),
-		"variables": vars,
-	}
-	return runCondition(expression, env)
+	return runCondition(expression, buildConditionEnv(st, vars, decision))
 }
 
 func runCondition(expression string, env expressionEnv) (bool, error) {

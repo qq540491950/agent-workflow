@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"agentworkflow/workflow/model"
 )
 
 // newTempRepo 创建带一次提交的临时 git 仓库。
@@ -226,4 +229,134 @@ func TestWorkingDirConcurrentAccess(t *testing.T) {
 	if !strings.HasPrefix(final, "/tmp/dir-") {
 		t.Errorf("最终工作目录 = %q,形状异常(可能发生了字符串撕裂)", final)
 	}
+}
+
+// gitErrCode 取出结构化 git 错误的 code。
+func gitErrCode(t *testing.T, err error) string {
+	t.Helper()
+	var ge *model.Error
+	if !errors.As(err, &ge) {
+		t.Fatalf("应返回 *model.Error, 实际 %T (%v)", err, err)
+	}
+	return ge.Code
+}
+
+// 回归:失败语义必须可区分(约定 14:该失败却成功等同 P0)。
+// 此前 GIT_TIMEOUT / GIT_CANCELLED 两个分支没有任何测试覆盖。
+func TestExecTimeoutMapsToTimeoutCode(t *testing.T) {
+	dir := newTempRepo(t)
+	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := s.Commit(ctx, "slow hook")
+	if err == nil {
+		t.Fatal("挂起的钩子应超时失败")
+	}
+	if code := gitErrCode(t, err); code != "GIT_TIMEOUT" {
+		t.Errorf("code = %q, 期望 GIT_TIMEOUT", code)
+	}
+}
+
+func TestExecCancelMapsToCancelledCode(t *testing.T) {
+	dir := newTempRepo(t)
+	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+	_, err := s.Commit(ctx, "cancelled hook")
+	if err == nil {
+		t.Fatal("被取消的提交应失败")
+	}
+	if code := gitErrCode(t, err); code != "GIT_CANCELLED" {
+		t.Errorf("code = %q, 期望 GIT_CANCELLED", code)
+	}
+}
+
+// 回归:git 没有输出时错误信息不能是空的。
+// API 只回传 Message(model.Error.Detail 不进 error 文本),
+// 空原因会让用户只看到"git status 失败:"。
+func TestExecFailureMessageHasReason(t *testing.T) {
+	s := New(t.TempDir())
+	s.SetBin(filepath.Join(t.TempDir(), "no-such-git-binary"))
+	_, err := s.Status(context.Background())
+	if err == nil {
+		t.Fatal("不存在的 git 可执行文件应失败")
+	}
+	if code := gitErrCode(t, err); code != "GIT_COMMAND_FAILED" {
+		t.Errorf("code = %q, 期望 GIT_COMMAND_FAILED", code)
+	}
+	msg := err.Error()
+	if strings.HasSuffix(msg, "失败: ") || strings.HasSuffix(msg, "失败:") {
+		t.Errorf("错误信息缺少原因: %q", msg)
+	}
+	if !strings.Contains(msg, "no-such-git-binary") {
+		t.Errorf("错误信息应包含可执行文件路径: %q", msg)
+	}
+}
+
+// 非仓库目录必须失败,不能静默返回空状态(约定 14)。
+func TestStatusOutsideRepoFails(t *testing.T) {
+	s := New(t.TempDir())
+	if _, err := s.Status(context.Background()); err == nil {
+		t.Fatal("非仓库目录应返回错误")
+	}
+}
+
+// 缺参数的分支必须显式失败。
+func TestRunMissingArguments(t *testing.T) {
+	dir := newTempRepo(t)
+	s := New(dir)
+	if _, err := s.Run(context.Background(), "commit", map[string]any{}); err == nil {
+		t.Error("commit 缺 message 应失败")
+	}
+	if _, err := s.Run(context.Background(), "checkout", map[string]any{}); err == nil {
+		t.Error("checkout 缺 branch 应失败")
+	}
+}
+
+// SetBin / bin() 的并发安全(约定 15:共享可变状态加锁)。
+func TestBinConcurrentAccess(t *testing.T) {
+	s := New(t.TempDir())
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = s.bin()
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			s.SetBin("git")
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

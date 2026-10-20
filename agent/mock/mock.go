@@ -57,6 +57,10 @@ type runState struct {
 	summaries map[string][]string
 	// shared 为真时 maps 由 Agent 自身持有(Calls/Summaries 能读到)
 	shared bool
+	// inUse 是当前有多少次调用正在用这个空间。
+	// 淘汰时必须跳过 inUse>0 的空间 —— 正在跑的执行的决策序列
+	// 被清零的话,第二次调用会拿到第一次的决策,工作流走错分支。
+	inUse int
 }
 
 // New 创建 MockAgent。
@@ -139,7 +143,9 @@ func (a *Agent) ResetMock() {
 // 桌面应用是长生命周期进程,每次执行永久留一个 runState 会无界增长
 // (这是 ExecutionID 隔离引入的新问题,原共享空间不存在)。
 // 超限后按 FIFO 复用最旧的空间 —— 那个执行早已结束,复用它无害。
-const maxRunSpaces = 256
+//
+// 必须是 var(不是 const):测试需要把它调小来验证淘汰逻辑。
+var maxRunSpaces = 256
 
 // stateFor 返回本次调用应使用的计数空间。
 func (a *Agent) stateFor(executionID string) *runState {
@@ -148,18 +154,42 @@ func (a *Agent) stateFor(executionID string) *runState {
 		return &runState{calls: a.calls, summaries: a.summaries, shared: true}
 	}
 	if rs, ok := a.runs[executionID]; ok {
+		rs.inUse++
 		return rs
 	}
-	// 超限:丢弃最旧的一个空间(FIFO),再登记新的
+	// 超限:淘汰一个空闲空间(仍在使用的空间不淘汰)
 	if len(a.runs) >= maxRunSpaces {
-		for k := range a.runs { // map 迭代顺序随机,任意一个都够用
-			delete(a.runs, k)
-			break
-		}
+		a.evictIdleLocked()
 	}
-	rs := &runState{calls: map[string]int{}, summaries: map[string][]string{}}
+	rs := &runState{calls: map[string]int{}, summaries: map[string][]string{}, inUse: 1}
 	a.runs[executionID] = rs
 	return rs
+}
+
+// evictIdleLocked 淘汰一个空闲的计数空间(调用方必须持有 a.mu)。
+//
+// 只淘汰 inUse==0 的空间:正在执行的执行若被淘汰,它的决策序列会被
+// 清零 —— 同一执行的第二次调用拿到第一次的决策,工作流走错分支。
+// 全部空间都在用时宁可不淘汰(空间数临时超限,远好过串味)。
+func (a *Agent) evictIdleLocked() {
+	for k, rs := range a.runs {
+		if rs.inUse == 0 {
+			delete(a.runs, k)
+			return
+		}
+	}
+}
+
+// release 归还一次调用对计数空间的占用(调用方不持有 a.mu)。
+func (a *Agent) release(rs *runState) {
+	if rs == nil || rs.shared {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if rs.inUse > 0 {
+		rs.inUse--
+	}
 }
 
 // Execute 实现 agent.Agent:按脚本生成结构化响应。
@@ -169,6 +199,8 @@ func (a *Agent) Execute(ctx context.Context, req agent.AgentRequest) (*agent.Age
 	call := rs.calls[req.Mode]
 	rs.calls[req.Mode] = call + 1
 	a.mu.Unlock()
+	// 归还占用:空间淘汰时仍在使用的空间不会被清零
+	defer a.release(rs)
 
 	script := a.opt.Scripts[req.Mode]
 	if script == nil {

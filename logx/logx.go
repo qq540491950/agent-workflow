@@ -6,90 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"regexp"
 	"strings"
 	"sync/atomic"
 )
-
-// 敏感键名模式(忽略大小写):key=value / key: value / "key": "value",
-// 值可带可选的 Bearer 前缀。
-var sensitivePattern = regexp.MustCompile(
-	`(?i)((?:api[_-]?key|token|password|secret|authorization|credential)s?"?\s*[:=]\s*"?(?:bearer\s+)?)([^",\s}&]+)`)
-
-// sensitiveKeyPattern 匹配"作为键名"的敏感词(token / api_key / password …)。
-// 值形态(key=value)由 sensitivePattern 负责;键名形态需要单独一条规则:
-// 事件 payload 里最常见的正是 {"token":"Bearer abc"} 这种裸值。
-var sensitiveKeyPattern = regexp.MustCompile(
-	`(?i)^(api[_-]?key|token|password|secret|authorization|credential|access[_-]?key|private[_-]?key)s?$`)
-
-// sensitiveHint 是敏感词的公共子串。正则很贵,而事件总线的热路径上
-// 每个 payload 都要过一遍(Emit 是每节点每次执行都调用的),所以先用
-// 廉价的 strings.Contains 预筛:绝大多数正常文本(node 名、summary、
-// 状态名)根本不含这些子串,可直接跳过正则。
-var sensitiveHint = []string{"key", "token", "password", "secret", "authorization", "credential"}
-
-// maybeSensitive 是 mayContainSensitive 的别名(语义更直白)。
-func mayContainSensitive(s string) bool {
-	for _, h := range sensitiveHint {
-		if strings.Contains(strings.ToLower(s), h) {
-			return true
-		}
-	}
-	return false
-}
-
-// Mask 脱敏文本中的敏感键值对(含 Bearer 前缀形式)。
-func Mask(s string) string {
-	if !mayContainSensitive(s) {
-		return s
-	}
-	return sensitivePattern.ReplaceAllString(s, `${1}***`)
-}
-
-// MaskValue 递归脱敏任意结构(字符串/嵌套 map/slice)里的敏感值。
-// 事件流的三个出口(SQLite 落库 / SSE 推送 / Wails IPC)都经这里:
-// 节点失败的 error 文本常带 CLI stderr,而 stderr 里常有
-// "ANTHROPIC_API_KEY=sk-..." 这类凭据 —— 日志侧此前已脱敏(见 maskArgs),
-// 但事件/审计流是旁路,同一份敏感值照样落库并推给前端。
-//
-// 两条线索都认:键名是敏感词 → 整值替换为 ***;值本身含 key=value 形态
-// → 就地替换(保持上下文可读)。非字符串值原样返回。
-func MaskValue(v any) any { return maskRecursive("", v) }
-
-// MaskMap 是 MaskValue 的 map 入口(事件 payload 用)。
-func maskRecursive(key string, v any) any {
-	// 键名即线索:整个值都是凭据,直接替换(键名短,正则代价可忽略)
-	if v != nil && mayContainSensitive(key) && sensitiveKeyPattern.MatchString(key) {
-		return "***"
-	}
-	switch t := v.(type) {
-	case nil:
-		return nil
-	case string:
-		return Mask(t)
-	case error:
-		if t == nil {
-			return v
-		}
-		return Mask(t.Error())
-	case fmt.Stringer:
-		return Mask(t.String())
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, val := range t {
-			out[k] = maskRecursive(k, val)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, val := range t {
-			out[i] = maskRecursive("", val)
-		}
-		return out
-	default:
-		return v
-	}
-}
 
 var logger atomic.Pointer[slog.Logger]
 
@@ -101,21 +20,40 @@ func newLogger(level slog.Level) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// SetLevel 控制日志级别(debug/info/warn/error)。
-// 运行中可被设置页调用,用原子指针替换避免与并发写日志竞争。
-func SetLevel(level string) {
-	var l slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		l = slog.LevelDebug
-	case "warn":
-		l = slog.LevelWarn
-	case "error":
-		l = slog.LevelError
-	default:
-		l = slog.LevelInfo
+// validLevels 是支持的日志级别。
+var validLevels = map[string]slog.Level{
+	"debug": slog.LevelDebug,
+	"info":  slog.LevelInfo,
+	"warn":  slog.LevelWarn,
+	"error": slog.LevelError,
+}
+
+// warnLogger 是独立于级别设置的告警出口:级别被设成 error 时,
+// "配置写错了"这类问题仍然必须可见,否则就是静默失败(约定 14)。
+var warnLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+// SetLevelChecked 设置日志级别(debug/info/warn/error)。
+// 非法值返回 error 且**不改变**当前级别 —— 调用方可以据此拒绝请求
+// (设置页把非法级别存进库、界面回显"debug"实际跑 info,是静默失败)。
+func SetLevelChecked(level string) error {
+	l, ok := validLevels[strings.ToLower(strings.TrimSpace(level))]
+	if !ok {
+		return fmt.Errorf("日志级别非法: %q(可选 debug|info|warn|error)", level)
 	}
 	logger.Store(newLogger(l))
+	return nil
+}
+
+// SetLevel 控制日志级别(debug/info/warn/error)。
+// 运行中可被设置页调用,用原子指针替换避免与并发写日志竞争。
+//
+// 兼容旧调用方:非法值不再静默回落 info —— 保持当前级别并记录 WARN
+// (约定 14:"该失败却成功"等同 P0)。需要区分"非法"的调用方请改用
+// SetLevelChecked(返回 error)。
+func SetLevel(level string) {
+	if err := SetLevelChecked(level); err != nil {
+		warnLogger.Warn("忽略非法日志级别,保持当前级别", "level", level, "error", err)
+	}
 }
 
 func get() *slog.Logger { return logger.Load() }

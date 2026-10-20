@@ -26,7 +26,10 @@ type Service struct {
 	// WorkingDir()/SetWorkingDir()。
 	wdMu       sync.RWMutex
 	workingDir string
-	// Bin 是 git 可执行文件路径,默认 "git"。启动后不再修改,无锁读。
+	// Bin 是 git 可执行文件路径,默认 "git"。
+	//
+	// 构造期字段:启动后不再修改。运行期如需修改请用 SetBin(带锁),
+	// 直接写字段与并发执行存在数据竞争(约定 15)。
 	Bin string
 }
 
@@ -47,6 +50,23 @@ func (s *Service) SetWorkingDir(dir string) {
 	s.wdMu.Lock()
 	defer s.wdMu.Unlock()
 	s.workingDir = dir
+}
+
+// bin 读取 git 可执行文件路径(并发安全)。
+func (s *Service) bin() string {
+	s.wdMu.RLock()
+	defer s.wdMu.RUnlock()
+	if s.Bin == "" {
+		return "git"
+	}
+	return s.Bin
+}
+
+// SetBin 更新 git 可执行文件路径(并发安全)。
+func (s *Service) SetBin(bin string) {
+	s.wdMu.Lock()
+	defer s.wdMu.Unlock()
+	s.Bin = bin
 }
 
 // Status 表示 git status 的结构化结果。
@@ -242,10 +262,7 @@ func (s *Service) CurrentBranch(ctx context.Context) (string, error) {
 
 // exec 运行 git 子进程,处理超时与错误。
 func (s *Service) exec(ctx context.Context, dir string, args []string) (string, error) {
-	bin := s.Bin
-	if bin == "" {
-		bin = "git"
-	}
+	bin := s.bin()
 	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, bin, args...)
@@ -260,8 +277,15 @@ func (s *Service) exec(ctx context.Context, dir string, args []string) (string, 
 		err = nil
 	}
 	if err != nil {
+		// git 没有输出时(可执行文件不存在、参数被拒等)原因不能为空:
+		// API 只回传 Message(err.Error() 不含 Detail),空原因会让用户
+		// 只看到"git status 失败:"却不知道发生了什么。
+		reason := strings.TrimSpace(string(out))
+		if reason == "" {
+			reason = err.Error()
+		}
 		gitErr := model.NewError(model.KindGitError, "GIT_COMMAND_FAILED",
-			fmt.Sprintf("git %s 失败: %s", strings.Join(args, " "), strings.TrimSpace(string(out))))
+			fmt.Sprintf("git %s 失败: %s", strings.Join(args, " "), reason))
 		gitErr.Detail = err.Error()
 		if cctx.Err() == context.DeadlineExceeded {
 			gitErr.Code = "GIT_TIMEOUT"

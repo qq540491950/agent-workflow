@@ -35,6 +35,11 @@ type Config struct {
 	AgentEnv map[string]string
 	// Perms 权限管理器(执行前校验)。
 	Perms *permission.Manager
+	// WaitDelaySeconds 是子进程退出后等待 stdout/stderr 管道关闭的上限
+	// (秒)。管道被孤儿子进程持有时,Wait 在这个上限后返回
+	// exec.ErrWaitDelay —— 此时进程已成功退出、输出完整,必须判成功。
+	// 0 = 默认 5 秒。
+	WaitDelaySeconds int
 }
 
 // Agent 是 PiAgent 实现。
@@ -49,6 +54,9 @@ func New(cfg Config) *Agent {
 	}
 	if cfg.DefaultTimeoutSeconds <= 0 {
 		cfg.DefaultTimeoutSeconds = 900
+	}
+	if cfg.WaitDelaySeconds <= 0 {
+		cfg.WaitDelaySeconds = 5
 	}
 	return &Agent{cfg: cfg}
 }
@@ -99,7 +107,7 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	// 取消/超时击杀整个进程组;WaitDelay 兜底关闭遗留管道,
 	// 保证孤儿进程不会让调用方阻塞在 Output() 上。
 	coreagent.ConfigureProcess(cmd)
-	cmd.WaitDelay = 5 * time.Second
+	cmd.WaitDelay = time.Duration(a.cfg.WaitDelaySeconds) * time.Second
 	if req.WorkingDir != "" {
 		cmd.Dir = req.WorkingDir
 	}
@@ -121,9 +129,12 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	if stdout.Truncated() {
 		logx.Warn("pi-agent 输出超出上限,已截断", "limit", coreagent.MaxOutputBytes)
 	}
+	// 凭据脱敏:适配器是唯一知道注入值原貌的地方(约定 8)。
+	// 父进程环境里的凭据同样算(子进程继承了它们)。
+	redactor := coreagent.NewRedactor(a.cfg.AgentEnv, req.Environment, coreagent.ParentEnv())
 	if errors.Is(runErr, exec.ErrWaitDelay) {
 		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
-		return parseOutput([]byte(stdout.String())), nil
+		return responseFor(stdout, redactor), nil
 	}
 	if runErr != nil {
 		switch {
@@ -134,9 +145,27 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 			return nil, model.NewError(model.KindCancelledError, "PI_CANCELLED", "执行被取消")
 		}
 		return nil, model.NewError(model.KindProcessError, "PI_PROCESS_ERROR",
-			fmt.Sprintf("pi-agent 执行失败: %v; stderr: %s", runErr, truncate(stderr.String(), 2000)))
+			fmt.Sprintf("pi-agent 执行失败: %v; stderr: %s", runErr,
+				redactor.Text(truncate(stderr.String(), 2000))))
 	}
-	return parseOutput([]byte(stdout.String())), nil
+	return responseFor(stdout, redactor), nil
+}
+
+// responseFor 把子进程输出转成 Agent 响应。
+//
+// 输出被截断时结构化结果不可信(尾部 JSON 必然不完整),必须**显式失败**
+// 并说明原因 —— 返回 SUCCESS + 空决策会让路由静默走默认分支,
+// 正是约定 14 说的"该失败却成功"。
+func responseFor(stdout *coreagent.BoundedBuffer, redactor *coreagent.Redactor) *coreagent.AgentResponse {
+	if stdout.Truncated() {
+		return &coreagent.AgentResponse{
+			Status: coreagent.StatusFailed,
+			Error: fmt.Sprintf("pi-agent 输出超出 %d 字节上限被截断,结构化结果不可信",
+				coreagent.MaxOutputBytes),
+			Output: stdout.String(), // 带显式截断标记,便于定位
+		}
+	}
+	return redactor.RedactResponse(parseOutput(stdout.Bytes()))
 }
 
 // parseOutput 解析 pi-agent 输出。
@@ -155,10 +184,11 @@ func parseOutput(out []byte) *coreagent.AgentResponse {
 			if structured.Summary != "" {
 				resp.Summary = structured.Summary
 			}
-			if structured.Decision != "" {
-				resp.Decision = coreagent.AgentDecision(strings.ToUpper(structured.Decision))
-			}
-			if structured.Status == "failed" || structured.Error != "" {
+			// 决策取值必须合法才进路由(非法取值留痕但不路由)。
+			coreagent.ApplyDecision(resp, structured.Decision)
+			// status 大小写不敏感:只精确匹配 "failed" 会让 "FAILED"
+			// 形态的失败被当成成功(约定 14)。
+			if strings.EqualFold(structured.Status, "failed") || structured.Error != "" {
 				resp.Status = coreagent.StatusFailed
 				resp.Error = structured.Error
 			}

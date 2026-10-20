@@ -57,7 +57,26 @@ type Engine struct {
 	cancels map[string]context.CancelFunc
 	// running 统计正在执行的 execute() 协程(优雅关闭等待用)。
 	running atomic.Int64
+	// eventPersistFailures 统计事件落库失败次数。
+	// 事件落库失败 = 审计流缺记录,必须可观测(不能静默丢弃)。
+	eventPersistFailures atomic.Int64
+	// escalateExpected / escalateUnexpected 统计 ADK Escalate 事件的分类:
+	// 预期内(循环正常出口 / HITL 暂停)与异常(失败 / 循环上限 / 停滞)。
+	escalateExpected   atomic.Int64
+	escalateUnexpected atomic.Int64
+	// persistFailGuard 防止"落库失败 → 发 runtime.error 事件 → 该事件
+	// 落库又失败 → 再发 …"的递归(发事件时置位,期间不再发)。
+	persistFailGuard atomic.Bool
 }
+
+// EscalateStats 返回 Escalate 事件分类计数(预期内 / 异常)。
+// 正常跑通的工作流应当 expected > 0 且 unexpected == 0。
+func (e *Engine) EscalateStats() (int64, int64) {
+	return e.escalateExpected.Load(), e.escalateUnexpected.Load()
+}
+
+// EventPersistFailures 返回事件落库失败次数(审计流缺记录的计数)。
+func (e *Engine) EventPersistFailures() int64 { return e.eventPersistFailures.Load() }
 
 // RunningCount 返回正在执行的执行协程数。
 func (e *Engine) RunningCount() int64 { return e.running.Load() }
@@ -89,12 +108,58 @@ func NewEngine(agents coreagent.Registry, skills skill.Registry, perms *permissi
 		cancels: map[string]context.CancelFunc{},
 	}
 	// 事件持久化:所有携带 ExecutionID 的事件写入 SQLite(审计/恢复/UI 回放)
+	//
+	// 保持**同步**落库:事件顺序即状态顺序是总线层的刻意契约
+	// (见 event.Bus.Emit 的说明),而且崩溃场景下"已发出的事件必须已经
+	// 落库" —— 异步化会让进程被强杀时丢掉最后一段审计记录,恰好是
+	// 最需要审计的时刻。代价是 DB 慢会拖慢执行协程,但单连接 WAL 下
+	// 一次 INSERT 是亚毫秒级,相对一次 Agent 调用可忽略。
+	// 该契约由 TestEventPersistedSynchronously 钉死。
 	bus.Subscribe(func(ev event.UIEvent) {
-		if ev.ExecutionID != "" {
-			_ = repo.SaveEvent(ev)
-		}
+		e.persistEvent(ev)
 	})
 	return e
+}
+
+// persistEvent 把事件写入 SQLite(审计/恢复/回放)。
+//
+// 落库失败必须**可观测**:此前是 `_ = repo.SaveEvent(ev)` 静默丢弃,
+// DB 故障时审计流凭空缺记录,事后无法判断"是没发生"还是"没记下来"。
+// 现在:计数 + ERROR 日志 + 发一条 runtime.error 事件。
+//
+// 落库失败**不中断**工作流执行:事件持久化失败不是执行失败,把它打成
+// FAILED 会把"审计流断了"变成"工作流挂了",制造新的状态混乱
+// (约定 #14 的反面:不该失败的别失败)。真正的执行失败由节点状态与
+// KeyAbort 裁决,与此无关。
+func (e *Engine) persistEvent(ev event.UIEvent) {
+	if ev.ExecutionID == "" || e.Repo == nil {
+		return
+	}
+	if err := e.Repo.SaveEvent(ev); err != nil {
+		e.onEventPersistFailed(ev, err)
+	}
+}
+
+// onEventPersistFailed 处理事件落库失败:计数 + 日志 + 发 runtime.error。
+//
+// 发事件而不是只记日志:落库失败时审计流已经断了,运维/用户还需要
+// 一个"活的"信号(SSE/UI 能收到)。用 persistFailGuard 防递归 ——
+// runtime.error 事件自己也会落库失败,没有护栏就是无限发事件。
+func (e *Engine) onEventPersistFailed(ev event.UIEvent, err error) {
+	e.eventPersistFailures.Add(1)
+	logx.Error("事件落库失败(审计流缺记录)", "type", ev.Type,
+		"execution", ev.ExecutionID, "node", ev.NodeID, "error", err.Error())
+	if !e.persistFailGuard.CompareAndSwap(false, true) {
+		// 已在处理落库失败:不再发事件(否则 runtime.error 自己落库失败
+		// 又触发一次,无限递归)。
+		return
+	}
+	defer e.persistFailGuard.Store(false)
+	e.Bus.Emit(event.New("runtime.error", ev.ExecutionID, ev.NodeID, map[string]any{
+		"reason":        "event_persist_failed",
+		"event_type":    ev.Type,
+		"persist_error": err.Error(),
+	}))
 }
 
 func newID(prefix string) string {
@@ -175,7 +240,11 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 		return nil, err
 	}
 	exec.StartedAt = now
-	e.save(exec)
+	// 首次写入:整行插入(此刻行还不存在,状态列随行一起落定)。
+	// 之后所有状态变更一律走 CAS,整行写不再碰 state 列。
+	if err := e.insertExecution(exec); err != nil {
+		return nil, err
+	}
 	e.Bus.Emit(event.New(event.WorkflowStarted, exec.ID, "", map[string]any{
 		"workflow": wf.Name, "task": task,
 	}))
@@ -210,7 +279,11 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 			fmt.Sprintf("执行 %s 状态为 %s,不能恢复", executionID, exec.State))
 	}
 	// 数据库级 CAS:并发 Resume(如双击批准)只允许一个调用方成功,
-	// 否则同一执行会被两份 goroutine 同时重放
+	// 否则同一执行会被两份 goroutine 同时重放。
+	//
+	// CAS 是**唯一**的状态写入口:此后不再有整行写覆盖 state 列,
+	// 因此"CAS 成功 → 整行写"之间的窗口里即便有并发写,也不会把状态
+	// 改回去(状态列根本不在这条 UPDATE 里)。
 	ok, err := e.Repo.CasExecutionState(executionID,
 		[]model.ExecutionState{model.ExecutionWaitingUser, model.ExecutionPaused}, model.ExecutionRunning)
 	if err != nil {
@@ -220,10 +293,8 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 		return nil, model.NewError(model.KindStateError, "INVALID_RESUME",
 			fmt.Sprintf("执行 %s 正在被恢复或状态已变化", executionID))
 	}
+	exec.State = model.ExecutionRunning
 	e.Bus.Emit(event.New(event.HumanInputReceived, exec.ID, exec.CurrentNodeID, userResponse))
-	if err := e.transition(exec, model.ExecutionRunning); err != nil {
-		return nil, err
-	}
 	e.save(exec)
 	e.Bus.Emit(event.New(event.WorkflowResumed, exec.ID, exec.CurrentNodeID, nil))
 
@@ -286,7 +357,11 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	if nodeID == "" {
 		return nil, model.NewError(model.KindStateError, "NO_FAILED_NODE", "无法定位失败节点")
 	}
-	// 数据库级 CAS:并发重试只允许一个调用方成功
+	// 数据库级 CAS:并发重试只允许一个调用方成功。
+	//
+	// 状态与元信息分两步落:StateData 的修改要先知道 CAS 赢了才能做,
+	// 所以顺序不能反。但元信息写入**不含状态列**,不会推翻 CAS 的裁决
+	// ——"重试中"与"失败节点的旧状态"短暂不一致只影响展示,不影响裁决。
 	ok, err := e.Repo.CasExecutionState(executionID,
 		[]model.ExecutionState{model.ExecutionFailed}, model.ExecutionRunning)
 	if err != nil {
@@ -296,6 +371,7 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 		return nil, model.NewError(model.KindStateError, "INVALID_RETRY",
 			fmt.Sprintf("执行 %s 正在被重试或状态已变化", executionID))
 	}
+	exec.State = model.ExecutionRunning
 	if skip {
 		exec.StateData[compiler.StatusKey(nodeID)] = string(model.NodeSkipped)
 	} else {
@@ -305,9 +381,6 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	delete(exec.StateData, "_error")
 	exec.Error = ""
 
-	if err := e.transition(exec, model.ExecutionRunning); err != nil {
-		return nil, err
-	}
 	e.save(exec)
 	e.Bus.Emit(event.New(event.WorkflowResumed, exec.ID, nodeID, map[string]any{
 		"retry": !skip, "skip": skip,
@@ -337,13 +410,28 @@ func (e *Engine) RecoverPending() error {
 		return err
 	}
 	for _, exec := range pending {
-		switch exec.State {
-		case model.ExecutionRunning, model.ExecutionCreated:
-			exec.Error = "应用重启导致执行中断,可重新运行"
-			_ = e.transitionAndSave(exec, model.ExecutionFailed)
-		case model.ExecutionWaitingUser, model.ExecutionPaused:
-			// 保持状态,可通过 Resume 继续
+		if err := e.recoverExecution(exec); err != nil {
+			logx.Warn("崩溃恢复标记失败(状态已被并发改写)",
+				"execution", exec.ID, "error", err.Error())
 		}
+	}
+	return nil
+}
+
+// recoverExecution 把一条"崩溃遗留"的执行标记为 FAILED(可重试)。
+//
+// 用 CAS 而不是整行写:列表是在稍早时刻取的,期间执行可能已经跑完
+// (COMPLETED)。整行写会把"已完成"覆盖成"失败" —— 用户看到"失败",
+// 实际早就成功了(约定 #14 同族问题:该失败却成功 / 该成功却失败)。
+// CAS 失败 = 状态已被别人改走,此时不动它。
+func (e *Engine) recoverExecution(exec *model.Execution) error {
+	switch exec.State {
+	case model.ExecutionRunning, model.ExecutionCreated:
+		exec.Error = "应用重启导致执行中断,可重新运行"
+		return e.transitionAndSave(exec, model.ExecutionFailed)
+	case model.ExecutionWaitingUser, model.ExecutionPaused:
+		// 保持状态,可通过 Resume 继续
+		return nil
 	}
 	return nil
 }
@@ -451,9 +539,12 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 		}
 		if ev != nil {
 			// Escalate 意味着循环退出/失败中断/HITL 暂停,是关键语义信号,
-			// 记录下来便于诊断"正常结束"与"被守卫中断"的区别。
+			// 但**不是**每一种 Escalate 都是异常:循环出口条件成立、
+			// HITL 暂停都是预期内的正常路径。此前一律记 WARN,于是任何
+			// 含循环的工作流正常跑通都会产出 WARN 告警,噪声掩盖真正
+			// 的异常。按状态增量分类后再决定级别。
 			if ev.Actions.Escalate {
-				logx.Warn("adk escalate", "execution", exec.ID, "author", ev.Author)
+				e.onEscalate(exec, ev)
 			} else if ev.IsFinalResponse() {
 				logx.Debug("adk final response", "execution", exec.ID, "author", ev.Author)
 			}
@@ -576,7 +667,11 @@ func (e *Engine) syncNodeStates(exec *model.Execution) {
 
 func (e *Engine) failExecution(exec *model.Execution, msg string) {
 	exec.Error = msg
-	_ = e.transitionAndSave(exec, model.ExecutionFailed)
+	if err := e.transitionAndSave(exec, model.ExecutionFailed); err != nil {
+		// 状态冲突 = 库里已经是别的终态(如用户已取消):不覆盖,
+		// 但错误原因仍要留下,否则用户只看到"已取消"却不知道为何失败。
+		logx.Warn("执行失败状态落库未生效", "execution", exec.ID, "error", err.Error())
+	}
 	e.Bus.Emit(event.New(event.WorkflowFailed, exec.ID, exec.CurrentNodeID, map[string]any{"error": msg}))
 }
 
@@ -591,17 +686,42 @@ func (e *Engine) transition(exec *model.Execution, to model.ExecutionState) erro
 	return nil
 }
 
+// transitionAndSave 迁移执行状态并落库。
+//
+// 状态迁移**只**经 CAS(约定 #4),且与元信息落库合成**一条**语句:
+// CAS 失败 = 库里的状态已被别的写者落定(并发取消/重试/崩溃恢复),
+// 此时绝不能覆盖 —— 覆盖会把"已完成"改回"运行中",或把"已取消"改回
+// "运行中"(约定 #14 同族问题:用户看到的裁决被过期写推翻)。
+//
+// 合成一条语句还保证"状态"与"元信息"同时可见:分两次写会出现
+// "状态已是 COMPLETED、节点状态还是上一轮"的窗口,轮询中的 UI 会看到
+// "成功但一个节点都没跑"。
 func (e *Engine) transitionAndSave(exec *model.Execution, to model.ExecutionState) error {
-	if err := e.transition(exec, to); err != nil {
+	if !model.CanTransitionExecution(exec.State, to) {
+		return model.NewError(model.KindStateError, "INVALID_TRANSITION",
+			fmt.Sprintf("非法状态转换 %s → %s", exec.State, to))
+	}
+	ok, err := e.casStateAndSave(exec, []model.ExecutionState{exec.State}, to)
+	if err != nil {
 		return err
 	}
-	e.save(exec)
+	if !ok {
+		cur := e.currentState(exec.ID)
+		logx.Warn("状态迁移被并发写者抢先,已放弃本次写入",
+			"execution", exec.ID, "from", exec.State, "to", to, "current", cur)
+		return model.NewError(model.KindStateError, "STATE_CONFLICT",
+			fmt.Sprintf("执行 %s 当前状态为 %s,期望从 %s 迁移到 %s", exec.ID, cur, exec.State, to))
+	}
+	exec.State = to
 	return nil
 }
 
+// save 落库执行记录(只写非状态列;状态由 CAS 单独落定)。
+//
+// 失败必须暴露,不能静默丢弃状态:发一条 runtime.error 事件 + 记日志。
 func (e *Engine) save(exec *model.Execution) {
-	if err := e.Repo.SaveExecution(exec); err != nil {
-		// 持久化失败必须暴露,不能静默丢弃状态
+	if err := e.saveMeta(exec); err != nil {
+		logx.Error("保存执行记录失败", "execution", exec.ID, "error", err.Error())
 		e.Bus.Emit(event.New("runtime.error", exec.ID, "", map[string]any{"error": err.Error()}))
 	}
 }

@@ -339,12 +339,17 @@ edges:
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// 构造一个 RUNNING 假象:直接改库模拟"执行中途崩溃"
-	raw, _ := repo.GetExecution(exec.ID)
-	_ = raw
-	crashed, _ := repo.GetExecution(exec.ID)
-	crashed.State = model.ExecutionRunning
-	_ = repo.SaveExecution(crashed)
+	// 构造一个 RUNNING 假象:模拟"进程被强杀"(状态停在 RUNNING)。
+	//
+	// 用裸 SQL 而不是 SaveExecution:
+	//   - SaveExecution 是整行 upsert,会把过期副本的其它列一起写回去;
+	//   - "崩溃"只应改状态这一列(执行细节已落库,不该被覆盖);
+	//   - 整行 upsert 写状态这条路本身正在被收敛(状态只由 CAS 落定),
+	//     测试不应依赖它来模拟崩溃。
+	if _, err := repo.SQL().Exec(`UPDATE executions SET state=? WHERE id=?`,
+		string(model.ExecutionRunning), exec.ID); err != nil {
+		t.Fatalf("模拟执行中途崩溃: %v", err)
+	}
 
 	// 第二段:新引擎实例(模拟应用重启)
 	engB := mkEngine()

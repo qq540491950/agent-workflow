@@ -5,8 +5,11 @@ package permission
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
+	"agentworkflow/logx"
 	"agentworkflow/workflow/model"
 )
 
@@ -108,29 +111,126 @@ func (m *Manager) Check(agentID string, a Action) error {
 
 // ApplyWorkflowOverrides 支持 DSL 中的 permissions 段覆盖默认策略。
 // 形如: {"claude-code": {"filesystem": {"read": true, "write": false}, "git": {...}}}
+//
+// 结构非法的覆盖项按"拒绝"处理(fail closed)而不是静默忽略:
+// 此前非法结构(值不是映射 / 字段不是布尔 / 字段名拼错)一律被丢弃,
+// 于是 DSL 里写错的收紧规则(例如想把 pi-agent 的写权限关掉)被静默吞掉,
+// Agent 仍按默认的宽松策略执行 —— 约定 14:该失败却成功等同 P0。
+// 需要拿到具体原因时请用 ApplyChecked。
 func (m *Manager) ApplyWorkflowOverrides(overrides map[string]any) {
+	if err := m.ApplyChecked(overrides); err != nil {
+		logx.Warn("权限覆盖非法,相关 Agent 权限已全部拒绝", "error", err)
+	}
+}
+
+// ApplyChecked 应用覆盖并返回错误(结构非法时)。
+// 非法覆盖项对应的 Agent 权限被置为"全部拒绝"(fail closed)。
+func (m *Manager) ApplyChecked(overrides map[string]any) error {
 	if len(overrides) == 0 {
-		return
+		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var problems []string
 	for agentID, raw := range overrides {
 		base := m.policies[agentID]
-		sec, ok := raw.(map[string]any)
-		if !ok {
+		updated, err := applyAgentOverrides(base, raw)
+		if err != nil {
+			// 结构非法:该 Agent 一律拒绝(而不是沿用默认策略)
+			m.policies[agentID] = Policy{}
+			problems = append(problems, fmt.Sprintf("agent %q: %v", agentID, err))
 			continue
 		}
-		if fs, ok := sec["filesystem"].(map[string]any); ok {
-			base.FilesystemRead = boolOf(fs["read"], base.FilesystemRead)
-			base.FilesystemWrite = boolOf(fs["write"], base.FilesystemWrite)
-		}
-		if g, ok := sec["git"].(map[string]any); ok {
-			base.GitRead = boolOf(g["read"], base.GitRead)
-			base.GitCommit = boolOf(g["commit"], base.GitCommit)
-			base.GitPush = boolOf(g["push"], base.GitPush)
-		}
-		m.policies[agentID] = base
+		m.policies[agentID] = updated
 	}
+	if len(problems) > 0 {
+		return fmt.Errorf("权限覆盖非法: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// applyAgentOverrides 把单个 Agent 的权限覆盖合并到基础策略上。
+// 结构非法时返回错误(调用方据此 fail closed)。
+func applyAgentOverrides(base Policy, raw any) (Policy, error) {
+	sec, ok := raw.(map[string]any)
+	if !ok {
+		return base, fmt.Errorf("权限覆盖不是映射(实际 %T)", raw)
+	}
+	if extra := unknownFields(sec, "filesystem", "git"); extra != "" {
+		return base, fmt.Errorf("权限覆盖含未知段 %s", extra)
+	}
+	if fs, ok := sec["filesystem"]; ok && fs != nil {
+		fsm, ok := fs.(map[string]any)
+		if !ok {
+			return base, fmt.Errorf("filesystem 段不是映射(实际 %T)", fs)
+		}
+		if extra := unknownFields(fsm, "read", "write"); extra != "" {
+			return base, fmt.Errorf("filesystem 段含未知字段 %s", extra)
+		}
+		var err error
+		if base.FilesystemRead, err = boolOfStrict(fsm, "read", base.FilesystemRead); err != nil {
+			return base, err
+		}
+		if base.FilesystemWrite, err = boolOfStrict(fsm, "write", base.FilesystemWrite); err != nil {
+			return base, err
+		}
+	}
+	if g, ok := sec["git"]; ok && g != nil {
+		gm, ok := g.(map[string]any)
+		if !ok {
+			return base, fmt.Errorf("git 段不是映射(实际 %T)", g)
+		}
+		if extra := unknownFields(gm, "read", "commit", "push"); extra != "" {
+			return base, fmt.Errorf("git 段含未知字段 %s", extra)
+		}
+		var err error
+		if base.GitRead, err = boolOfStrict(gm, "read", base.GitRead); err != nil {
+			return base, err
+		}
+		if base.GitCommit, err = boolOfStrict(gm, "commit", base.GitCommit); err != nil {
+			return base, err
+		}
+		if base.GitPush, err = boolOfStrict(gm, "push", base.GitPush); err != nil {
+			return base, err
+		}
+	}
+	return base, nil
+}
+
+// boolOfStrict 解析覆盖值:
+//   - 键不存在 → 保持原值;
+//   - 是布尔 → 用该值;
+//   - 是其它类型 → 视为"拒绝"(false)并报错。写错的收紧规则不能被
+//     静默丢弃(否则是 fail open)。
+func boolOfStrict(section map[string]any, field string, def bool) (bool, error) {
+	raw, ok := section[field]
+	if !ok || raw == nil {
+		return def, nil
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("字段 %q 的值不是布尔(实际 %T)", field, raw)
+	}
+	return b, nil
+}
+
+// unknownFields 返回不在允许列表里的字段名(逗号分隔,有序)。
+func unknownFields(section map[string]any, allowed ...string) string {
+	ok := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		ok[a] = true
+	}
+	var extra []string
+	for k := range section {
+		if !ok[k] {
+			extra = append(extra, k)
+		}
+	}
+	if len(extra) == 0 {
+		return ""
+	}
+	sort.Strings(extra)
+	return strings.Join(extra, ",")
 }
 
 // Clone 返回策略表的深拷贝(用于工作流运行期作用域覆盖)。
@@ -158,11 +258,4 @@ func (m *Manager) Snapshot() map[string]Policy {
 		out[k] = v
 	}
 	return out
-}
-
-func boolOf(v any, def bool) bool {
-	if b, ok := v.(bool); ok {
-		return b
-	}
-	return def
 }

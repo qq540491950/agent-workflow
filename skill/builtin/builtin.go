@@ -4,6 +4,7 @@ package builtin
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"agentworkflow/skill"
 )
@@ -31,7 +32,7 @@ func (s *SubmitSkill) Execute(ctx context.Context, req skill.SkillRequest) (*ski
 	}
 	summary, _ := req.Context["summary"].(string)
 	return &skill.SkillResponse{
-		Status: "SUCCESS",
+		Status: skill.StatusSuccess,
 		Output: fmt.Sprintf("submitted: %s\nsummary: %s", msg, summary),
 		Data: map[string]any{
 			"commit_message": msg,
@@ -55,7 +56,7 @@ func (s *LogSkill) Description() string { return "输出一条日志(消息来�
 // Execute 实现 skill.Skill。
 func (s *LogSkill) Execute(ctx context.Context, req skill.SkillRequest) (*skill.SkillResponse, error) {
 	msg, _ := req.Args["message"].(string)
-	return &skill.SkillResponse{Status: "SUCCESS", Output: msg}, nil
+	return &skill.SkillResponse{Status: skill.StatusSuccess, Output: msg}, nil
 }
 
 // RunTestSkill 模拟运行测试并返回结构化结果。
@@ -74,19 +75,44 @@ func (s *RunTestSkill) Description() string {
 
 // Execute 实现 skill.Skill。
 func (s *RunTestSkill) Execute(ctx context.Context, req skill.SkillRequest) (*skill.SkillResponse, error) {
-	fail, _ := req.Args["fail"].(bool)
-	if fail {
+	if truthy(req.Args["fail"]) {
 		return &skill.SkillResponse{
-			Status: "FAILED",
+			Status: skill.StatusFailed,
 			Error:  "test failure: 2 tests failed (injected)",
 			Data:   map[string]any{"passed": false, "failed_count": 2},
 		}, nil
 	}
 	return &skill.SkillResponse{
-		Status: "SUCCESS",
+		Status: skill.StatusSuccess,
 		Output: "all tests passed",
 		Data:   map[string]any{"passed": true, "passed_count": 12},
 	}, nil
+}
+
+// truthy 解析 args 里的布尔开关。
+//
+// 不能直接用 v.(bool):DSL 是 YAML 解析的,`fail: true` 是布尔,
+// 但 `fail: "true"`(带引号)是字符串 —— 类型断言失败会让"注入失败"
+// 静默失效,测试照常"通过"(约定 14:该失败却成功)。
+func truthy(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "true", "1", "yes", "on":
+			return true
+		}
+		return false
+	case float64:
+		return t != 0
+	case int:
+		return t != 0
+	case int64:
+		return t != 0
+	default:
+		return false
+	}
 }
 
 // All 返回全部内置 Skill 实例。

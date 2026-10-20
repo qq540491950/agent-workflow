@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // 本文件是 Agent 适配器(claude/pi)共用的子进程输出与 JSON 提取工具。
@@ -79,6 +80,63 @@ func (b *BoundedBuffer) Truncated() bool {
 	return b.dropped > 0
 }
 
+// maxJSONDepth 是配平扫描允许的最大嵌套深度。
+// 超过它就停止扫描:更深的结构本来就解析不了(encoding/json 的深度
+// 上限同量级),而栈必须封顶 —— 否则一个打印大量 '{' 的失控 CLI
+// (输出上限 8MB)能把内存也吃光。
+const maxJSONDepth = 100000
+
+// scanJSONObjects 单趟扫描文本,返回两个对象区间 [start,end):
+//
+//	first —— 最早出现且能配平的那个对象(未找到时 start = -1)
+//	tail  —— 紧贴文本末尾(忽略尾部空白)结束的那个对象(未找到时 start = -1)
+//
+// 为什么不用"从每个 '{' 起逐个配平"(旧实现):那是 O(n²) ——
+// 文本里只要有大量未配平的 '{',节点就会被卡住几分钟到几小时
+// (输出上限 8MB 的病态输出足以做到)。单趟 + 栈是线性的,
+// 字符串字面量内的括号与转义引号同样被正确跳过。
+func scanJSONObjects(text string) (first, tail [2]int) {
+	first = [2]int{-1, -1}
+	tail = [2]int{-1, -1}
+	// 文本末尾(去空白)必须正好是对象的结尾,才算"尾部对象"。
+	end := len(strings.TrimRightFunc(text, unicode.IsSpace))
+
+	var stack []int
+	inStr := false
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case escaped:
+			escaped = false
+		case inStr && c == '\\':
+			escaped = true
+		case c == '"':
+			inStr = !inStr
+		case inStr:
+			// 字符串字面量内的括号不参与配平
+		case c == '{':
+			if len(stack) >= maxJSONDepth {
+				return first, tail // 病态输入:停止扫描
+			}
+			stack = append(stack, i)
+		case c == '}':
+			if len(stack) == 0 {
+				continue // 落单的 '}' 不参与配平
+			}
+			start := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if first[0] < 0 || start < first[0] {
+				first = [2]int{start, i + 1}
+			}
+			if i+1 == end {
+				tail = [2]int{start, i + 1}
+			}
+		}
+	}
+	return first, tail
+}
+
 // BalancedJSON 从 start 处的 '{' 开始做括号配平,能配平时返回该对象
 // 文本。字符串字面量内的括号与转义引号会被正确跳过 —— 不跳过时
 // {"summary":"格式 {x}"} 这类内容会算错深度。
@@ -116,17 +174,11 @@ func BalancedJSON(text string, start int) (string, bool) {
 // FirstJSONObject 返回文本中第一个能配平的 JSON 对象。
 // 模型常在正文之后附一段 JSON,取第一个完整对象即为目标。
 func FirstJSONObject(text string) string {
-	for start := 0; ; {
-		i := strings.Index(text[start:], "{")
-		if i < 0 {
-			return ""
-		}
-		start += i
-		if js, ok := BalancedJSON(text, start); ok {
-			return js
-		}
-		start++ // 该 '{' 配不平,往后找下一个
+	first, _ := scanJSONObjects(text)
+	if first[0] < 0 {
+		return ""
 	}
+	return text[first[0]:first[1]]
 }
 
 // TrailingJSONObject 返回文本末尾那个能配平到结尾的 JSON 对象。
@@ -137,15 +189,23 @@ func FirstJSONObject(text string) string {
 // 截出来的片段括号不配平,解析必然失败 —— decision 静默丢失,路由条件
 // 恒不成立,直接走默认/循环分支。
 func TrailingJSONObject(text string) string {
-	for start := strings.LastIndex(text, "{"); start >= 0; {
-		if js, ok := BalancedJSON(text, start); ok && strings.TrimSpace(text[start+len(js):]) == "" {
-			return js
-		}
-		prev := strings.LastIndex(text[:start], "{")
-		if prev < 0 {
-			return ""
-		}
-		start = prev
+	_, tail := scanJSONObjects(text)
+	if tail[0] < 0 {
+		return ""
 	}
-	return ""
+	return text[tail[0]:tail[1]]
+}
+
+// StructuredJSON 返回文本中的结构化 JSON 对象:优先取**尾部**那个,
+// 尾部没有才回退到第一个。
+//
+// 为什么优先尾部:提示词要求模型把 JSON 放在回复末尾,而模型正文里
+// 常先出现一个 JSON 片段(最典型的是把提示词里的示例原样抄回来)。
+// 取第一个会把那个片段当成决策,于是路由按示例走,而不是按模型的
+// 实际结论走。
+func StructuredJSON(text string) string {
+	if js := TrailingJSONObject(text); js != "" {
+		return js
+	}
+	return FirstJSONObject(text)
 }

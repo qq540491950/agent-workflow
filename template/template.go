@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"agentworkflow/logx"
 )
 
 // Engine 渲染 {{var}} 风格的模板。
@@ -29,24 +31,48 @@ const (
 // 支持 {{task}} {{plan}} {{git_diff}} {{review}} {{test_result}}
 // {{iteration}} 以及 {{variable.xxx}} 形式。
 // 未定义的变量渲染为空串(并在返回值中报告缺失变量名)。
+//
+// 渲染过程不会 panic:模板引擎自己兜底(约定 12 —— 模板渲染是明确的
+// panic 风险路径,不能依赖上层的 recover)。变量里的 Stringer 即使
+// 自身 panic,也只是渲染成占位文本。
 func (e *Engine) Render(tpl string, data map[string]any) (string, []string) {
-	var missing []string
+	out, missing, err := e.RenderErr(tpl, data)
+	if err != nil {
+		// 兜底失败:回退为原始模板(让节点拿到可读的提示而不是空串),
+		// 并留下 WARN 记录(不静默)。
+		logx.Warn("模板渲染失败,已回退为原始模板", "error", err)
+		return tpl, missing
+	}
+	return out, missing
+}
+
+// RenderErr 是带错误返回的渲染入口:渲染期的 panic 被兜底成 error,
+// 而不是向上抛(调用方想知道"渲染失败"时应使用它)。
+func (e *Engine) RenderErr(tpl string, data map[string]any) (out string, missing []string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = tpl
+			missing = nil
+			err = fmt.Errorf("模板渲染 panic: %v", r)
+		}
+	}()
+	var miss []string
 	seen := map[string]bool{}
 
-	out := renderAll(tpl, func(key string) string {
+	out = renderAll(tpl, func(key string) string {
 		v, ok := lookup(key, data)
 		if !ok {
 			if !seen[key] {
 				seen[key] = true
-				missing = append(missing, key)
+				miss = append(miss, key)
 			}
 			return ""
 		}
 		return toString(v)
 	})
 
-	sort.Strings(missing)
-	return out, missing
+	sort.Strings(miss)
+	return out, miss, nil
 }
 
 // MustRender 渲染并忽略缺失变量(用于日志等非关键场景)。
@@ -58,12 +84,18 @@ func (e *Engine) MustRender(tpl string, data map[string]any) string {
 // lookup 按 key 查找变量,支持 variable.xxx 前缀与直接变量名。
 func lookup(key string, data map[string]any) (any, bool) {
 	if strings.HasPrefix(key, "variable.") {
-		vars, ok := data["variables"].(map[string]any)
-		if !ok {
-			return nil, false
+		name := strings.TrimPrefix(key, "variable.")
+		if vars, ok := data["variables"].(map[string]any); ok {
+			v, ok := vars[name]
+			return v, ok
 		}
-		v, ok := vars[strings.TrimPrefix(key, "variable.")]
-		return v, ok
+		// 变量表也可能是 map[string]string(不同来源的变量表形态不同),
+		// 否则这个变量会被静默当成"缺失"。
+		if vars, ok := data["variables"].(map[string]string); ok {
+			v, ok := vars[name]
+			return v, ok
+		}
+		return nil, false
 	}
 	// 扁平查找(点路径,如 result.decision)
 	if v, ok := data[key]; ok {
@@ -72,12 +104,20 @@ func lookup(key string, data map[string]any) (any, bool) {
 	parts := strings.Split(key, ".")
 	cur := any(data)
 	for _, p := range parts {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		cur, ok = m[p]
-		if !ok {
+		switch m := cur.(type) {
+		case map[string]any:
+			v, ok := m[p]
+			if !ok {
+				return nil, false
+			}
+			cur = v
+		case map[string]string:
+			v, ok := m[p]
+			if !ok {
+				return nil, false
+			}
+			cur = v
+		default:
 			return nil, false
 		}
 	}
@@ -113,8 +153,20 @@ func toString(v any) string {
 	case string:
 		return t
 	case fmt.Stringer:
-		return t.String()
+		return safeString(t)
 	default:
 		return fmt.Sprint(t)
 	}
+}
+
+// safeString 调用 Stringer 的 String(),并兜住它内部的 panic。
+// 变量来自工作流 DSL/Agent 输出,第三方类型的 String() 崩溃不应该
+// 带崩执行协程(约定 12:不得依赖上层保护)。
+func safeString(s fmt.Stringer) (out string) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = "<unrenderable>"
+		}
+	}()
+	return s.String()
 }

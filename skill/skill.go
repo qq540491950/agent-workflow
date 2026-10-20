@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"agentworkflow/workflow/model"
@@ -18,6 +19,21 @@ type SkillRequest struct {
 	Args     map[string]any
 	Context  map[string]any
 	Executor string // 例如由哪个 agent 执行(pi-agent)
+}
+
+// Skill 状态取值。接口只有这三个,取值必须来自这里 ——
+// 散落的字面量("SUCCESS"/"FAILED"/"WAIT_USER")迟早会大小写不一致,
+// 而判定漏掉一种形态就意味着"该失败/该等待却成功"(约定 14)。
+const (
+	StatusSuccess  = "SUCCESS"
+	StatusFailed   = "FAILED"
+	StatusWaitUser = "WAIT_USER"
+)
+
+// NormalizeStatus 归一化 Skill 返回的状态:去首尾空白 + 转大写。
+// 未知取值原样返回(大写化),由调用方决定如何处理。
+func NormalizeStatus(s string) string {
+	return strings.ToUpper(strings.TrimSpace(s))
 }
 
 // SkillResponse 是 Skill 的结构化结果。

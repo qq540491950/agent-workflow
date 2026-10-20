@@ -1,6 +1,9 @@
 package agent
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // AgentConfig 是每个 Agent 的运行配置:模型、端点、超时与调用级环境变量。
 //
@@ -27,7 +30,11 @@ type AgentConfig struct {
 	Behavior map[string]any `json:"behavior,omitempty"`
 }
 
-// MaskEnv 返回掩码后的环境变量副本(值替换为 ***)。
+// Masked 返回掩码后的配置副本(GET 一律 ***)。
+//
+// Env 的值整体替换为 ***;ExtraArgs 里**凭据形态**的参数值同样要替换 ——
+// 配置项本身就允许放 "--api-key sk-xxx",此前只有 Env 被掩码,
+// 这条路径让凭据原样出现在 API 响应里(约定 8)。
 func (c AgentConfig) Masked() AgentConfig {
 	out := c
 	if c.Env != nil {
@@ -36,7 +43,49 @@ func (c AgentConfig) Masked() AgentConfig {
 			out.Env[k] = MaskedValue
 		}
 	}
+	out.ExtraArgs = MaskExtraArgs(c.ExtraArgs)
 	return out
+}
+
+// MaskExtraArgs 掩码 CLI 参数里的凭据值。
+//
+// 覆盖两种写法:--api-key sk-xxx(值是下一个参数)与
+// --api-key=sk-xxx(值在同一参数内)。判定依据是**参数名**是否指向
+// 凭据,不按值的形态猜测。
+func MaskExtraArgs(args []string) []string {
+	if args == nil {
+		return nil
+	}
+	out := make([]string, len(args))
+	copy(out, args)
+	maskNext := false
+	for i, arg := range out {
+		if maskNext {
+			out[i] = MaskedValue
+			maskNext = false
+			continue
+		}
+		name, _, hasValue := strings.Cut(arg, "=")
+		if !isCredentialArgName(name) {
+			continue
+		}
+		if hasValue {
+			out[i] = name + "=" + MaskedValue
+			continue
+		}
+		// 值在下一个参数里:标记下来(若已是最后一个,无可掩码)
+		maskNext = true
+	}
+	return out
+}
+
+// isCredentialArgName 判断 CLI 参数名是否指向凭据。
+func isCredentialArgName(name string) bool {
+	n := strings.ToLower(strings.TrimLeft(name, "-"))
+	if n == "" {
+		return false
+	}
+	return IsSensitiveEnvName(n)
 }
 
 // MaskedValue 是环境变量值的掩码哨兵:

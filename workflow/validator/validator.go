@@ -4,9 +4,12 @@ package validator
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/expr-lang/expr"
 
+	"agentworkflow/workflow/compiler"
 	"agentworkflow/workflow/model"
 )
 
@@ -174,7 +177,31 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 	return res
 }
 
+// missingConfigByKey 把"必填配置键"映射到校验错误码与提示语。
+//
+// 必填清单本身不在这里 —— 唯一来源是 compiler.NodeConfigSpecFor
+// (见 AGENTS.md 硬性约定 #13)。本表只负责"怎么报":
+// 键名与契约表里的 Required 一一对应,由
+// TestRequiredConfigKeysHaveErrorCodes 锁定(多一个少一个都失败)。
+type missingConfig struct {
+	code    string
+	message string
+}
+
+var missingConfigByKey = map[string]missingConfig{
+	"agent":       {code: "MISSING_AGENT", message: "agent 节点 %q 缺少 agent 配置"},
+	"mode":        {code: "MISSING_MODE", message: "agent 节点 %q 缺少 mode 配置"},
+	"skill":       {code: "MISSING_SKILL", message: "skill 节点 %q 缺少 skill 配置"},
+	"command":     {code: "MISSING_COMMAND", message: "script 节点 %q 缺少 command 配置"},
+	"workflow_id": {code: "MISSING_WORKFLOW_ID", message: "subworkflow 节点 %q 缺少 workflow_id 配置"},
+	"operation":   {code: "INVALID_GIT_OPERATION", message: "git 节点 %q 缺少 operation 配置"},
+}
+
 // validateNodeConfig 按节点类型检查必需配置。
+//
+// 必填配置的唯一来源是 compiler.NodeConfigSpecFor(运行期实际读取哪些键,
+// 契约表就写哪些键);本函数只保留校验器特有的检查:引用是否存在、
+// 取值是否在允许集合内、表达式语法。
 func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver, addErr func(code, node, format string, args ...any)) {
 	str := func(key string) string {
 		if v, ok := n.Config[key]; ok {
@@ -184,47 +211,58 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 		}
 		return ""
 	}
+	// 节点类型必须已注册(与"是否禁用"无关:类型没注册就是没注册)。
+	spec, known := compiler.NodeConfigSpecFor(n.Type)
+	if !known {
+		addErr("UNKNOWN_NODE_TYPE", n.ID, "节点 %q 的类型 %q 未注册", n.ID, string(n.Type))
+		return
+	}
+
+	// 节点级开关:运行期只认布尔(false 才跳过)。非布尔值会被运行期忽略、
+	// 节点照常执行 —— 用户以为禁用了其实没禁用,必须报出来。
+	switch compiler.NodeEnabledStateOf(n.Config) {
+	case compiler.NodeEnabledInvalid:
+		addErr("INVALID_NODE_ENABLED", n.ID, "节点 %q 的 %s 必须是布尔值(true=启用,false=运行期跳过该节点)", n.ID, compiler.NodeEnabledKey)
+		return
+	case compiler.NodeEnabledOff:
+		// 节点被禁用:运行期在类型分发之前就跳过它,一个配置键都不读
+		// (executor.go 的 dispatchNode)→ 不要求任何配置,也不校验引用是否存在。
+		return
+	}
+
+	// 必填配置(唯一来源:compiler.NodeConfigSpecFor)
+	for _, key := range spec.Required {
+		if str(key) != "" {
+			continue
+		}
+		if mc, ok := missingConfigByKey[key]; ok {
+			addErr(mc.code, n.ID, mc.message, n.ID)
+			continue
+		}
+		addErr("MISSING_CONFIG", n.ID, "节点 %q 缺少必填配置 %q", n.ID, key)
+	}
+
 	switch n.Type {
 	case model.NodeTypeAgent:
-		if str("agent") == "" {
-			addErr("MISSING_AGENT", n.ID, "agent 节点 %q 缺少 agent 配置", n.ID)
-		} else if agents != nil && !agents(str("agent")) {
+		if str("agent") != "" && agents != nil && !agents(str("agent")) {
 			addErr("AGENT_NOT_FOUND", n.ID, "节点 %q 引用了不存在的 Agent %q", n.ID, str("agent"))
 		}
-		if str("mode") == "" {
-			addErr("MISSING_MODE", n.ID, "agent 节点 %q 缺少 mode 配置", n.ID)
-		}
 	case model.NodeTypeSkill:
-		if str("skill") == "" {
-			addErr("MISSING_SKILL", n.ID, "skill 节点 %q 缺少 skill 配置", n.ID)
-		} else if skills != nil && !skills(str("skill")) {
+		if str("skill") != "" && skills != nil && !skills(str("skill")) {
 			addErr("SKILL_NOT_FOUND", n.ID, "节点 %q 引用了不存在的 Skill %q", n.ID, str("skill"))
 		}
 	case model.NodeTypeCondition:
-		if str("expression") == "" {
-			addErr("MISSING_EXPRESSION", n.ID, "condition 节点 %q 缺少 expression 配置", n.ID)
-		} else {
-			checkExpression(str("expression"), addErr, n.ID)
-		}
-	case model.NodeTypeScript:
-		if str("command") == "" {
-			addErr("MISSING_COMMAND", n.ID, "script 节点 %q 缺少 command 配置", n.ID)
+		// expression 运行期与编译器都不读(路由条件在**边上**),
+		// 所以不是必填项;但仍然做语法检查,拼错了要报错。
+		if expr := str("expression"); expr != "" {
+			checkExpression(expr, addErr, n.ID)
 		}
 	case model.NodeTypeGit:
-		op := str("operation")
-		switch op {
-		case "status", "diff", "log", "branch", "checkout", "commit":
-		default:
-			addErr("INVALID_GIT_OPERATION", n.ID, "git 节点 %q 的 operation %q 非法(允许: status|diff|log|branch|checkout|commit)", n.ID, op)
+		// operation 的必填已由上面的通用循环报出;这里只查取值合法性
+		// (允许集合与运行期 runGitNode 的 switch 同源)。
+		if op := str("operation"); op != "" && !slices.Contains(compiler.GitOperations(), op) {
+			addErr("INVALID_GIT_OPERATION", n.ID, "git 节点 %q 的 operation %q 非法(允许: %s)", n.ID, op, strings.Join(compiler.GitOperations(), "|"))
 		}
-	case model.NodeTypeSubWorkflow:
-		if str("workflow_id") == "" {
-			addErr("MISSING_WORKFLOW_ID", n.ID, "subworkflow 节点 %q 缺少 workflow_id 配置", n.ID)
-		}
-	case model.NodeTypeHuman, model.NodeTypeParallel, model.NodeTypeMerge:
-		// 无必填配置
-	default:
-		addErr("UNKNOWN_NODE_TYPE", n.ID, "节点 %q 的类型 %q 未注册", n.ID, string(n.Type))
 	}
 }
 
@@ -236,26 +274,17 @@ func checkExpression(expression string, addErr func(code, node, format string, a
 	}
 }
 
-// expressionEnv 描述条件表达式可引用的变量。
+// newExpressionEnv 构造与运行期同源的校验环境。
 //
-// 必须与运行期 compiler.EvalCondition 的 env 保持一致(同源的 map
-// 形状):此前校验期用 struct env,只有 decision/status/output/iteration
-// 四个字段,`variables.env == "prod"` 会被判成 unknown name 而拒绝保存,
-// 但同样表达式在运行期完全合法 —— 校验器比运行时更严,导致用户无法
-// 使用运行期已支持的变量,两侧语义必须同源(见 AGENTS.md 硬性约定 #13)。
-type expressionEnv map[string]any
-
-// newExpressionEnv 构造与 compiler.EvalCondition 一致的校验环境。
-func newExpressionEnv() expressionEnv {
-	return expressionEnv{
-		"decision":  "",
-		"status":    "",
-		"output":    "",
-		"iteration": 0,
-		// variables 为任意键值 map:expr 在 map 形状的 env 下不做键穷举,
-		// 与运行期一致(运行期变量来自执行请求 + DSL variables 段)。
-		"variables": map[string]any{},
-	}
+// 唯一来源是 compiler.NewConditionEnv(与 compiler.EvalCondition 共用同一份
+// 变量定义)—— 校验期与运行期必须同源,见 AGENTS.md 硬性约定 #13。
+//
+// 此前校验器用 struct env,只有 decision/status/output/iteration 四个字段,
+// `variables.env == "prod"` 会被判成 unknown name 而拒绝保存,但同样表达式
+// 在运行期完全合法 —— 校验器比运行时更严,导致用户无法使用运行期已支持的
+// 变量。现在两侧共用同一份定义,不会再漂移。
+func newExpressionEnv() map[string]any {
+	return compiler.NewConditionEnv(nil)
 }
 
 // markReachable BFS 标记从 starts 可达的节点。

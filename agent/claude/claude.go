@@ -38,6 +38,11 @@ type Config struct {
 	AgentEnv map[string]string
 	// Permissions 由 Permission Manager 提供(可选,用于校验)。
 	Perms *permission.Manager
+	// WaitDelaySeconds 是子进程退出后等待 stdout/stderr 管道关闭的上限
+	// (秒)。管道被孤儿子进程持有时,Wait 在这个上限后返回
+	// exec.ErrWaitDelay —— 此时进程已成功退出、输出完整,必须判成功。
+	// 0 = 默认 5 秒。
+	WaitDelaySeconds int
 }
 
 // Agent 是 ClaudeCodeAgent 实现。
@@ -52,6 +57,9 @@ func New(cfg Config) *Agent {
 	}
 	if cfg.DefaultTimeoutSeconds <= 0 {
 		cfg.DefaultTimeoutSeconds = 600
+	}
+	if cfg.WaitDelaySeconds <= 0 {
+		cfg.WaitDelaySeconds = 5
 	}
 	return &Agent{cfg: cfg}
 }
@@ -80,8 +88,30 @@ func (a *Agent) Name() string { return "Claude Code" }
 
 // claudeOutput 是 claude --output-format json 的结构。
 type claudeOutput struct {
-	Result  string `json:"result"`
-	IsError bool   `json:"is_error"`
+	Result  string   `json:"result"`
+	IsError jsonBool `json:"is_error"`
+}
+
+// jsonBool 兼容 CLI 把 is_error 写成布尔 / 字符串 / 数字的几种形态。
+//
+// 形态无法识别时按"是错误"处理(fail closed):把一个看不懂的错误标志
+// 当成成功,正是约定 14 说的"该失败却成功"。
+// 识别失败**不能**让整个信封解析失败 —— 信封里还有 result 等关键字段,
+// 整段丢弃会把"额度耗尽"当成正常输出返回。
+type jsonBool bool
+
+// UnmarshalJSON 实现 json.Unmarshaler。
+func (b *jsonBool) UnmarshalJSON(data []byte) error {
+	s := strings.ToLower(strings.Trim(strings.TrimSpace(string(data)), `"`))
+	switch s {
+	case "true", "1":
+		*b = true
+	case "false", "0", "null", "":
+		*b = false
+	default:
+		*b = true // 形态未知 → 保守当作错误
+	}
+	return nil
 }
 
 // Execute 实现 agent.Agent:调用 claude CLI(非交互、JSON 输出)。
@@ -113,7 +143,7 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	// 取消/超时击杀整个进程组;WaitDelay 兜底关闭遗留管道,
 	// 保证孤儿进程不会让调用方阻塞在 Output() 上。
 	coreagent.ConfigureProcess(cmd)
-	cmd.WaitDelay = 5 * time.Second
+	cmd.WaitDelay = time.Duration(a.cfg.WaitDelaySeconds) * time.Second
 	if req.WorkingDir != "" {
 		cmd.Dir = req.WorkingDir
 	}
@@ -130,13 +160,16 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	stdout := coreagent.NewBoundedBuffer(0)
 	cmd.Stdout = stdout
 	runErr := cmd.Run()
-	out := []byte(stdout.String())
 	if stdout.Truncated() {
 		logx.Warn("claude 输出超出上限,已截断", "limit", coreagent.MaxOutputBytes)
 	}
+	// 凭据脱敏:适配器是唯一知道注入值原貌的地方,CLI 常把环境变量
+	// 原样打进 stderr,错误消息会把 stderr 拼进去 —— 凭据不能跟着走
+	// (约定 8)。父进程环境里的凭据同样算(子进程继承了它们)。
+	redactor := coreagent.NewRedactor(a.cfg.AgentEnv, req.Environment, coreagent.ParentEnv())
 	if errors.Is(runErr, exec.ErrWaitDelay) {
 		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
-		return a.parseOutput(out)
+		return a.responseFor(stdout, redactor)
 	}
 	if runErr != nil {
 		if cctx.Err() == context.DeadlineExceeded {
@@ -147,10 +180,29 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 			return nil, model.NewError(model.KindCancelledError, "CLAUDE_CANCELLED", "执行被取消")
 		}
 		return nil, model.NewError(model.KindProcessError, "CLAUDE_PROCESS_ERROR",
-			fmt.Sprintf("claude 启动/执行失败: %v; stderr: %s", runErr, truncate(stderr.String(), 2000)))
+			fmt.Sprintf("claude 启动/执行失败: %v; stderr: %s", runErr,
+				redactor.Text(truncate(stderr.String(), 2000))))
 	}
 
-	return a.parseOutput(out)
+	return a.responseFor(stdout, redactor)
+}
+
+// responseFor 把子进程输出转成 Agent 响应。
+//
+// 输出被截断时结构化结果不可信(尾部 JSON 必然不完整),必须**显式失败**
+// 并说明原因 —— 返回 SUCCESS + 空决策会让路由静默走默认分支,
+// 正是约定 14 说的"该失败却成功"。
+func (a *Agent) responseFor(stdout *coreagent.BoundedBuffer, redactor *coreagent.Redactor) (*coreagent.AgentResponse, error) {
+	if stdout.Truncated() {
+		return &coreagent.AgentResponse{
+			Status: coreagent.StatusFailed,
+			Error: fmt.Sprintf("claude 输出超出 %d 字节上限被截断,结构化结果不可信",
+				coreagent.MaxOutputBytes),
+			Output: stdout.String(), // 带显式截断标记,便于定位
+		}, nil
+	}
+	resp, err := a.parseOutput(stdout.Bytes())
+	return redactor.RedactResponse(resp), err
 }
 
 // parseOutput 解析 claude CLI 的 JSON 输出为结构化 AgentResponse。
@@ -164,9 +216,13 @@ func (a *Agent) parseOutput(out []byte) (*coreagent.AgentResponse, error) {
 		}, nil
 	}
 	if co.IsError {
+		msg := co.Result
+		if msg == "" {
+			msg = "claude 返回 is_error=true 但没有错误详情"
+		}
 		return &coreagent.AgentResponse{
 			Status: coreagent.StatusFailed,
-			Error:  co.Result,
+			Error:  msg,
 			Output: co.Result,
 		}, nil
 	}
@@ -174,15 +230,18 @@ func (a *Agent) parseOutput(out []byte) (*coreagent.AgentResponse, error) {
 		Status: coreagent.StatusSuccess,
 		Output: co.Result,
 	}
-	// 结构化决策:要求模型按约定返回 JSON(见 buildPrompt 的指令),
+	// 结构化决策:要求模型按约定返回 JSON(见 buildPrompt 的指令)。
 	// 解析失败不猜测,decision 留空由路由按 output 处理。
 	var structured struct {
 		Decision string `json:"decision"`
 		Summary  string `json:"summary"`
 	}
-	if err := json.Unmarshal([]byte(extractJSON(co.Result)), &structured); err == nil && structured.Decision != "" {
-		resp.Decision = coreagent.AgentDecision(strings.ToUpper(structured.Decision))
-		resp.Summary = structured.Summary
+	if err := json.Unmarshal([]byte(extractJSON(co.Result)), &structured); err == nil {
+		if structured.Summary != "" {
+			resp.Summary = structured.Summary
+		}
+		// 决策取值必须合法才进路由(非法取值留痕但不路由)。
+		coreagent.ApplyDecision(resp, structured.Decision)
 	}
 	return resp, nil
 }
@@ -210,11 +269,15 @@ Respond with JSON at the end of your reply:
 	return b.String()
 }
 
-// extractJSON 从文本中提取第一个能配平的 JSON 对象。
-// 改用 coreagent.FirstJSONObject:旧实现不跳过字符串字面量内的括号,
-// 遇到 {"summary":"格式 {x}"} 这类内容会算错深度。
+// extractJSON 从文本中提取结构化 JSON 对象。
+// 优先取**尾部**那个(提示词要求模型把 JSON 放在回复末尾),
+// 尾部没有才回退到第一个。
+//
+// 为什么不能只取第一个:模型正文里常先出现一个 JSON 片段 —— 最典型的
+// 是把提示词里的示例原样抄回来。取第一个会把示例当成决策,
+// 路由按示例走而不是按模型的实际结论走。
 func extractJSON(s string) string {
-	if js := coreagent.FirstJSONObject(s); js != "" {
+	if js := coreagent.StructuredJSON(s); js != "" {
 		return js
 	}
 	return s

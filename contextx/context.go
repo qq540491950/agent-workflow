@@ -5,6 +5,8 @@ package contextx
 
 import (
 	"fmt"
+	"sync"
+	"unicode/utf8"
 
 	"agentworkflow/workflow/model"
 )
@@ -20,13 +22,32 @@ type ExecutionContext struct {
 
 // Manager 根据节点职责构造最小化上下文。
 type Manager struct {
+	// mu 保护 MaxDiffChars(运行期可调,跨 goroutine 读)。
+	mu sync.RWMutex
 	// MaxDiffChars 限制注入 Prompt 的 Git Diff 长度,防止上下文爆炸。
+	//
+	// 构造期字段:启动后不再修改。运行期如需修改请用 SetMaxDiffChars
+	// (带锁);直接写字段与并发 Build 存在数据竞争(约定 15)。
 	MaxDiffChars int
 }
 
 // NewManager 创建 Context Manager(默认 diff 上限 8000 字符)。
 func NewManager() *Manager {
 	return &Manager{MaxDiffChars: 8000}
+}
+
+// maxDiffChars 读取 diff 上限(并发安全)。
+func (m *Manager) maxDiffChars() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.MaxDiffChars
+}
+
+// SetMaxDiffChars 更新 diff 上限(并发安全)。
+func (m *Manager) SetMaxDiffChars(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.MaxDiffChars = n
 }
 
 // Build 为指定节点模式构造模板渲染变量。state 是 ADK session state 的
@@ -43,7 +64,7 @@ func (m *Manager) Build(mode string, ec *ExecutionContext, nodeID string) map[st
 		"review":       state["review"],
 		"test_result":  state["test_result"],
 		"iteration":    state["iteration"],
-		"variables":    ec.Variables,
+		"variables":    copyVariables(ec.Variables),
 		"node_id":      nodeID,
 		"workflow_id":  ec.WorkflowID,
 		"execution_id": ec.ExecutionID,
@@ -99,9 +120,30 @@ func str(v any) string {
 	return ""
 }
 
+// truncate 按上限截断 diff。
+// 截断点回退到 UTF-8 字符边界:按字节切会把一个中文字切成两半,
+// Prompt 里出现乱码字符。
 func (m *Manager) truncate(s string) string {
-	if m.MaxDiffChars <= 0 || len(s) <= m.MaxDiffChars {
+	limit := m.maxDiffChars()
+	if limit <= 0 || len(s) <= limit {
 		return s
 	}
-	return s[:m.MaxDiffChars] + fmt.Sprintf("\n... (diff 截断,共 %d 字符)", len(s))
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + fmt.Sprintf("\n... (diff 截断,共 %d 字符)", utf8.RuneCountInString(s))
+}
+
+// copyVariables 浅拷贝变量表:返回的 map 与执行的变量表解耦,
+// 调用方误改返回值不会污染执行状态(约定 15:共享可变状态)。
+func copyVariables(vars map[string]any) map[string]any {
+	if vars == nil {
+		return nil
+	}
+	out := make(map[string]any, len(vars))
+	for k, v := range vars {
+		out[k] = v
+	}
+	return out
 }

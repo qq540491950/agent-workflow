@@ -52,11 +52,19 @@ func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *mo
 	outcome := e.dispatchNode(ctx, env, node, st)
 
 	en.State = outcome.State
-	en.Output = truncate(outcome.Output, 20000)
-	en.Error = outcome.Error
+	// 落库前脱敏(约定 #8):节点 output/error 直接来自 Agent 的
+	// stdout/stderr,而 stderr 常带 "ANTHROPIC_API_KEY=sk-..." 这类凭据。
+	// 此前只修了 API 读出口,DB 里仍是明文 —— 审计文件/备份 DB 依然
+	// 泄漏。脱敏只作用于**落库的副本**:返回给编译器的 outcome 原样
+	// 保留(下游节点可能引用 output 原文,决策路由也读它)。
+	//
+	// 注意:artifact(git diff)不在此处脱敏 —— diff 产物要保持可读,
+	// 它由 SaveArtifact 单独落库(见 runGitNode)。
+	en.Output = truncate(logx.Mask(outcome.Output), 20000)
+	en.Error = logx.Mask(outcome.Error)
 	en.FinishedAt = time.Now().Format(time.RFC3339Nano)
 	en.DurationMS = time.Since(started).Milliseconds()
-	if raw, err := json.Marshal(outcome); err == nil {
+	if raw, err := json.Marshal(maskedOutcome(outcome)); err == nil {
 		en.ResultJSON = string(raw)
 	}
 	if err := e.Repo.SaveExecutionNode(en); err != nil {
@@ -65,13 +73,32 @@ func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *mo
 	return outcome
 }
 
+// maskedOutcome 返回用于**落库**的 outcome 副本(自由文本已脱敏)。
+//
+// 只改副本:执行语义读的是原 outcome(决策走结构化字段,下游节点可能
+// 引用 output 原文),脱敏只影响展示与审计。
+func maskedOutcome(out compiler.NodeOutcome) compiler.NodeOutcome {
+	out.Summary = logx.Mask(out.Summary)
+	out.Output = logx.Mask(out.Output)
+	out.Error = logx.Mask(out.Error)
+	if out.Data != nil {
+		if m, ok := logx.MaskValue(out.Data).(map[string]any); ok {
+			out.Data = m
+		}
+	}
+	return out
+}
+
 // dispatchNode 按节点类型分发。
 func (e *Engine) dispatchNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
-	// 节点级禁用:config.enabled = false → 置为 SKIPPED,路由直通
-	if enabled, ok := node.Config["enabled"]; ok {
-		if b, ok := enabled.(bool); ok && !b {
-			return compiler.NodeOutcome{State: model.NodeSkipped, Summary: "节点已禁用"}
-		}
+	// 节点级开关:config.enabled = false → 置为 SKIPPED,路由直通。
+	// 取值非法时按配置错误失败(fail closed),不静默按"启用"执行。
+	enabled, err := nodeEnabled(node)
+	if err != nil {
+		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
+	}
+	if !enabled {
+		return compiler.NodeOutcome{State: model.NodeSkipped, Summary: "节点已禁用"}
 	}
 	switch node.Type {
 	case model.NodeTypeAgent:
@@ -174,6 +201,39 @@ func answeredOutcome(st compiler.StateAccess, nodeID string) (compiler.NodeOutco
 	return out, true
 }
 
+// nodeEnabled 读取节点级开关 config.enabled。
+//
+// 语义来源唯一:compiler.NodeEnabledStateOf(约定 #13 校验期与运行期同源 ——
+// validator/validator.go 用的是同一个函数,两边不会各写一份解析)。
+//   - 缺省 / true → 执行
+//   - false        → 节点被跳过(SKIPPED),路由直通
+//   - 非布尔       → 配置错误,节点失败(fail closed)
+//
+// 为什么非布尔要失败而不是"当作启用":静默按启用处理会让用户以为
+// 节点已关掉,实际却执行了副作用(写文件/跑测试/提交代码)。
+// 校验期已经会拦下这种写法(INVALID_NODE_ENABLED),这里是纵深防御:
+// 恢复/重试路径用的是历史快照,未必经过当次校验。
+//
+// 另:这里显式按字面量读一次 enabled —— workflow/compiler 的契约探针
+// (nodeconfig_contract_test.go)用 AST 扫描运行期源码,按字面量下标
+// 识别"运行期读了哪些配置键",写成 compiler.NodeEnabledStateOf(node.Config)
+// 会被判定为"运行期没读 enabled"。
+func nodeEnabled(node *model.Node) (bool, error) {
+	if node == nil {
+		return true, nil
+	}
+	raw := node.Config["enabled"]
+	switch compiler.NodeEnabledStateOf(node.Config) {
+	case compiler.NodeEnabledDefault, compiler.NodeEnabledOn:
+		return true, nil
+	case compiler.NodeEnabledOff:
+		return false, nil
+	default: // compiler.NodeEnabledInvalid
+		return false, fmt.Errorf("节点 %s 的 %s 取值非法: %v(必须是布尔值 true/false)",
+			node.ID, compiler.NodeEnabledKey, raw)
+	}
+}
+
 // cfgStr / cfgInt 读取节点配置的辅助函数。
 func cfgStr(node *model.Node, key string) string {
 	if v, ok := node.Config[key]; ok {
@@ -184,13 +244,41 @@ func cfgStr(node *model.Node, key string) string {
 	return ""
 }
 
+// cfgInt 读取整数型节点配置。
+//
+// 数值类型随来源而变:YAML 整数是 int/uint64、JSON 整数是 float64、
+// 经 SQLite state_json 往返后是 float64(约定 #2)。只认其中一种会让
+// 另一个来源的取值静默变成 0(timeout_seconds 静默失效是最典型后果)。
+// 这里把常见整型一次认全。
 func cfgInt(node *model.Node, key string) int {
 	if v, ok := node.Config[key]; ok {
-		if f, ok := v.(float64); ok {
-			return int(f)
-		}
-		if i, ok := v.(int); ok {
-			return i
+		return toInt(v)
+	}
+	return 0
+}
+
+// toInt 把任意数值形态转成 int;无法判定时返回 0。
+func toInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int32:
+		return int(n)
+	case int64:
+		return int(n)
+	case uint:
+		return int(n)
+	case uint32:
+		return int(n)
+	case uint64:
+		return int(n)
+	case float64:
+		return int(n)
+	case float32:
+		return int(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i)
 		}
 	}
 	return 0
@@ -384,12 +472,7 @@ func retryPolicyOf(node *model.Node) (maxAttempts int, backoff string) {
 		return
 	}
 	if v, ok := raw["max_attempts"]; ok {
-		switch n := v.(type) {
-		case float64:
-			maxAttempts = int(n)
-		case int:
-			maxAttempts = n
-		}
+		maxAttempts = toInt(v)
 	}
 	if v, ok := raw["backoff"].(string); ok && v != "" {
 		backoff = v
@@ -810,7 +893,9 @@ func attemptKey(nodeID string) string {
 }
 
 // nextAttempt 计算本次执行的 attempt 序号(循环/重试重复执行时递增)。
-// 状态经 SQLite state_json 持久化往返后 int 会变成 float64,两种都要认。
+// 状态经 SQLite state_json 持久化往返后 int 会变成 float64,
+// YAML 来源的整数是 uint64 —— 都要认,否则 attempt 恒为 1,
+// 循环/重试历史在明细表里互相覆盖。
 func nextAttempt(st compiler.StateAccess, nodeID string) int {
 	prev, ok := st.Get(attemptKey(nodeID))
 	if !ok {
@@ -820,6 +905,12 @@ func nextAttempt(st compiler.StateAccess, nodeID string) int {
 	case int:
 		return n + 1
 	case float64:
+		return int(n) + 1
+	case int64:
+		return int(n) + 1
+	case uint64:
+		return int(n) + 1
+	case uint:
 		return int(n) + 1
 	default:
 		return 1
