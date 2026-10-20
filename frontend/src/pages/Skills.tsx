@@ -16,11 +16,34 @@ import {
 
 export default function Skills() {
   const [skills, setSkills] = useState<SkillDTO[]>([]);
+  // 启用开关的 in-flight 锁:此前开关无锁,连点会并发打多次
+  // /api/skills/{id}/enable —— 后到的一次覆盖先到的一次,最终状态
+  // 取决于请求到达顺序,而界面显示的是刷新回来的值,用户看到的开关
+  // 可能与后端实际生效的不一致(与 Agents 页权限开关同类问题,
+  // 那里已加同款锁)。
+  const [pendingSkill, setPendingSkill] = useState<string | null>(null);
 
   const refresh = () => api.listSkills().then((x) => setSkills(asArray<SkillDTO>(x))).catch((e) => toast.error(e.message));
   useEffect(() => {
     refresh();
   }, []);
+
+  const toggle = async (s: SkillDTO, v: boolean) => {
+    if (pendingSkill === s.id) return; // 同一行 in-flight 加锁
+    setPendingSkill(s.id);
+    // 乐观更新,失败回滚:开关状态由列表驱动,不等刷新才动会让人以为没点上
+    setSkills((list) => list.map((x) => (x.id === s.id ? { ...x, enabled: v } : x)));
+    try {
+      await api.setSkillEnabled(s.id, v);
+    } catch (e) {
+      setSkills((list) => list.map((x) => (x.id === s.id ? { ...x, enabled: !v } : x)));
+      toast.error((e as Error).message);
+      return;
+    } finally {
+      setPendingSkill(null);
+    }
+    refresh();
+  };
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -56,14 +79,8 @@ export default function Skills() {
                 <TableCell>
                   <Switch
                     checked={s.enabled}
-                    onCheckedChange={async (v) => {
-                      try {
-                        await api.setSkillEnabled(s.id, v);
-                      } catch (e) {
-                        toast.error((e as Error).message);
-                      }
-                      refresh();
-                    }}
+                    disabled={pendingSkill === s.id}
+                    onCheckedChange={(v) => toggle(s, v)}
                   />
                 </TableCell>
                 <TableCell className="text-right">

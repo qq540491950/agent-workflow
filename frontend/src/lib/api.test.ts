@@ -11,6 +11,7 @@ vi.mock("@wailsio/runtime", () => ({
 const wfList = vi.fn();
 const exAllEvents = vi.fn();
 const stExportBackup = vi.fn();
+const stRestoreBackup = vi.fn();
 vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () => ({
   List: (...a: unknown[]) => wfList(...a),
 }));
@@ -89,7 +90,10 @@ vi.mock("@bindings/agentworkflow/app/application/settingsservice.js", () =>
       "ExportBackup",
       "RestoreBackup",
     ],
-    { ExportBackup: (...a: unknown[]) => stExportBackup(...a) },
+    {
+      ExportBackup: (...a: unknown[]) => stExportBackup(...a),
+      RestoreBackup: (...a: unknown[]) => stRestoreBackup(...a),
+    },
   ),
 );
 
@@ -104,6 +108,7 @@ beforeEach(() => {
   wfList.mockReset();
   exAllEvents.mockReset();
   stExportBackup.mockReset();
+  stRestoreBackup.mockReset();
   vi.unstubAllGlobals();
 });
 
@@ -421,6 +426,235 @@ describe("ApiError 保留后端 code/kind/status", () => {
     const err = await api.getWorkflow("x").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect((err as InstanceType<typeof ApiError>).status).toBe(500);
+  });
+});
+
+// ---- 迭代 11:后端错误体契约(错误体必带 code/kind + 新增 code + 向后兼容) ----
+//
+// 下面的响应体逐字取自真实 server 的返回(go run . --server 后 curl 实测):
+//   400 {"code":"INVALID_JSON","error":"ValidationError(INVALID_JSON): 请求体不是合法 JSON: ...","kind":"ValidationError"}
+//   413 {"code":"PAYLOAD_TOO_LARGE","error":"ValidationError(PAYLOAD_TOO_LARGE): 请求体超过 1 MB 上限","kind":"ValidationError"}
+//   405 {"code":"METHOD_NOT_ALLOWED","error":"HTTP 方法不被允许","kind":"ValidationError"}
+//   404 {"code":"NOT_FOUND","error":"接口不存在","kind":"ValidationError"}
+describe("后端错误体契约", () => {
+  function stubError(status: number, body: unknown) {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status,
+        text: async () => JSON.stringify(body),
+      }),
+    );
+  }
+
+  it("结构化错误体:code/kind 落到 ApiError,Kind(CODE) 前缀被剥掉", async () => {
+    stubError(400, {
+      code: "INVALID_JSON",
+      error: "ValidationError(INVALID_JSON): 请求体不是合法 JSON: invalid character 'b'",
+      kind: "ValidationError",
+    });
+    const { api, ApiError } = await freshApi();
+    const err = await api.getWorkflow("x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const e = err as InstanceType<typeof ApiError>;
+    expect(e.code).toBe("INVALID_JSON");
+    expect(e.kind).toBe("ValidationError");
+    expect(e.status).toBe(400);
+    // 前缀剥掉:用户看到人话,而不是 "ValidationError(INVALID_JSON): ..."
+    expect(e.message).toBe("请求体不是合法 JSON: invalid character 'b'");
+  });
+
+  it("413 PAYLOAD_TOO_LARGE 给出可读提示(不是裸 HTTP 413)", async () => {
+    stubError(413, {
+      code: "PAYLOAD_TOO_LARGE",
+      error: "ValidationError(PAYLOAD_TOO_LARGE): 请求体超过 1 MB 上限",
+      kind: "ValidationError",
+    });
+    const { api } = await freshApi();
+    const err = (await api.getWorkflow("x").catch((e: unknown) => e)) as {
+      message: string;
+      code?: string;
+    };
+    expect(err.code).toBe("PAYLOAD_TOO_LARGE");
+    expect(err.message).toContain("超过 1 MB 上限");
+    expect(err.message).not.toContain("ValidationError(");
+  });
+
+  it("错误体只有 code 没有 error 时按 code 给中文提示", async () => {
+    stubError(413, { code: "PAYLOAD_TOO_LARGE", kind: "ValidationError" });
+    const { api } = await freshApi();
+    const err = (await api.getWorkflow("x").catch((e: unknown) => e)) as {
+      message: string;
+      code?: string;
+    };
+    expect(err.code).toBe("PAYLOAD_TOO_LARGE");
+    expect(err.message).toContain("内容过大");
+    expect(err.message).toContain("413");
+  });
+
+  it("未知 code 不落到 Object 原型链上(不会把函数当提示文案)", async () => {
+    stubError(400, { code: "constructor", kind: "ValidationError" });
+    const { api } = await freshApi();
+    const err = (await api.getWorkflow("x").catch((e: unknown) => e)) as {
+      message: string;
+    };
+    expect(err.message).toBe("HTTP 400: 请求参数不合法");
+    expect(err.message).not.toContain("function");
+  });
+
+  it("405 METHOD_NOT_ALLOWED 给出可读提示", async () => {
+    stubError(405, {
+      code: "METHOD_NOT_ALLOWED",
+      error: "HTTP 方法不被允许",
+      kind: "ValidationError",
+    });
+    const { api } = await freshApi();
+    const err = (await api.getWorkflow("x").catch((e: unknown) => e)) as {
+      message: string;
+      code?: string;
+    };
+    expect(err.code).toBe("METHOD_NOT_ALLOWED");
+    expect(err.message).toContain("方法不被允许");
+  });
+
+  it("INVALID_LOG_LEVEL(后端新增码)给出可读提示", async () => {
+    stubError(400, {
+      code: "INVALID_LOG_LEVEL",
+      error: 'ValidationError(INVALID_LOG_LEVEL): 日志级别非法: "trace"(可选 debug|info|warn|error)',
+      kind: "ValidationError",
+    });
+    const { api } = await freshApi();
+    const err = (await api.updateSettings({ log_level: "trace" }).catch((e: unknown) => e)) as {
+      message: string;
+      code?: string;
+    };
+    expect(err.code).toBe("INVALID_LOG_LEVEL");
+    expect(err.message).toContain("日志级别非法");
+    expect(err.message).not.toContain("ValidationError(");
+  });
+
+  it("404 未知路由的错误体照样解析出 code", async () => {
+    stubError(404, {
+      code: "NOT_FOUND",
+      error: "接口不存在",
+      kind: "ValidationError",
+    });
+    const { api } = await freshApi();
+    const err = (await api.listWorkflows().catch((e: unknown) => e)) as {
+      message: string;
+      code?: string;
+      status: number;
+    };
+    expect(err.code).toBe("NOT_FOUND");
+    expect(err.status).toBe(404);
+    expect(err.message).toBe("接口不存在");
+  });
+
+  it("向后兼容:错误体只有 error 没有 code 时不抛未捕获异常", async () => {
+    stubError(400, { error: "参数不合法" });
+    const { api, ApiError } = await freshApi();
+    const err = await api.getWorkflow("x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const e = err as InstanceType<typeof ApiError>;
+    expect(e.code).toBeUndefined();
+    expect(e.kind).toBeUndefined();
+    expect(e.status).toBe(400);
+    expect(e.message).toBe("参数不合法");
+  });
+
+  it("向后兼容:错误体是 HTML 兜底页时不崩(回落状态码消息)", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: async () => "<html>fallback</html>",
+      }),
+    );
+    const { api } = await freshApi();
+    await expect(api.getWorkflow("x")).rejects.toThrow("HTTP 500");
+  });
+
+  it("文本端点(DSL 导出)同样剥前缀并保留 code/kind", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: async () =>
+          JSON.stringify({
+            code: "NOT_FOUND",
+            error: "ValidationError(NOT_FOUND): 工作流版本 \"wf1/9\" 不存在",
+            kind: "ValidationError",
+          }),
+      }),
+    );
+    const { api } = await freshApi();
+    const err = (await api.versionDSL("wf1", 9).catch((e: unknown) => e)) as {
+      message: string;
+      code?: string;
+      kind?: string;
+    };
+    expect(err.code).toBe("NOT_FOUND");
+    expect(err.kind).toBe("ValidationError");
+    expect(err.message).toBe('工作流版本 "wf1/9" 不存在');
+  });
+});
+
+// ---- 迭代 11:restoreBackup 返回形状(新增 agent_configs_unknown_ids) ----
+describe("restoreBackup 返回形状", () => {
+  const payload = {
+    workflows_restored: 1,
+    workflows_skipped: 0,
+    workflows_invalid: 0,
+    agent_configs_restored: 1,
+    // 语义已扩大:结构非法 **或** 本机无此 Agent
+    agent_configs_invalid: 2,
+    agent_configs_unknown_ids: ["ghost-agent"],
+  };
+
+  it("浏览器分支透传新字段", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify(payload) }),
+    );
+    const { api } = await freshApi();
+    const r = await api.restoreBackup({});
+    expect(r.agent_configs_unknown_ids).toEqual(["ghost-agent"]);
+    expect(r.agent_configs_invalid).toBe(2);
+    expect(fetch).toHaveBeenCalledWith("/api/backup/restore", expect.anything());
+  });
+
+  it("桌面分支返回同样的形状(含新字段)", async () => {
+    callByID.mockResolvedValue([]); // desktop
+    stRestoreBackup.mockResolvedValue(payload);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    const r = await api.restoreBackup({});
+    expect(r.agent_configs_unknown_ids).toEqual(["ghost-agent"]);
+    expect(r.agent_configs_invalid).toBe(2);
+    expect(stRestoreBackup).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("后端未返回新字段时也不报错(可选字段)", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => JSON.stringify({ ...payload, agent_configs_unknown_ids: undefined }),
+      }),
+    );
+    const { api } = await freshApi();
+    const r = await api.restoreBackup({});
+    expect(r.agent_configs_unknown_ids).toBeUndefined();
   });
 });
 

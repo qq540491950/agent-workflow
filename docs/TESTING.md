@@ -1011,10 +1011,143 @@ stderr 线索。
 验证过(见上表),桌面模式复用同一套 React 组件,渲染路径相同。
 `osascript` 读窗口几何同样需要给 osascript 自身授权,当前未授。
 
+## 轮次 33-40:两轮并行审计的回归(8 个子代理)
+
+> 本节记录"两轮并行审计"(commit `3f5e68f` + `916a9c4`)的回归用例。
+> 轮次号与 `docs/OPTIMIZATION.md` 第四、五节一一对应:
+> 第一轮 33-36(前端 / DSL+模型 / 持久化+事件 / API+应用层),
+> 第二轮 37-40(运行时 / 编译器+校验器 / 适配层 / 支撑包)。
+>
+> **测试规模变化**:
+>
+> | 维度 | 之前 | 之后 |
+> | --- | --- | --- |
+> | 有测试的 Go 包 | 19 个 | **21 个**(新增 `workflow/model`、根包 `agentworkflow`) |
+> | Go 测试文件 | 41 个 | **66 个** |
+> | 前端测试文件 | 4 个 | **12 个** |
+> | 前端用例 | 46 条 | **89 条** |
+>
+> 前端 12 文件 / 89 用例是**第一轮结束时**的数;第二轮另有并发轮次继续加测
+> (当前工作树已超过这个数),以 `npx vitest run` 的实时输出为准。
+
+### 轮次 33:前端(约定 7 / 8 / 10)
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `frontend/src/test/list-guard.test.ts` | **探针式测试**(见下节):扫描 `src/**` 全部 `.ts/.tsx`,检查列表接口调用点是否过 `asArray` |
+| `frontend/src/pages/Dashboard.test.tsx` | 事件风暴下只触发**一次**全量拉取(此前每条事件一次) |
+| `frontend/src/pages/Executions.test.tsx` | 同上 + 列表渲染不因 `null` 崩 |
+| `frontend/src/pages/WorkflowHistory.test.tsx` | 同上 |
+| `frontend/src/pages/ExecutionMonitor.test.tsx` | 防抖窗口是 **200ms**(此前实测 120ms,违反约定 7) |
+| `frontend/src/pages/EventsAudit.test.tsx` | 实时事件刷新走统一的 `debounce.ts` 单一来源 |
+| `frontend/src/pages/Workflows.test.tsx` | 五处裸 `await` 失败时弹 `toast.error`,不再静默吞错 |
+| `frontend/src/components/layout.test.tsx` | 侧栏列表同样过 `asArray` 防御 |
+| `frontend/src/test/helpers.ts` | 共享测试桩(非用例文件) |
+
+`frontend/src/lib/debounce.ts` 是本轮新增的**单一来源**:
+`REFRESH_DEBOUNCE_MS = 200`,尾沿语义,组件卸载必须 `cancel()`。
+
+### 轮次 34:DSL 与模型层
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/dsl/dsl_test.go`(12 例) | `TestParseJSONKeepsNodeConfig`(**JSON 格式导入后配置不丢**)、`TestJSONAndYAMLProduceSameModel`、`TestNumericConfigNormalizedToInt`(inline 整数不取成 0)、`TestToModelDoesNotMutateDocument`(不改写调用方文档)、`TestAllNodeTypesRoundTrip` |
+| `workflow/model/model_test.go`(9 例) | 各模型 JSON 往返 + `TestNormalizeStateJSON`(含数组内 map 与 NaN/Inf 守卫) |
+| `workflow/model/errors_test.go`(7 例) | `TestAsErrorWrapsPlainError` **断言错误链未被丢弃**(`errors.Is` 能挖到根因) |
+| `workflow/model/intread_test.go`(1 例) | `state_json` 往返后的 int 读取路径(约定 2) |
+
+### 轮次 35:持久化与事件总线
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `persistence/repo_cas_test.go`(12 例) | `TestSaveExecutionDoesNotRevertCastedNegativeTerminal`(CAS 落定的 FAILED/CANCELLED 不被过期整行写改回)、`TestCasExecutionStateSingleWinner`(双击只允许一路成功)、`TestMigrateColumnsSurfacesRealFailure`(迁移 ALTER 失败不再静默)、`TestWrappedErrorKeepsCause`、`TestVariablesKeepIntTypeAfterRoundTrip` |
+| `event/bus_contract_test.go`(4 例) | `TestEmitSurvivesPanickingSubscriber` / `TestEmitKeepsDeliveringAfterPanic`(**坏订阅者不带走发布方**)、`TestBusKeepsNoHistoryByDefault`(约定 9) |
+
+### 轮次 36:API 与应用服务层
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `api/server_test.go`(+14 例) | `TestErrorBodyAlwaysHasCodeAndKind`(**错误体形状唯一**)、`TestMethodNotAllowedAndUnknownRouteReturnJSONError`(405/未知路由不再是纯文本)、`TestJSONBodySizeLimit`(超限 → **413**)、`TestQueryIntOverflowIsClamped`(`?limit=99999999999999999999` 不再返回全表)、`TestSettingsRejectsInvalidLogLevel` |
+| `api/sse_test.go`(4 例) | `TestSSEWriteFailureClosesStream`(**写失败即关流**,不再只记日志)、`TestSSEDisconnectReleasesSubscription`(订阅被释放)、`TestSSESlowClientDoesNotBlockProducer` |
+| `api/assethandler_test.go` | 桌面模式 `/api` 前缀挂载的契约 |
+| `app/application/application_test.go`(22 例) | `SetPermission` 并发不丢更新、Git 工作目录**先落库**、`log_level` 校验、备份恢复的未知 Agent 计入 invalid、节点 output 掩码 |
+| `main_test.go`(9 例) | `TestParseArgsRejectsInvalidLogLevel` / `TestParseArgsRejectsInvalidAddr`(启动参数当场报错)、`TestRunExitCodes`(退出码由 `run()` 返回,defer 一定执行 → SQLite 一定关闭) |
+
+### 轮次 37:运行时(状态写 / 事件落库 / 告警分级)
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/runtime/state_write_test.go`(7 例) | `TestSaveMetaNeverTouchesStateColumn`(**状态列只走 CAS**)、`TestStaleMetaWriteCannotRevertCompletedExecution`、`TestStaleTransitionCannotOverwriteNewerState`、`TestCancelledExecutionNotRevivedByStaleWrite` |
+| `workflow/runtime/event_persist_test.go`(4 例) | `TestEventPersistFailureIsObservable`(落库失败 → 计数 + 日志 + `runtime.error`)、`TestEventPersistFailureDoesNotFailExecution`(不打断执行) |
+| `workflow/runtime/escalate_test.go`(5 例) | `TestNormalLoopExitIsNotWarned`(正常循环退出不再记 WARN)、`TestLoopLimitEscalateIsUnexpected`、`TestNodeFailureEscalateIsUnexpected` |
+| `workflow/runtime/masking_test.go`(3 例) | `TestNodeOutputMaskedBeforePersist` / `TestNodeErrorMaskedBeforePersist`(**落库前脱敏**)、`TestGitDiffArtifactKeepsRawContent`(制品保持原样) |
+| `workflow/runtime/node_config_test.go`(6 例) | `TestRetryPolicyAcceptsUint64` / `TestNextAttemptAcceptsUint64`(int 读取点认全 uint64)、`TestNodeEnabledInvalidValueFailsNode`(非布尔 fail closed)、`TestNodeEnabledSharesContractWithValidator`(与校验期同源) |
+
+### 轮次 38:编译器与校验器(约定 13 收口)
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/compiler/nodeconfig_contract_test.go`(7 例) | **探针式测试**(见下节):AST 扫描运行期源码,比对配置契约 |
+| `workflow/compiler/conditionenv_test.go`(4 例) | `TestConditionEnvKeysAreStable` / `TestConditionEnvStaticAndRuntimeShapesMatch`(校验期与运行期的条件变量集合**形状一致**) |
+| `workflow/validator/nodeconfig_test.go`(9 例) | `TestDisabledNodeSkipsRequiredConfig`(禁用节点不再要求必填)、`TestDisabledNodeSkipsAgentExistence`、`TestNonBoolEnabledRejected`、`TestConditionNodeExpressionNotRequired`(但 `TestConditionNodeExpressionStillSyntaxChecked` 保留语法检查)、`TestDisabledNodeStillReportsUnknownType` |
+
+### 轮次 39:Agent / Skill 适配层
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `agent/claude/claude_audit_test.go`(7 例) | `TestParseOutputUsesTrailingJSON`(**取尾部而非首个**)、`TestParseOutputRejectsInvalidDecision`、`TestParseOutputIsErrorStringForm`(`is_error:"true"` 不再当 SUCCESS)、`TestExecuteTruncatedOutputFails`(8MB 截断 → 显式失败)、`TestExecuteProcessErrorRedactsSecrets` / `...RedactsInheritedSecret`(stderr 里的凭据被脱敏) |
+| `agent/pi/pi_audit_test.go`(5 例) | 与 claude 同构的 5 条(尾部 JSON、非法决策、截断失败、stderr 脱敏) |
+| `agent/output_depth_test.go`(4 例) | `TestJSONExtractionIsLinearOnPathologicalInput`(**O(n²) → 线性**)、深嵌套不 panic、8MB 写入不 panic |
+| `agent/redact_test.go`(6 例) | 按**确实注入过的值**精确脱敏(段匹配、多个来源、非敏感值不动) |
+| `agent/config_mask_test.go`(2 例) | `TestMaskedExtraArgs`(**ExtraArgs 里的凭据也被掩掉**) |
+| `agent/decision_test.go` / `agent/mock/mock_evict_test.go` | 决策值形态校验;`TestEvictionSkipsInUseSpaces`(淘汰不删仍在运行的空间) |
+
+### 轮次 40:支撑包
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `logx/mask_test.go`(9 例) | `TestMaskValueContainerCoverage` / `TestMaskValueNestedMapStringStringRegression`(**`map[string]string` 也要掩**)、`TestKeySensitivity`(`user_token` / `x-api-key` / `apiKey` 命中)、`TestMaskValueDoesNotMutateInputContainers` |
+| `permission/permission_test.go`(9 例) | `TestMalformedOverrideFailsClosed`(**非法覆盖 fail closed,不再 fail open**)、`TestManagerConcurrentAccess` |
+| `template/template_test.go`(14 例) | `TestRenderSurvivesPanickingStringer` / `TestRenderErrReportsPanic`(**渲染 panic 不逃逸**) |
+| `git/git_test.go`(14 例) | `TestExecFailureMessageHasReason`(失败原因不丢)、`TestWorkingDirConcurrentAccess`、`TestExecTimeoutMapsToTimeoutCode` |
+| `contextx/context_test.go`(7 例) | `TestTruncateKeepsRuneBoundary`(**按字节截断不再劈开中文**) |
+| `skill/builtin/builtin_args_test.go` / `skill/status_test.go` | Skill 参数形态;状态归一 |
+
+### 探针式测试:防"约定漂移"的机械化守卫
+
+本轮新增的两类测试与普通单测**性质不同** —— 它们不测业务行为,而是
+**扫描源码、防止约定 7 / 约定 13 被无声破坏**。这类测试值得单独说明:
+
+1. **`workflow/compiler/nodeconfig_contract_test.go`(AST 扫描)**
+   - 做法:用 `go/parser` 解析 `workflow/runtime/*.go`,抽出每个节点执行
+     函数**实际读取的配置键**,与 `compiler/nodeconfig.go` 的契约表逐项比对。
+   - 防的是:约定 13("校验期与运行期必须同源")此前**只有一句文字**,
+     两份实现各自演化。漂移有三个方向,后果都严重:
+     运行期读了表里没有的键 → **用户被自己的校验器挡住**;
+     表里要求了运行期不读的键 → 用户被迫填一个**没有作用的键**;
+     表里的键运行期已不再读 → 校验期按过期契约要求用户填。
+   - 失败信息会指出该补哪一侧(`TestRuntimeReadsOnlyKnownConfigKeys` /
+     `TestValidatorOnlyKeysNotReadByRuntime` / `TestRuntimeConfigReadsAllAttributed`)。
+2. **`frontend/src/test/list-guard.test.ts`(源码扫描)**
+   - 做法:遍历 `src/**` 全部 `.ts/.tsx`,定位
+     `api.listWorkflows() / listExecutions() / listAgents() / …` 调用点,
+     检查其结果是否先过 `asArray` 再 `.map`。
+   - 防的是:约定 7(列表接口先过 `asArray`)同样只有一句文字。
+   - **首次运行就抓到真实缺陷**:`pages/Designer.tsx` 直接对
+     `api.listAgents()` 的结果 `.map`,异常返回时抛错又被 `.catch(() => {})`
+     吞掉 —— 界面表现是"Agent 下拉框空的",没有任何提示(#98)。
+   - **已知盲区**(登记在 `docs/OPTIMIZATION.md`"仍然开放"):先赋值给变量
+     再 `.map` 的写法扫不到。
+
+**方法论结论**:约定 7 / 约定 13 这类"跨文件的形状约定",靠人工 review
+必然漂移;把它写成**探针**(扫描实现、比对契约表)之后,漂移会立刻让门禁变红。
+本轮新增的两处探针是这个方向的开始,后续同源约定(条件变量集合)应照此办理。
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 33-40 | **两轮并行审计(8 个子代理)**:前端 / DSL+模型 / 持久化+事件 / API+应用层 / 运行时 / 编译器+校验器 / 适配层 / 支撑包 | ✅ | #95-#122(第一轮 28 条)+ #123-#141(第二轮 19 条),共 47 条全部修复;新增**探针式测试** 2 处(AST 契约扫描 + 前端源码扫描);Go 有测试包 19→21、测试文件 41→66,前端 4→12 文件 / 46→89 用例;门禁自身修 3 处(排除 build/ 与 node_modules/、补 `go build`、前端构建输出不再被吞) |
 | 32 | 可视化/端到端验证(Browser + 真实 .app) | ✅ | Dashboard 桌面模式像素级验证通过(mode: desktop / IPC 绑定 / 5 统计卡 / 3 工作流表);另修裸二进制启动即退出的真实缺陷(缺 bundle identifier → notifications 服务启动失败 → os.Exit);Browser 的 EventSource 冻结属工具限制,已用 API 冒烟覆盖 10 项端到端 |
 | 31 | 复审最近三轮:修自己引入的缺陷 + 约定违反 + 恒真测试清理 | ✅ | #86 检查点节流是死代码 #87 Approve 不重映射决策 #88 并行不收敛违反约定 #14 #89 nil 测试恒真 #90 契约测试不断言 #91 死代码半成品 #92 mock runs 无界增长 #93 自造 itoa #94 结构体 Agent panic 兜底(纵深防御) |
 | 30 | 补齐剩余 ADK 契约 + pi 同形替身冒烟 | ✅ | ADK 契约 4→9 条(恰好 N 轮/Escalate 即退/提前停止 drain/分支错误回传/Set(nil)/temp: 前缀)+ pi 子进程层冒烟 6 条 |

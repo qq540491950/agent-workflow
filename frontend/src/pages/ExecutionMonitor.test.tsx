@@ -4,7 +4,7 @@
 // 防抖窗口此前是 120ms(与 Layout/EventsAudit 的 200ms 不一致),没有任何测试
 // 锁住,于是"统一 200ms"这条约定只能靠人工维持。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import ExecutionMonitor from "./ExecutionMonitor";
 import { advance, emit, makeEvent, settle } from "@/test/helpers";
@@ -144,5 +144,55 @@ describe("ExecutionMonitor 列表防御", () => {
     renderMonitor();
     await settle();
     expect(screen.getByText("node.started")).toBeTruthy();
+  });
+});
+
+// 节点 output/error 落库前已脱敏(约定 8):*** 是"已脱敏"的标记,
+// 不是"出错";界面要给出说明,否则用户以为节点只输出了三个星号。
+describe("ExecutionMonitor 脱敏输出", () => {
+  it("输出含 *** 时给出脱敏说明", async () => {
+    m.executionNodes.mockResolvedValue([
+      {
+        id: "n1",
+        node_id: "n1",
+        node_type: "agent",
+        node_name: "计划",
+        state: "SUCCESS",
+        attempt: 1,
+        output: "TOKEN=***",
+      },
+    ]);
+    renderMonitor();
+    await settle();
+    // Radix Tabs 触发器在 mousedown 时激活(不是 click)
+    const tab = screen.getByText("节点输出");
+    fireEvent.mouseDown(tab);
+    fireEvent.click(tab);
+    await settle();
+    expect(screen.getByText(/TOKEN=\*\*\*/)).toBeTruthy();
+    expect(screen.getByText(/含脱敏内容/)).toBeTruthy();
+  });
+
+  it("未脱敏的输出不显示脱敏说明", async () => {
+    m.executionNodes.mockResolvedValue([
+      {
+        id: "n1",
+        node_id: "n1",
+        node_type: "agent",
+        node_name: "计划",
+        state: "SUCCESS",
+        attempt: 1,
+        output: "一切正常",
+      },
+    ]);
+    renderMonitor();
+    await settle();
+    // Radix Tabs 触发器在 mousedown 时激活(不是 click)
+    const tab = screen.getByText("节点输出");
+    fireEvent.mouseDown(tab);
+    fireEvent.click(tab);
+    await settle();
+    expect(screen.getByText("一切正常")).toBeTruthy();
+    expect(screen.queryByText(/含脱敏内容/)).toBeNull();
   });
 });

@@ -123,6 +123,34 @@ func (m *Manager) ApplyWorkflowOverrides(overrides map[string]any) {
 	}
 }
 
+// ValidateOverrides 只做**结构校验**,不应用覆盖、不修改任何策略。
+//
+// 与 ApplyChecked 用的是同一份解析逻辑(applyAgentOverrides),所以
+// "校验期说合法"与"运行期能应用"必然一致(约定 #13:校验期与运行期同源)。
+//
+// 用途:校验期用它拦住"DSL 里写了非法 permissions 段"的工作流 ——
+// 结构非法的覆盖会让运行期把该 Agent 的权限**全拒**(fail closed),
+// 用户看到的却是"没有权限"而不是"permissions 写错了",排查方向被带偏。
+//
+// 错误信息里的 Agent 按 ID 排序(map 遍历顺序随机,不定序的错误文本
+// 会让同一份 DSL 每次报出不同的消息)。
+func ValidateOverrides(overrides map[string]any) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+	var problems []string
+	for agentID, raw := range overrides {
+		if _, err := applyAgentOverrides(Policy{}, raw); err != nil {
+			problems = append(problems, fmt.Sprintf("agent %q: %v", agentID, err))
+		}
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	sort.Strings(problems)
+	return fmt.Errorf("权限覆盖非法: %s", strings.Join(problems, "; "))
+}
+
 // ApplyChecked 应用覆盖并返回错误(结构非法时)。
 // 非法覆盖项对应的 Agent 权限被置为"全部拒绝"(fail closed)。
 func (m *Manager) ApplyChecked(overrides map[string]any) error {

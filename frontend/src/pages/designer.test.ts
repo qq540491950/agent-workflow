@@ -4,7 +4,7 @@
 // 保存时被后端 validator 以 DUPLICATE_NODE 拒绝,界面无法解释原因。
 import { describe, expect, it } from "vitest";
 import type { Node as RFNode } from "@xyflow/react";
-import { nextNodeId } from "./Designer";
+import { nextNodeId, nodeEnabledInvalid } from "./Designer";
 
 const nodes = (...ids: string[]): RFNode[] =>
   ids.map((id) => ({ id, type: "wf", position: { x: 0, y: 0 }, data: {} }));
@@ -30,5 +30,22 @@ describe("nextNodeId", () => {
 
   it("对非数字后缀的既有 ID 也能正确让位", () => {
     expect(nextNodeId(nodes("agent", "agent-1"), "agent")).toBe("agent-2");
+  });
+});
+
+// 节点级开关 enabled:后端 validator 的 INVALID_NODE_ENABLED 只接受布尔。
+// 前端属性面板的开关只会写出布尔,但导入/恢复的定义可能带非布尔值 ——
+// 属性面板据此给出提示,免得用户被自己的校验器挡住。
+describe("nodeEnabledInvalid", () => {
+  it("缺省与布尔值都合法", () => {
+    expect(nodeEnabledInvalid({})).toBe(false);
+    expect(nodeEnabledInvalid({ enabled: true })).toBe(false);
+    expect(nodeEnabledInvalid({ enabled: false })).toBe(false);
+  });
+
+  it("非布尔值(字符串/数字/null)判非法", () => {
+    expect(nodeEnabledInvalid({ enabled: "false" })).toBe(true);
+    expect(nodeEnabledInvalid({ enabled: 0 })).toBe(true);
+    expect(nodeEnabledInvalid({ enabled: null })).toBe(true);
   });
 });

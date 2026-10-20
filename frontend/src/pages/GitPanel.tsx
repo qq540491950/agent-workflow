@@ -41,29 +41,48 @@ export default function GitPanel() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  // 状态查询失败的原因(非空时面板显示原因,而不是永远"加载中…")
+  const [statusErr, setStatusErr] = useState("");
 
   const refresh = useCallback(async () => {
-    try {
-      const [raw, d, lg] = await Promise.all([
-        api.gitStatus(),
-        api.gitDiff(false),
-        api.gitLog(20),
-      ]);
+    // 三个查询各自独立成败:此前用 Promise.all,任一失败(如工作目录
+    // 不是 git 仓库 → git status 报错)就整体 reject,状态面板永远停在
+    // "加载中…",用户只看到一句 toast,不知道面板为什么是空的。
+    const [st, df, lg] = await Promise.allSettled([
+      api.gitStatus(),
+      api.gitDiff(false),
+      api.gitLog(20),
+    ]);
+    if (st.status === "fulfilled") {
       // 形状防御:桌面 IPC 与 SPA fallback 异常路径下可能返回 null 或
       // 被解析成 HTML 兜底页的对象。setStatus(st) 无防御时,渲染处的
       // status.staged.length 会抛 TypeError 让整页崩(fileChips 内部的
       // `files ?? []` 挡不住 —— 防御位置在调用点之后才生效)。
-      const st = raw as Partial<GitStatus> | null;
+      const raw = st.value as Partial<GitStatus> | null;
       setStatus({
-        branch: st?.branch ?? "",
-        staged: asArray<string>(st?.staged),
-        modified: asArray<string>(st?.modified),
-        untracked: asArray<string>(st?.untracked),
+        branch: raw?.branch ?? "",
+        staged: asArray<string>(raw?.staged),
+        modified: asArray<string>(raw?.modified),
+        untracked: asArray<string>(raw?.untracked),
       });
-      setDiff(d);
-      setLog(asArray<LogEntry>(lg));
-    } catch (e) {
-      toast.error((e as Error).message);
+      setStatusErr("");
+    } else {
+      setStatus(null);
+      setStatusErr((st.reason as Error)?.message ?? "git status 查询失败");
+    }
+    if (df.status === "fulfilled") setDiff(df.value);
+    if (lg.status === "fulfilled") setLog(asArray<LogEntry>(lg.value));
+    const failed = [
+      st.status === "rejected" ? "状态" : "",
+      df.status === "rejected" ? "Diff" : "",
+      lg.status === "rejected" ? "Log" : "",
+    ].filter(Boolean);
+    if (failed.length > 0) {
+      const first = [st, df, lg].find((r) => r.status === "rejected") as
+        | PromiseRejectedResult
+        | undefined;
+      const why = first ? ((first.reason as Error)?.message ?? "") : "";
+      toast.error(`Git ${failed.join("/")} 查询失败${why ? ":" + why : ""}`);
     }
   }, []);
 
@@ -132,7 +151,10 @@ export default function GitPanel() {
             <CardTitle className="text-base">状态</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
-            {!status && <p className="text-muted-foreground">加载中…</p>}
+            {!status && !statusErr && <p className="text-muted-foreground">加载中…</p>}
+            {!status && statusErr && (
+              <p className="text-xs text-red-400">状态查询失败:{statusErr}</p>
+            )}
             {status && (
               <>
                 <div>

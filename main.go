@@ -53,8 +53,9 @@ type options struct {
 	LogLevel string
 }
 
-// validLogLevels 是 --log 的合法取值。
-var validLogLevels = []string{"debug", "info", "warn", "error"}
+// validLogLevels 是 --log 的合法取值(唯一来源:logx —— 应用真正能应用的
+// 级别集合;此前这里另写了一份,两份漂移就会出现"参数接受、后端不认")。
+var validLogLevels = logx.Levels()
 
 // flagValues 保存各启动参数的取值指针。
 type flagValues struct {
@@ -116,14 +117,9 @@ func (o options) validate() error {
 	return nil
 }
 
-// isValidLogLevel 判断日志级别是否合法(与 logx.SetLevel 支持的值一致)。
+// isValidLogLevel 判断日志级别是否合法(与 logx 支持的值一致)。
 func isValidLogLevel(level string) bool {
-	for _, l := range validLogLevels {
-		if strings.EqualFold(level, l) {
-			return true
-		}
-	}
-	return false
+	return logx.ValidateLevel(level) == nil
 }
 
 // defaultDataDir 返回默认数据目录:用户配置目录下的 agent-workflow。
@@ -155,7 +151,14 @@ func run() int {
 		return 2
 	}
 
-	logx.SetLevel(opts.LogLevel)
+	// 应用日志级别:用 logx.SetLevelChecked(非法值保持当前级别并返回 error),
+	// 错误直接回报给调用方 —— 退出码 2(与参数错误同一档)。
+	// 此前用 logx.SetLevel:非法值只打一条 WARN 就继续启动,用户以为
+	// 日志级别已生效、实际跑的是另一个级别(静默失败)。
+	if err := logx.SetLevelChecked(opts.LogLevel); err != nil {
+		fmt.Fprintf(os.Stderr, "日志级别设置失败: %v\n", err)
+		return 2
+	}
 
 	dir := opts.DataDir
 	if dir == "" {

@@ -27,6 +27,11 @@ interface SettingsInfo {
   allow_script_nodes: boolean;
 }
 
+// 后端可接受的日志级别(app/application validateLogLevel)。
+// 非法值后端现在直接 400 拒绝(此前静默回落 info,界面显示与实际生效不一致),
+// 前端先挡一道:level 也可能来自后端存量配置,不一定只由下拉框产生。
+export const LOG_LEVELS = ["debug", "info", "warn", "error"];
+
 export default function Settings() {
   const [info, setInfo] = useState<SettingsInfo | null>(null);
   const [ver, setVer] = useState<Record<string, string>>({});
@@ -54,6 +59,12 @@ export default function Settings() {
   }, [refresh]);
 
   const save = async () => {
+    // 前端先挡一道非法日志级别:后端已改为 400 拒绝,但 level 也可能来自
+    // 存量配置(不是下拉框选出来的),直接发过去只会拿到一句后端原文。
+    if (!LOG_LEVELS.includes(level)) {
+      toast.error(`日志级别非法: ${level}(可选 ${LOG_LEVELS.join("|")})`);
+      return;
+    }
     setSaving(true);
     try {
       const i = await api.updateSettings({
@@ -108,10 +119,20 @@ export default function Settings() {
       if (r.workflows_skipped > 0) parts.push(`跳过已存在 ${r.workflows_skipped} 个`);
       if (r.workflows_invalid > 0) parts.push(`拒绝非法 ${r.workflows_invalid} 个`);
       parts.push(`恢复 Agent 配置 ${r.agent_configs_restored} 个`);
-      if (r.agent_configs_invalid > 0) parts.push(`拒绝非法配置 ${r.agent_configs_invalid} 个`);
+      // agent_configs_invalid 的语义已扩大:结构非法 **或** 本机不存在该 Agent
+      // (配置落库也不会生效)。文案必须说清,否则用户以为凭据已恢复。
+      if (r.agent_configs_invalid > 0) {
+        parts.push(`拒绝 ${r.agent_configs_invalid} 个(结构非法或本机无此 Agent)`);
+      }
+      const unknown = r.agent_configs_unknown_ids ?? [];
+      if (unknown.length > 0) parts.push(`本机无此 Agent:${unknown.join(", ")}`);
       toast.success(parts.join(","));
       if (r.workflows_invalid > 0 || r.agent_configs_invalid > 0) {
-        toast.warning("有内容未恢复,详见恢复结果计数");
+        toast.warning(
+          unknown.length > 0
+            ? "有内容未恢复,详见恢复结果计数(本机不存在的 Agent 配置未生效)"
+            : "有内容未恢复,详见恢复结果计数",
+        );
       }
       refresh();
     } catch (e) {
@@ -184,7 +205,22 @@ export default function Settings() {
                   默认关闭:关闭时 script 节点执行会失败并提示开启本开关。
                 </p>
               </div>
-              <Switch checked={allowScript} onCheckedChange={setAllowScript} />
+              <Switch
+                checked={allowScript}
+                onCheckedChange={(v) => {
+                  // 开启是提权动作(任意本地命令执行):二次确认,拒绝则保持原值。
+                  if (v && !allowScript) {
+                    const ok = window.confirm(
+                      "允许执行 script 节点?\n\n" +
+                        "script 节点以 /bin/sh -c 执行工作流里写明的任意本地命令," +
+                        "而工作流可以通过 YAML 导入获得 —— 导入不可信的工作流等于放开任意命令执行。\n\n" +
+                        "确认只在完全可信的工作流下开启。",
+                    );
+                    if (!ok) return;
+                  }
+                  setAllowScript(v);
+                }}
+              />
             </div>
           </CardContent>
         </Card>

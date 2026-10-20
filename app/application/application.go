@@ -619,15 +619,33 @@ func (s *ExecutionService) Run(ctx context.Context, workflowID, task string, var
 	if !wf.Enabled {
 		return nil, model.NewError(model.KindValidationError, "WORKFLOW_DISABLED", "工作流已禁用")
 	}
-	return s.app.Engine.Start(context.Background(), wf, task, variables)
+	exec, err := s.app.Engine.Start(context.Background(), wf, task, variables)
+	if err != nil {
+		return nil, err
+	}
+	// 返回的是引擎的深拷贝(cloneExec),脱敏不影响运行期。
+	maskExecution(exec)
+	return exec, nil
 }
 
 func (s *ExecutionService) List(workflowID string, limit int) ([]*model.Execution, error) {
-	return s.app.Repo.ListExecutions(workflowID, limit)
+	execs, err := s.app.Repo.ListExecutions(workflowID, limit)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range execs {
+		maskExecution(e)
+	}
+	return execs, nil
 }
 
 func (s *ExecutionService) Get(id string) (*model.Execution, error) {
-	return s.app.Repo.GetExecution(id)
+	exec, err := s.app.Repo.GetExecution(id)
+	if err != nil {
+		return nil, err
+	}
+	maskExecution(exec)
+	return exec, nil
 }
 
 // 三个子资源端点先确认执行存在:此前直接查子表,不存在的执行 ID 返回
@@ -672,7 +690,13 @@ func (s *ExecutionService) AllEvents(eventType string, limit int) ([]map[string]
 
 // ProvideInput 人工输入后恢复执行(同样使用脱离请求的 context)。
 func (s *ExecutionService) ProvideInput(ctx context.Context, id string, response map[string]any) (*model.Execution, error) {
-	return s.app.Engine.Resume(context.Background(), id, response)
+	exec, err := s.app.Engine.Resume(context.Background(), id, response)
+	if err != nil {
+		return nil, err
+	}
+	// 返回的是引擎的深拷贝(cloneExec),脱敏不影响运行期。
+	maskExecution(exec)
+	return exec, nil
 }
 
 func (s *ExecutionService) Cancel(ctx context.Context, id string) error {
@@ -685,6 +709,9 @@ func (s *ExecutionService) Export(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 执行记录本身也要脱敏(约定 8:API 返回掩码):state_data 里带着
+	// 每个节点的 outcome 原文。
+	maskExecution(exec)
 	// 审计归档必须完整:此前吞掉三次查询错误,导出静默缺项
 	nodes, err := s.app.Repo.ListExecutionNodes(id)
 	if err != nil {
@@ -722,6 +749,47 @@ func maskNode(n *model.ExecutionNode) {
 	n.ResultJSON = maskResultJSON(n.ResultJSON)
 }
 
+// maskExecution 脱敏执行记录里的自由文本出口(error / task / variables /
+// state_data)。
+//
+// 约定 8:API 返回掩码。节点明细已由 maskNode 脱敏,但**执行记录本身**
+// 的这几个出口此前没有:
+//
+//   - state_data:会话状态快照,里面有每个节点的 outcome 原文
+//     (node:<id>:result)、最近一次输出(output)与错误文本(_error) ——
+//     直接来自 Agent 的 stdout/stderr;
+//   - error:执行失败原因(同样常带 CLI stderr);
+//   - task / variables:用户输入,事件流里已经脱敏,这里不能是例外。
+//
+// 只改**返回给调用方的副本**,不改库里的那份:
+//   - Get/List/Export 读的是库里的新对象,改了不影响运行期;
+//   - Run/ProvideInput/RetryNode 返回的是引擎的深拷贝(cloneExec),
+//     同样与运行期不共享可变结构。
+//
+// 库里那份保持原样:恢复路径要把它回放进下一次执行,读出口脱敏不得
+// 改写执行语义(约定 8 的"备份导出含明文"是明文存在的唯一例外)。
+func maskExecution(exec *model.Execution) {
+	if exec == nil {
+		return
+	}
+	exec.Error = logx.Mask(exec.Error)
+	exec.Task = logx.Mask(exec.Task)
+	exec.Variables = maskAnyMap(exec.Variables)
+	exec.StateData = maskAnyMap(exec.StateData)
+}
+
+// maskAnyMap 对 map 做结构化脱敏(返回新 map,不改原对象)。
+func maskAnyMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	masked, ok := logx.MaskValue(m).(map[string]any)
+	if !ok {
+		return m
+	}
+	return masked
+}
+
 // maskResultJSON 对 result_json 做结构化脱敏(解析 → 脱敏 → 重新序列化)。
 // 直接对 JSON 文本做正则替换可能破坏转义引号,产出非法 JSON。
 func maskResultJSON(raw string) string {
@@ -750,7 +818,13 @@ func (s *ExecutionService) Delete(id string) error {
 
 // RetryNode 重试失败节点或跳过继续(skip=true)。
 func (s *ExecutionService) RetryNode(id string, skip bool) (*model.Execution, error) {
-	return s.app.Engine.RetryNode(context.Background(), id, skip)
+	exec, err := s.app.Engine.RetryNode(context.Background(), id, skip)
+	if err != nil {
+		return nil, err
+	}
+	// 返回的是引擎的深拷贝(cloneExec),脱敏不影响运行期。
+	maskExecution(exec)
+	return exec, nil
 }
 
 // ---- AgentService ----
@@ -1140,19 +1214,10 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 	}, nil
 }
 
-// validLogLevels 是允许的日志级别。
-// logx.SetLevel 对未知值静默回落 info,若不在此拒绝,界面显示的级别
-// 与实际生效的级别会不一致(显示 debug、实际 info),属于静默丢弃
-// 校验错误。
-var validLogLevels = map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
-
-// validateLogLevel 校验日志级别(大小写不敏感)。
-func validateLogLevel(level string) error {
-	if !validLogLevels[strings.ToLower(level)] {
-		return fmt.Errorf("日志级别非法: %q(可选 debug|info|warn|error)", level)
-	}
-	return nil
-}
+// 日志级别的白名单不在这里另写一份:唯一来源是 logx(应用真正能应用的
+// 级别集合)。此前这里有一份独立的白名单,两份必然漂移 —— 漂移方向是
+// "用户能选一个后端不认的值"(设置页显示已保存、实际跑的是另一个级别)。
+// 校验用 logx.ValidateLevel(不改变当前级别),应用用 logx.SetLevelChecked。
 
 func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNodes *bool) (*SettingsInfo, error) {
 	// 先落库再改内存:此前先改内存、持久化错误被忽略,界面提示"已保存"
@@ -1164,15 +1229,28 @@ func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNode
 		s.app.GitSvc.SetWorkingDir(gitWorkingDir)
 	}
 	if logLevel != "" {
-		if err := validateLogLevel(logLevel); err != nil {
-			return nil, err
+		// 级别语义的唯一来源是 logx(应用真正能应用的级别集合):
+		// 此前这里另写了一份白名单,两份必然漂移 —— 漂移方向是
+		// "用户能选一个后端不认的值"(设置页显示已保存、实际跑另一个级别)。
+		//
+		// 顺序:先校验(不落库)→ 再落库 → 最后应用。
+		//   - 校验在落库之前:非法级别不许进库(库里躺着一个应用不了的
+		//     级别,重启后仍然无效);
+		//   - 应用在落库之后:与既有"先落库再改内存"的约定一致,
+		//     落库失败时内存与全局日志级别都不动。
+		if err := logx.ValidateLevel(logLevel); err != nil {
+			return nil, model.NewError(model.KindValidationError, "INVALID_LOG_LEVEL", err.Error())
 		}
-		level := strings.ToLower(logLevel)
+		level := strings.ToLower(strings.TrimSpace(logLevel))
 		if err := s.Set("log_level", level); err != nil {
 			return nil, err
 		}
 		s.app.setLogLevel(level)
-		logx.SetLevel(level)
+		// SetLevelChecked 是"应用级别"的唯一入口:非法时保持当前级别并报错,
+		// 错误真正回报给调用方(接口层 400),不再只是 WARN。
+		if err := logx.SetLevelChecked(level); err != nil {
+			return nil, model.NewError(model.KindValidationError, "INVALID_LOG_LEVEL", err.Error())
+		}
 	}
 	if allowScriptNodes != nil {
 		if err := s.Set("allow_script_nodes", *allowScriptNodes); err != nil {

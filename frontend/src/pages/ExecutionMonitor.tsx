@@ -89,6 +89,16 @@ const nodeIcon: Record<string, React.ReactNode> = {
   PENDING: <Circle className="h-4 w-4 text-muted-foreground" />,
 };
 
+// 节点 output/error 落库前已脱敏(约定 8):形如 key=value 且 key 含
+// key/token/password/secret/authorization/credential 的值被替换为 ***。
+// 直接把 *** 摆出来,用户会以为节点只输出了三个星号;这里补一句说明,
+// 免得把"已脱敏"误读成"出错/输出为空"。
+const MASK_MARK = "***";
+
+function maskNote(text: string | undefined): string | null {
+  return text && text.includes(MASK_MARK) ? "(含脱敏内容,部分值以 *** 显示)" : null;
+}
+
 export default function ExecutionMonitor() {
   const { id = "" } = useParams();
   const [exec, setExec] = useState<Execution | null>(null);
@@ -400,19 +410,24 @@ export default function ExecutionMonitor() {
               </TabsContent>
               <TabsContent value="nodes" className="mt-2">
                 <div className="max-h-[420px] space-y-2 overflow-auto">
-                  {nodes.map((n) => (
-                    <details key={n.id} className="rounded-md border">
-                      <summary className="cursor-pointer px-3 py-1.5 text-sm">
-                        {n.node_name}
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          {n.state}
-                        </span>
-                      </summary>
-                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap bg-muted/40 p-2 text-[11px]">
-                        {n.output || n.error || "(无输出)"}
-                      </pre>
-                    </details>
-                  ))}
+                  {nodes.map((n) => {
+                    const body = n.output || n.error || "";
+                    const note = maskNote(body);
+                    return (
+                      <details key={n.id} className="rounded-md border">
+                        <summary className="cursor-pointer px-3 py-1.5 text-sm">
+                          {n.node_name}
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            {n.state}
+                          </span>
+                        </summary>
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap bg-muted/40 p-2 text-[11px]">
+                          {body || "(无输出)"}
+                          {note && <span className="text-muted-foreground">{note}</span>}
+                        </pre>
+                      </details>
+                    );
+                  })}
                   {nodes.length === 0 && (
                     <div className="py-6 text-center text-sm text-muted-foreground">暂无</div>
                   )}

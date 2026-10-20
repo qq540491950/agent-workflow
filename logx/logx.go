@@ -21,6 +21,11 @@ func newLogger(level slog.Level) *slog.Logger {
 }
 
 // validLevels 是支持的日志级别。
+//
+// levelOrder 是同一份定义的**有序**形式:白名单需要可重复的展示顺序
+// (命令行用法、接口回显),map 的遍历顺序是随机的。
+var levelOrder = []string{"debug", "info", "warn", "error"}
+
 var validLevels = map[string]slog.Level{
 	"debug": slog.LevelDebug,
 	"info":  slog.LevelInfo,
@@ -32,13 +37,39 @@ var validLevels = map[string]slog.Level{
 // "配置写错了"这类问题仍然必须可见,否则就是静默失败(约定 14)。
 var warnLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
+// Levels 返回支持的日志级别(副本,顺序固定)。
+//
+// 唯一来源:调用方(命令行参数校验、设置页)不要再自己写一份白名单 ——
+// 两份白名单必然漂移,漂移方向是"用户能选一个后端不认的值"。
+func Levels() []string {
+	return append([]string(nil), levelOrder...)
+}
+
+// levelOf 解析日志级别(大小写不敏感,首尾空白忽略)。
+func levelOf(level string) (slog.Level, error) {
+	l, ok := validLevels[strings.ToLower(strings.TrimSpace(level))]
+	if !ok {
+		return 0, fmt.Errorf("日志级别非法: %q(可选 %s)", level, strings.Join(levelOrder, "|"))
+	}
+	return l, nil
+}
+
+// ValidateLevel 只校验日志级别,**不改变**当前级别。
+//
+// 供"先校验、后落库"的调用方使用(设置页:级别要先落库再生效,
+// 落库前必须确认这个级别真的能被应用)。
+func ValidateLevel(level string) error {
+	_, err := levelOf(level)
+	return err
+}
+
 // SetLevelChecked 设置日志级别(debug/info/warn/error)。
 // 非法值返回 error 且**不改变**当前级别 —— 调用方可以据此拒绝请求
 // (设置页把非法级别存进库、界面回显"debug"实际跑 info,是静默失败)。
 func SetLevelChecked(level string) error {
-	l, ok := validLevels[strings.ToLower(strings.TrimSpace(level))]
-	if !ok {
-		return fmt.Errorf("日志级别非法: %q(可选 debug|info|warn|error)", level)
+	l, err := levelOf(level)
+	if err != nil {
+		return err
 	}
 	logger.Store(newLogger(l))
 	return nil

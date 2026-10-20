@@ -337,3 +337,71 @@ func TestWorkflowVariablesKeepIntTypeAfterRoundTrip(t *testing.T) {
 		t.Errorf("1.5 应保持 float64,实际 %T(%v)", got.Variables["ratio"], got.Variables["ratio"])
 	}
 }
+
+// TestSaveExecutionDoesNotRevertCompleted 锁定"已完成的执行不得被整行
+// upsert 改回运行中"。
+//
+// 背景:终态守卫此前只含 FAILED/CANCELLED(负面终态)。COMPLETED 不在守卫里,
+// 于是"绕过 runtime 的直写"(备份恢复工具、运维脚本、误用 SaveExecution
+// 的代码)可以把一条已完成的执行改回 RUNNING —— 用户在列表里看到
+// "运行中",实际上它早就跑完了(约定 #14 的"该失败却成功"同族问题:
+// 状态与事实不符)。
+//
+// COMPLETED 纳入守卫后:离开它只能走 CasExecutionState(与 FAILED/CANCELLED
+// 同一套裁决机制)。
+//
+// 已知边界:守卫挡不住"往合法后继方向"的过期写(例如库中 PAUSED、过期副本
+// 写 RUNNING —— PAUSED→RUNNING 本身合法)。彻底堵住需要调用方携带
+// "我基于哪个版本"的令牌,不在持久化层可解范围内(见 execStateGuardSQL 注释)。
+func TestSaveExecutionDoesNotRevertCompleted(t *testing.T) {
+	db := openTestDB(t)
+	seedExec(t, db, "completed", model.ExecutionRunning)
+
+	ok, err := db.CasExecutionState("exec-completed",
+		[]model.ExecutionState{model.ExecutionRunning}, model.ExecutionCompleted)
+	if err != nil || !ok {
+		t.Fatalf("cas: ok=%v err=%v", ok, err)
+	}
+
+	// 过期副本(状态仍是 CAS 之前的 RUNNING)随后落库。
+	stale := &model.Execution{
+		ID: "exec-completed", WorkflowID: "wf-demo", State: model.ExecutionRunning,
+		CreatedAt: nowStr(), Variables: map[string]any{}, NodeStates: map[string]string{},
+	}
+	if err := db.SaveExecution(stale); err != nil {
+		t.Fatalf("save stale: %v", err)
+	}
+	if got := execState(t, db, "exec-completed"); got != model.ExecutionCompleted {
+		t.Fatalf("已完成的执行被过期副本改回: %s(want COMPLETED)", got)
+	}
+}
+
+// TestSaveExecutionKeepsCompletedOnSameState 回归:守卫不得拦掉"状态不变"
+// 的整行 upsert(COMPLETED → COMPLETED 是正常的元信息落库路径)。
+func TestSaveExecutionKeepsCompletedOnSameState(t *testing.T) {
+	db := openTestDB(t)
+	seedExec(t, db, "same", model.ExecutionRunning)
+	ok, err := db.CasExecutionState("exec-same",
+		[]model.ExecutionState{model.ExecutionRunning}, model.ExecutionCompleted)
+	if err != nil || !ok {
+		t.Fatalf("cas: ok=%v err=%v", ok, err)
+	}
+	same := &model.Execution{
+		ID: "exec-same", WorkflowID: "wf-demo", State: model.ExecutionCompleted,
+		CurrentNodeID: "n2", CreatedAt: nowStr(), Variables: map[string]any{}, NodeStates: map[string]string{},
+	}
+	if err := db.SaveExecution(same); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got := execState(t, db, "exec-same"); got != model.ExecutionCompleted {
+		t.Fatalf("同状态写入后状态变了: %s(want COMPLETED)", got)
+	}
+	e, err := db.GetExecution("exec-same")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// 同状态写入时,元信息列必须正常更新(守卫只挡状态,不是挡整行)。
+	if e.CurrentNodeID != "n2" {
+		t.Errorf("同状态写入的元信息列应正常更新: current_node_id = %q, want n2", e.CurrentNodeID)
+	}
+}

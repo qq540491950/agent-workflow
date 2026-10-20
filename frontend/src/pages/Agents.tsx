@@ -77,10 +77,18 @@ export default function Agents() {
 
   const saveConfig = async () => {
     if (!configTarget || !cfg) return;
+    // "+ 添加环境变量" 插入的行键名为空:直接提交会在后端存下一条空名环境变量
+    // (第二个空名行还会覆盖第一个)。保存前过滤空名,并如实告知丢了几个。
+    const env = cfg.env ?? {};
+    const blank = Object.entries(env).filter(([k]) => !k.trim()).length;
+    const payload = blank
+      ? { ...cfg, env: Object.fromEntries(Object.entries(env).filter(([k]) => k.trim())) }
+      : cfg;
     setSavingCfg(true);
     try {
-      await api.updateAgentConfig(configTarget.id, cfg);
+      await api.updateAgentConfig(configTarget.id, payload);
       toast.success(`${configTarget.name} 配置已保存(仅作用于本应用调用,不影响本地配置)`);
+      if (blank > 0) toast.warning(`已忽略 ${blank} 个未填写名称的环境变量`);
       setConfigTarget(null);
     } catch (e) {
       toast.error((e as Error).message);
@@ -111,6 +119,10 @@ export default function Agents() {
       setSavingCfg(false);
     }
   };
+
+  // 已存在未命名(空键)的环境变量行时不能再加一行:同名空键会互相覆盖,
+  // 用户填好的一行也可能被后插入的空行顶掉。
+  const hasBlankEnvKey = Object.keys(cfg?.env ?? {}).some((k) => !k.trim());
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -319,6 +331,12 @@ export default function Agents() {
                 <Button
                   size="sm"
                   variant="outline"
+                  title={
+                    hasBlankEnvKey
+                      ? "请先填写当前环境变量名称(同名行会互相覆盖)"
+                      : "新增一行环境变量"
+                  }
+                  disabled={hasBlankEnvKey}
                   onClick={() => setCfg({ ...cfg, env: { ...(cfg.env ?? {}), "": "" } })}
                 >
                   + 添加环境变量

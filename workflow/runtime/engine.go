@@ -181,7 +181,11 @@ func (e *Engine) Validate(wf *model.Workflow) *validator.Result {
 // 返回创建好的 Execution(状态 RUNNING),执行在后台进行。
 func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, variables map[string]any) (*model.Execution, error) {
 	if res := e.Validate(wf); !res.Valid {
-		err := model.NewError(model.KindValidationError, "WORKFLOW_INVALID", "工作流校验失败")
+		// 错误消息里带上**具体**的校验原因:此前只有"工作流校验失败",
+		// 用户既定位不到问题也改不了(例如 permissions 段写错时,
+		// 错误文本不指明是哪一段)—— 死路。
+		err := model.NewError(model.KindValidationError, "WORKFLOW_INVALID",
+			"工作流校验失败: "+validator.Summary(res.Errors))
 		raw, _ := json.Marshal(res.Errors)
 		err.Detail = string(raw)
 		return nil, err
@@ -468,7 +472,20 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 	// 工作流级权限覆盖:克隆全局策略后应用(不影响其他运行中的执行)
 	runPerms := e.Perms.Clone()
 	if len(exec.Snapshot.Permission) > 0 {
-		runPerms.Apply(exec.Snapshot.Permission)
+		// 非法结构 → **明确失败**,而不是"静默把该 Agent 的权限全拒"。
+		//
+		// 两种做法的差别:全拒+WARN 时,用户看到的失败原因是
+		// "agent 无权执行 fs:write",而真正的原因是"permissions 段写错了"
+		// —— 排查方向被带偏(约定 #14:静默降级与"该失败却成功"同族)。
+		// 这里把原因原样挂到执行失败原因上。
+		//
+		// 校验期已拦住非法结构(workflow/validator:INVALID_PERMISSION_OVERRIDE,
+		// 同一份解析逻辑),这里的检查是纵深防御:历史快照(规则之前保存的
+		// 工作流、备份恢复出来的执行)未必经过当次校验。
+		if err := runPerms.ApplyChecked(exec.Snapshot.Permission); err != nil {
+			e.failExecution(exec, "工作流权限覆盖非法,已终止执行: "+err.Error())
+			return
+		}
 	}
 
 	env := &compiler.RunEnv{

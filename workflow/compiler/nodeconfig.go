@@ -13,7 +13,8 @@ import "agentworkflow/workflow/model"
 //     与 enabled,多出运行期从不读的 Env —— 还会把凭据引进 DSL 的诱惑)。
 //
 // 现在活的一份收敛到本文件,validator 直接消费(NodeConfigSpecFor),
-// dsl 的死结构体等待删除(见交付报告)。
+// 死的一份已删除(workflow/dsl 不再声明任何节点配置结构体,由
+// workflow/dsl/no_config_structs_test.go 守卫:再写一份会立刻失败)。
 //
 // 本文件描述的是**运行期实际读取**的配置键。运行期实现在
 // workflow/runtime/executor.go,两者的同源性由
@@ -24,7 +25,12 @@ import "agentworkflow/workflow/model"
 //
 // 运行期语义(workflow/runtime/executor.go 的 dispatchNode):值为布尔 false
 // 时该节点被跳过(置 SKIPPED,路由直通),一个配置键都不再读取;值为 true
-// 或缺省时节点照常执行。**只认布尔**:非布尔值会被忽略,节点仍然执行。
+// 或缺省时节点照常执行。**只认布尔**:非布尔值让运行期 **fail closed**
+// (节点失败,不执行任何副作用)—— 不是"被忽略、节点照常执行"。
+//
+// 校验期对同一取值报 INVALID_NODE_ENABLED(工作流不可保存/不可运行),
+// 两边结论一致(约定 #13),回归由 workflow/runtime/enabled_contract_test.go
+// 锁住。
 const NodeEnabledKey = "enabled"
 
 // NodeEnabledState 描述节点级开关的取值状态。
@@ -37,7 +43,8 @@ const (
 	NodeEnabledOn
 	// NodeEnabledOff:enabled=false —— 运行期跳过该节点。
 	NodeEnabledOff
-	// NodeEnabledInvalid:enabled 不是布尔 —— 运行期会忽略它并照常执行节点。
+	// NodeEnabledInvalid:enabled 不是布尔 —— 运行期 fail closed(节点失败,
+	// 不执行副作用);校验期报 INVALID_NODE_ENABLED。
 	NodeEnabledInvalid
 )
 

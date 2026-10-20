@@ -671,6 +671,15 @@ export function nextNodeId(nodes: RFNode[], type: string): string {
   return `${type}-${i}`;
 }
 
+// 节点级开关 enabled 的合法性:只接受布尔(缺省 = 启用)。
+// 后端 compiler.NodeEnabledStateOf / validator 的 INVALID_NODE_ENABLED
+// 是同一套语义:非布尔值(如 YAML 里的 enabled: "false")会被判非法并拒绝
+// 保存。开关只会写出布尔,但导入/恢复的定义可能带非布尔值。
+// 导出以便单测锁定该行为(见 designer.test.ts)。
+export function nodeEnabledInvalid(cfg: Record<string, unknown>): boolean {
+  return cfg.enabled !== undefined && typeof cfg.enabled !== "boolean";
+}
+
 // ---- 属性面板组件 ----
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -700,6 +709,11 @@ function NodePropertyPanel({
   const setCfg = (k: string, v: unknown) => {
     onChange({ data: { cfg: { ...cfg, [k]: v } } });
   };
+  // enabled 只接受布尔:非布尔值(如 YAML 里的 enabled: "false")会被后端
+  // 校验判为 INVALID_NODE_ENABLED 并拒绝保存(约定 13:校验期与运行期同源)。
+  // 开关本身只会写出布尔,但导入/恢复的定义可能带非布尔值 —— 这里给出提示,
+  // 免得用户被自己的校验器挡住却看不出原因。
+  const enabledInvalid = nodeEnabledInvalid(cfg);
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -727,6 +741,12 @@ function NodePropertyPanel({
           onCheckedChange={(v) => setCfg("enabled", v)}
         />
       </div>
+      {enabledInvalid && (
+        <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">
+          enabled 当前不是布尔值(来自导入/备份的定义):后端校验会报
+          INVALID_NODE_ENABLED。切换上面的开关即可修正为布尔值。
+        </p>
+      )}
 
       {type === "agent" && (
         <>

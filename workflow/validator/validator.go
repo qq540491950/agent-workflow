@@ -9,6 +9,7 @@ import (
 
 	"github.com/expr-lang/expr"
 
+	"agentworkflow/permission"
 	"agentworkflow/workflow/compiler"
 	"agentworkflow/workflow/model"
 )
@@ -62,6 +63,17 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 	}
 	if wf.Name == "" {
 		addErr("MISSING_NAME", "", "workflow.name 不能为空")
+	}
+
+	// 工作流级权限覆盖(DSL permissions 段)的结构校验。
+	//
+	// 结构非法(如 filesystem.write 写成字符串、段名拼错)会让运行期把
+	// 该 Agent 的权限**全拒**(fail closed)—— 用户看到的却是"没有权限",
+	// 排查方向被带偏(约定 #14:该失败却成功/静默降级都不行)。
+	// 校验期用同一份解析逻辑(permission.ValidateOverrides)报出来,
+	// 用户在保存时就看到"permissions 写错了"(约定 #13:校验期与运行期同源)。
+	if err := permission.ValidateOverrides(wf.Permission); err != nil {
+		addErr("INVALID_PERMISSION_OVERRIDE", "", "%v", err)
 	}
 
 	nodeIDs := make(map[string]bool, len(wf.Nodes))
@@ -218,8 +230,9 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 		return
 	}
 
-	// 节点级开关:运行期只认布尔(false 才跳过)。非布尔值会被运行期忽略、
-	// 节点照常执行 —— 用户以为禁用了其实没禁用,必须报出来。
+	// 节点级开关:运行期只认布尔(false 才跳过)。非布尔值让运行期
+	// **fail closed**(节点失败,不执行任何副作用)—— 用户以为禁用了
+	// 其实没禁用,必须在校验期报出来(两边结论一致,约定 #13)。
 	switch compiler.NodeEnabledStateOf(n.Config) {
 	case compiler.NodeEnabledInvalid:
 		addErr("INVALID_NODE_ENABLED", n.ID, "节点 %q 的 %s 必须是布尔值(true=启用,false=运行期跳过该节点)", n.ID, compiler.NodeEnabledKey)
@@ -361,4 +374,25 @@ func joinIDs(ids []string) string {
 		out += id
 	}
 	return out
+}
+
+// Summary 把校验错误压成一行可读文本(最多 3 条)。
+//
+// 用途:运行期/接口层的错误消息此前只有"工作流校验失败"六个字,用户
+// 看不到**哪一条**规则不满足 —— 例如 permissions 段写错时,用户既不能
+// 定位也不能修(死路)。带上摘要后,错误文本本身就指明了要改什么。
+func Summary(errs []ValidationError) string {
+	if len(errs) == 0 {
+		return ""
+	}
+	const maxShow = 3
+	parts := make([]string, 0, maxShow)
+	for i, e := range errs {
+		if i >= maxShow {
+			parts = append(parts, fmt.Sprintf("(另有 %d 条)", len(errs)-maxShow))
+			break
+		}
+		parts = append(parts, e.Message)
+	}
+	return strings.Join(parts, "; ")
 }

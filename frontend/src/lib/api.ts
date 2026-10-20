@@ -72,6 +72,74 @@ export class ApiError extends Error {
   }
 }
 
+// 后端错误码 → 用户可读提示。
+// 后端契约:4xx 一律带 error + code + kind(api/server.go wrap);
+// 但错误体也可能只有 code 没有 error(旧版后端/反向代理改写),
+// 此时不能退化成裸的 "HTTP 413" —— 用户看不懂 413 是什么。
+// 码表与后端 model.Error 的 code 取值保持同步(前端只是兜底文案,
+// 后端 error 文本在场时优先用后端的)。
+const CODE_HINTS: Record<string, string> = {
+  PAYLOAD_TOO_LARGE: "内容过大(请求体超过后端上限)",
+  METHOD_NOT_ALLOWED: "请求方法不被允许",
+  INVALID_JSON: "请求内容不是合法 JSON",
+  BAD_REQUEST: "请求参数不合法",
+  NOT_FOUND: "资源不存在",
+  INVALID_LOG_LEVEL: "日志级别非法(可选 debug|info|warn|error)",
+  WORKFLOW_DISABLED: "工作流已禁用,先启用再运行",
+  STATE_CONFLICT: "状态冲突(可能已被其他操作改变),请刷新后重试",
+  DENIED: "权限不足",
+};
+
+// 状态码兜底提示:错误体完全没有 code 时(向后兼容路径)仍给一句人话。
+const STATUS_HINTS: Record<number, string> = {
+  400: "请求参数不合法",
+  403: "权限不足",
+  404: "资源不存在",
+  405: "请求方法不被允许",
+  413: "内容过大(请求体超过后端上限)",
+};
+
+// 后端 model.Error.Error() 的文本格式是 "Kind(CODE): message"
+// (带节点时 "Kind(CODE)[node=n1]: message")。直接把 Kind(CODE) 前缀
+// 弹进 toast 没有信息量,这里剥掉只留人话;code 仍保留在 ApiError.code。
+const KIND_PREFIX_RE = /^[A-Za-z]+\(([A-Z][A-Z0-9_]*)\)(?:\[[^\]]*\])?:\s*/;
+
+/** 剥掉后端错误文本的 "Kind(CODE): " 前缀;非该形态原样返回。 */
+export function stripErrorPrefix(text: string): string {
+  const m = text.match(KIND_PREFIX_RE);
+  return m ? text.slice(m[0].length) : text;
+}
+
+/**
+ * 统一的错误体 → ApiError。
+ *
+ * 兼容三种形状(必须向后兼容,任何一种都不能让前端崩):
+ *   1. 完整结构化:{error, code, kind} → 用 error 文本(剥前缀)
+ *   2. 只有 error:{error} → 用 error 文本,code/kind 为 undefined
+ *   3. 非 JSON / 无 error:HTML 兜底页、代理改写 → "HTTP {status}" + 提示
+ */
+function buildApiError(status: number, body: unknown): ApiError {
+  const d = (body && typeof body === "object" ? body : {}) as {
+    error?: unknown;
+    code?: unknown;
+    kind?: unknown;
+  };
+  const code = typeof d.code === "string" && d.code ? d.code : undefined;
+  const kind = typeof d.kind === "string" && d.kind ? d.kind : undefined;
+  const raw = typeof d.error === "string" && d.error ? d.error : "";
+  let message = raw ? stripErrorPrefix(raw) : "";
+  if (!message) {
+    // hasOwnProperty 守卫:code 来自服务端,不能让它命中 Object 原型链
+    // ("constructor"/"toString" 会取到函数而不是提示文案)。
+    const hint =
+      (code && Object.prototype.hasOwnProperty.call(CODE_HINTS, code)
+        ? CODE_HINTS[code]
+        : "") || STATUS_HINTS[status];
+    message = hint ? `HTTP ${status}: ${hint}` : `HTTP ${status}`;
+  }
+  return new ApiError(message, status, code, kind);
+}
+
 // text 端点(DSL 导出/下载)用:后端在错误时写的是 JSON 错误体,
 // 直接 res.text() 会把 {"error":...,"code":"NOT_FOUND"} 当成 DSL 内容
 // 弹进对话框或写进 .yaml 文件(fix: 绕过 http() 且不检查 res.ok)。
@@ -81,15 +149,18 @@ async function httpText(path: string): Promise<string> {
   if (!res.ok) {
     // 错误体是 JSON(见 api/server.go wrap),解析出可读消息与 code;
     // 解析不出(纯文本/HTML)时回退原始 body 与状态码。
+    let body: unknown;
     try {
-      const parsed = JSON.parse(text) as { error?: string; code?: string };
-      if (parsed && typeof parsed.error === "string" && parsed.error) {
-        throw new ApiError(parsed.error, res.status, parsed.code);
-      }
-    } catch (e) {
-      if (e instanceof ApiError) throw e;
+      body = JSON.parse(text);
+    } catch {
+      body = undefined;
     }
-    throw new ApiError(text || `HTTP ${res.status}`, res.status);
+    // 非 JSON 错误体(HTML 兜底页等)保留原始文本,便于定位;
+    // JSON 错误体交给 buildApiError 统一处理(剥 Kind(CODE) 前缀 + code 提示)。
+    if (body === undefined) {
+      throw new ApiError(text || `HTTP ${res.status}`, res.status);
+    }
+    throw buildApiError(res.status, body);
   }
   return text;
 }
@@ -107,9 +178,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     data = text;
   }
   if (!res.ok) {
-    const d = data as { error?: string; code?: string; kind?: string } | undefined;
-    const msg = d?.error ?? `HTTP ${res.status}`;
-    throw new ApiError(msg, res.status, d?.code, d?.kind);
+    throw buildApiError(res.status, data);
   }
   return data as T;
 }
@@ -299,7 +368,9 @@ export const api = {
     const r = await http<{ output: string }>(`/api/agents/${id}/test`, {
       method: "POST",
     });
-    return r.output;
+    // 字段缺失(异常响应形状)时兜底为空串:调用方会直接 split()/slice(),
+    // undefined 会变成 TypeError 把整页打挂。
+    return r?.output ?? "";
   },
   async setAgentPermission(id: string, p: PermissionPolicy): Promise<void> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).ag.SetPermission(id, p);
@@ -326,7 +397,7 @@ export const api = {
     const r = await http<{ output: string }>(`/api/skills/${id}/test`, {
       method: "POST",
     });
-    return r.output;
+    return r?.output ?? "";
   },
 
   async stats(): Promise<
@@ -423,8 +494,11 @@ export const api = {
     workflows_invalid: number;
     workflows_invalid_ids?: string[];
     agent_configs_restored: number;
-    // 结构非法未落库的 Agent 配置
+    // 未落库的 Agent 配置:结构非法 **或** 本机不存在此 Agent
+    // (后端 agent_configs_invalid 的语义已扩大,见 app/application)
     agent_configs_invalid: number;
+    // 本机不存在的 Agent ID(配置无法生效,未落库)
+    agent_configs_unknown_ids?: string[];
   }> {
     if ((await detectMode()) === "desktop") {
       return nn(await (await wailsBindings()).st.RestoreBackup(backup as unknown as never));
@@ -457,7 +531,7 @@ export const api = {
   async gitDiff(staged = false): Promise<string> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).gt.Diff(staged);
     const r = await http<{ diff: string }>(`/api/git/diff?staged=${staged}`);
-    return r.diff;
+    return r?.diff ?? "";
   },
   async gitCommit(message: string): Promise<string> {
     if ((await detectMode()) === "desktop") {
@@ -467,7 +541,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message }),
     });
-    return r.output;
+    // 同 testAgent:output 缺失时兜底空串,调用方直接 split("\n")[0]。
+    return r?.output ?? "";
   },
   async gitLog(limit = 10): Promise<
     { hash: string; author: string; date: string; subject: string }[]

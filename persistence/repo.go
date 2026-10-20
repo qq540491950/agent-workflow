@@ -209,6 +209,45 @@ func (d *DB) TouchExecutionNode(executionID, nodeID string) error {
 	return wrap(err)
 }
 
+// ExecInsertColumns 是 executions 表的插入列(顺序与 VALUES 占位符一致)。
+//
+// 显式列名的唯一来源:workflow/runtime 直接写 executions 表(状态列走 CAS),
+// 两边的列集合必须一致 —— 持久层改列名而运行期没改,运行期就会写到
+// 不存在的列上(整条 SQL 失败,执行记录落不了库)。
+// 一致性由 workflow/runtime/persist_contract_test.go 核对。
+const ExecInsertColumns = `id,workflow_id,workflow_version,workflow_name,state,task,variables_json,` +
+	`current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,` +
+	`snapshot_json,state_json`
+
+// ExecUpsertMetaColumns 是 upsert 冲突时更新的**非状态**列。
+//
+// 不含 state:state 走终态守卫(execStateGuard),裁决权在 CAS 手里。
+// 运行期的 execMetaColumns 必须与这份列表逐列一致(同上)。
+const ExecUpsertMetaColumns = `current_node_id,iterations_json,started_at,finished_at,error,` +
+	`node_states_json,snapshot_json,state_json`
+
+// execColumns 把列清单切成切片(去空白)。
+func execColumns(list string) []string {
+	parts := strings.Split(list, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if c := strings.TrimSpace(p); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// execUpsertSetClause 生成 "col=excluded.col" 形式的赋值列表。
+func execUpsertSetClause() string {
+	cols := execColumns(ExecUpsertMetaColumns)
+	parts := make([]string, 0, len(cols))
+	for _, c := range cols {
+		parts = append(parts, c+"=excluded."+c)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // SaveExecution 插入或更新执行状态(实时保存)。
 // 单条原子 upsert:不可变字段(workflow 绑定/task/变量/created_at)只在
 // 插入时写入,更新时不覆盖。
@@ -227,15 +266,12 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 	if e.Snapshot != nil {
 		snapshot, _ = json.Marshal(e.Snapshot)
 	}
-	_, err := d.sql.Exec(`INSERT INTO executions
-		(id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	// 占位符由列清单推导:列数与占位符数不可能再各自漂移。
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(execColumns(ExecInsertColumns))), ",")
+	_, err := d.sql.Exec(`INSERT INTO executions (`+ExecInsertColumns+`)
+		VALUES (`+placeholders+`)
 		ON CONFLICT(id) DO UPDATE SET
-			state=`+execStateGuardSQL+`, current_node_id=excluded.current_node_id,
-			iterations_json=excluded.iterations_json, started_at=excluded.started_at,
-			finished_at=excluded.finished_at, error=excluded.error,
-			node_states_json=excluded.node_states_json, snapshot_json=excluded.snapshot_json,
-			state_json=excluded.state_json`,
+			state=`+execStateGuardSQL+`, `+execUpsertSetClause(),
 		append([]any{
 			e.ID, e.WorkflowID, e.WorkflowVersion, e.WorkflowName, string(e.State), e.Task,
 			string(variables), e.CurrentNodeID, string(iterations), e.CreatedAt,
@@ -246,24 +282,28 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 
 // execStateGuardSQL / execStateGuardArgs 是 state 列的守卫表达式(参数化)。
 //
-// 语义:FAILED / CANCELLED 是"负面终态" —— 它们的裁决只能由
+// 语义:FAILED / CANCELLED / COMPLETED 是**终态** —— 它们的裁决只能由
 // CasExecutionState 推翻(用户显式重试);整行 upsert 不得把状态改走,
 // 否则过期副本能把已失败的执行改回"运行中/已完成"。
 //
+// COMPLETED 也在守卫里:绕过 runtime 的直写(备份恢复工具、运维脚本)
+// 此前能把一条**已完成**的执行改回 RUNNING —— 用户在列表里看到
+// "运行中",而它其实早就跑完了(状态与事实不符,约定 #14 同族问题)。
+// 运行期自身不受影响:它的状态迁移一律走 CAS(engine.casStateAndSave),
+// 整行 upsert 只在"插入首行"时使用(那一刻行还不存在)。
+//
 // 已知边界(未闭合,需引擎侧配合):
-//   - COMPLETED 未纳入保护:workflow/runtime 的崩溃恢复用例靠
-//     "COMPLETED → RUNNING"模拟"执行中途崩溃",纳入即破坏该用例;
-//     真实运行期没有把已完成执行改回运行中的路径。
 //   - 守卫挡不住"往合法后继方向"的过期写(例如库中 PAUSED、过期副本写
 //     RUNNING —— PAUSED→RUNNING 本身合法)。彻底堵住需要调用方携带
 //     "我基于哪个版本"的令牌(CAS 返回 claim token、保存时校验),
 //     属于引擎侧改动,不在持久化层可解范围内。
 var execStateGuardSQL, execStateGuardArgs = buildExecStateGuard()
 
-// execGuardedStates 是受保护的负面终态。
+// execGuardedStates 是受保护的终态。
 var execGuardedStates = []model.ExecutionState{
 	model.ExecutionFailed,
 	model.ExecutionCancelled,
+	model.ExecutionCompleted,
 }
 
 func buildExecStateGuard() (string, []any) {

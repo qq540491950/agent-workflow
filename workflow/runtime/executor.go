@@ -534,11 +534,17 @@ func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *m
 		Output:  resp.Output,
 		Data:    resp.Data,
 	}
-	if resp.Status == "FAILED" || resp.Status == "failed" {
+	// 状态归一化:Skill 接口承诺 SUCCESS | FAILED | WAIT_USER,但状态是
+	// 字符串,外部实现可能返回 "wait_user" / "Failed" / " wait_user "。
+	// 归一化的唯一来源是 skill.NormalizeStatus(去空白 + 转大写)——
+	// 散落的字面量匹配漏掉一种形态,就意味着"该失败/该等待却成功"
+	// (约定 14)。此前只精确匹配 "WAIT_USER" 与 {"FAILED","failed"}:
+	// 小写 "wait_user" 被当成功,人工确认这一步被静默跳过。
+	switch skill.NormalizeStatus(resp.Status) {
+	case skill.StatusFailed:
 		outcome.State = model.NodeFailed
 		outcome.Error = resp.Error
-	}
-	if resp.Status == "WAIT_USER" {
+	case skill.StatusWaitUser:
 		// Skill 接口承诺 WAIT_USER:暂停等待用户输入(与人工节点一致)
 		outcome.State = model.NodeWaiting
 		if outcome.Data == nil {

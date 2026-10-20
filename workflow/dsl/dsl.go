@@ -115,65 +115,6 @@ type Edge struct {
 	Condition string `yaml:"condition" json:"condition,omitempty"`
 }
 
-// PromptDef 支持 prompt 为纯字符串或 {template: ...} 两种写法。
-type PromptDef struct {
-	Template string
-}
-
-// AgentNodeConfig 是 agent 节点的配置结构。
-type AgentNodeConfig struct {
-	Agent          string            `yaml:"agent" json:"agent"`
-	Mode           string            `yaml:"mode" json:"mode"`
-	Prompt         *PromptDef        `yaml:"prompt" json:"prompt,omitempty"`
-	WorkingDir     string            `yaml:"working_dir" json:"working_dir,omitempty"`
-	TimeoutSeconds int               `yaml:"timeout_seconds" json:"timeout_seconds,omitempty"`
-	Retry          *RetryPolicy      `yaml:"retry" json:"retry,omitempty"`
-	Instructions   string            `yaml:"instructions" json:"instructions,omitempty"`
-	Env            map[string]string `yaml:"env" json:"env,omitempty"`
-}
-
-// RetryPolicy 是节点级重试策略。
-type RetryPolicy struct {
-	MaxAttempts int    `yaml:"max_attempts" json:"max_attempts,omitempty"`
-	Backoff     string `yaml:"backoff" json:"backoff,omitempty"` // fixed | exponential
-}
-
-// SkillNodeConfig 是 skill 节点的配置结构。
-type SkillNodeConfig struct {
-	Skill string         `yaml:"skill" json:"skill"`
-	Agent string         `yaml:"agent" json:"agent,omitempty"`
-	Args  map[string]any `yaml:"args" json:"args,omitempty"`
-}
-
-// ConditionNodeConfig 是 condition 节点的配置结构。
-type ConditionNodeConfig struct {
-	Expression string `yaml:"expression" json:"expression"`
-}
-
-// HumanNodeConfig 是 human 节点的配置结构。
-type HumanNodeConfig struct {
-	Prompt    string   `yaml:"prompt" json:"prompt,omitempty"`
-	Responses []string `yaml:"responses" json:"responses,omitempty"` // approve/reject/continue/instruction
-}
-
-// ScriptNodeConfig 是 script 节点的配置结构。
-type ScriptNodeConfig struct {
-	Command string `yaml:"command" json:"command"`
-	Shell   string `yaml:"shell" json:"shell,omitempty"`
-}
-
-// GitNodeConfig 是 git 节点的配置结构。
-type GitNodeConfig struct {
-	Operation string         `yaml:"operation" json:"operation"` // status|diff|log|branch|checkout|commit
-	Args      map[string]any `yaml:"args" json:"args,omitempty"`
-}
-
-// SubWorkflowNodeConfig 是 subworkflow 节点的配置结构。
-type SubWorkflowNodeConfig struct {
-	WorkflowID string         `yaml:"workflow_id" json:"workflow_id"`
-	Input      map[string]any `yaml:"input" json:"input,omitempty"`
-}
-
 // Parse 将 YAML/JSON 文本解析为 Document。
 // 输入格式由内容自动识别:以 '{' 开头按 JSON,否则按 YAML。
 func Parse(data []byte) (*Document, error) {
