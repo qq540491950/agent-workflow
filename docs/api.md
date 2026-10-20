@@ -155,7 +155,7 @@ HTTP 状态码语义:
 > `POST /api/workflows/validate` 响应的 `errors[].code` / `warnings[].code`
 > 数组里;HTTP 错误体的 `code` 在响应体顶层。同一个字符串在两处都可能出现。
 
-## 契约变化(第四/五轮)
+## 契约变化(第四/五/七轮)
 
 ### 1. 导入响应带 `ignored_keys`
 
@@ -186,10 +186,16 @@ HTTP 状态码语义:
 - 允许集合的唯一来源是 `model.Workflow` 的 json tag(反射派生),不手写;
 - `permissions`(DSL 根级段的正式写法)与 `ignored_keys`(导入响应的
   专用字段)是两个特例 —— 后者被拒会让"导入 → 原样回存"的往返失败;
-- 前端设计器发出的 payload 只含模型里的字段,因此严格化**不打破**保存路径。
+- 前端设计器发出的 payload 只含模型里的字段,因此严格化**不打破**保存路径;
+- `warnings`(保存/运行结果的附加字段)也是特例 —— 保存时忽略它,否则
+  "导入 → 原样回存"的往返会失败。
 
-> **已知边界**:该检查位于服务器模式的 HTTP 层。桌面模式走 Wails 绑定 →
-> 应用层 → `model.Workflow.UnmarshalJSON`,那一层仍是宽松的 `json.Unmarshal`。
+> **第七轮变更(已关闭上述边界)**:该检查已从 HTTP 层**下沉到应用服务层**
+> (`app/application/workflow_payload.go`),允许键集合仍由 `model.Workflow` 的
+> json tag 反射派生,并新增 `warnings` 字段作为特例。
+> 服务器模式与桌面模式**走同一段代码**(`SavePayload` / `ParseWorkflowPayload`),
+> 同一份非法载荷在两种模式下给出**同一个 code**。
+> 详见 `docs/OPTIMIZATION.md` 第十节(#197)。
 
 ### 3. `restoreBackup` 的返回形状
 

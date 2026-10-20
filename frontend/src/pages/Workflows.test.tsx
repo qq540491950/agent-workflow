@@ -182,3 +182,35 @@ describe("Workflows 导入 YAML:被忽略的键必须可见", () => {
     expect(toast.error).toHaveBeenCalledWith("DSL 含未知顶层键");
   });
 });
+
+// 保存/导入结果里的校验警告:此前只进后端日志,用户永远看不到 ——
+// 用户以为"已废弃的配置键"仍然生效(约定 #14 同族:该报告却没报告)。
+describe("Workflows 校验警告必须可见", () => {
+  it("导入带警告时提示警告内容(含错误码)", async () => {
+    m.importYAML.mockResolvedValue({
+      ...wf,
+      id: "wf-2",
+      name: "导入的流程",
+      warnings: [
+        {
+          code: "DEPRECATED_NODE_CONFIG",
+          node: "c",
+          message: "节点 c 的配置键 expression 已废弃",
+        },
+      ],
+    });
+    renderWorkflows();
+    await settle();
+    fireEvent.click(screen.getByText("导入 YAML"));
+    await settle();
+    fireEvent.change(screen.getByPlaceholderText(/version/), {
+      target: { value: 'version: "1"\nworkflow:\n  id: wf-2\n' },
+    });
+    fireEvent.click(screen.getByText("导入"));
+    await settle();
+    const warned = vi.mocked(toast.warning).mock.calls.map((c) => String(c[0]));
+    expect(warned.some((t) => t.includes("expression 已废弃"))).toBe(true);
+    expect(warned.some((t) => t.includes("DEPRECATED_NODE_CONFIG"))).toBe(true);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+});

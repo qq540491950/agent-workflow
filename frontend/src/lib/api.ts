@@ -9,6 +9,7 @@ import type {
   PermissionPolicy,
   SkillDTO,
   UIEvent,
+  ValidationError,
   ValidationResult,
   Workflow,
 } from "./types";
@@ -42,6 +43,24 @@ export function detectMode(): Promise<"desktop" | "web"> {
     })();
   }
   return modePromise;
+}
+
+// MAX_QUERY_LIMIT 是显式 limit 参数的上限 —— 与服务端
+// api.maxQueryLimit 同值(唯一来源:服务端常量)。
+//
+// 桌面分支此前不设上限:同一个请求在服务器模式被收敛到 1000 条,在桌面
+// 模式却可能把整表拉出来(同一个语义,两种模式行为不同 —— 约定 10)。
+const MAX_QUERY_LIMIT = 1000;
+
+/**
+ * 把 limit 收敛到服务端允许的范围(两种模式同一口径)。
+ *
+ * 口径与服务端 api.queryInt 一致:非正数 = 不限制(0),超上限收敛到
+ * MAX_QUERY_LIMIT(不取模、不溢出)。
+ */
+function clampLimit(limit: number): number {
+  if (!Number.isFinite(limit) || limit <= 0) return 0;
+  return Math.min(Math.trunc(limit), MAX_QUERY_LIMIT);
 }
 
 // Wails bindings 返回生成器类型(带 null),统一断言为本项目的领域类型。
@@ -78,28 +97,83 @@ export class ApiError extends Error {
 // 此时不能退化成裸的 "HTTP 413" —— 用户看不懂 413 是什么。
 // 码表与后端 model.Error 的 code 取值保持同步(前端只是兜底文案,
 // 后端 error 文本在场时优先用后端的)。
+//
+// **全集**:后端可能返回的每一个 code 都必须在这里有一句人话。
+// api.test.ts 的"错误码全集守卫"会扫描后端 Go 源码(workflow/**、api/**、
+// app/**、permission/** 等)与本表求差集:后端新增 code 而这里没补 →
+// 测试红(防漂移的关键)。
 const CODE_HINTS: Record<string, string> = {
+  // ---- HTTP / 载荷层 ----
   PAYLOAD_TOO_LARGE: "内容过大(请求体超过后端上限)",
   METHOD_NOT_ALLOWED: "请求方法不被允许",
   INVALID_JSON: "请求内容不是合法 JSON",
   BAD_REQUEST: "请求参数不合法",
   NOT_FOUND: "资源不存在",
-  INVALID_LOG_LEVEL: "日志级别非法(可选 debug|info|warn|error)",
+  UNKNOWN_FIELD: "请求含未知顶层字段(该字段不会生效)",
+  INTERNAL: "后端内部错误",
+  // ---- 工作流 / 执行 ----
+  WORKFLOW_INVALID: "工作流校验未通过(见错误详情)",
   WORKFLOW_DISABLED: "工作流已禁用,先启用再运行",
   STATE_CONFLICT: "状态冲突(可能已被其他操作改变),请刷新后重试",
-  DENIED: "权限不足",
-  // 第四/五轮新增的码(DSL 严格化 + 未知键上报)。
-  // DSL_UNKNOWN_KEY / DSL_MISPLACED_KEY 是导入路径的硬错误(400),
-  // 未知顶层键走 UNKNOWN_FIELD(400)。
+  INVALID_RESUME: "当前执行状态不允许恢复(可能已在运行或已结束)",
+  INVALID_RETRY: "当前执行状态不允许重试",
+  INVALID_TRANSITION: "执行状态迁移非法",
+  NO_FAILED_NODE: "没有失败的节点可重试",
+  SUBWORKFLOW_CANCELLED: "父执行取消,子工作流已中止",
+  // ---- Agent / 子进程 ----
+  AGENT_CANCELLED: "Agent 执行被取消",
+  AGENT_CONFIG_CORRUPT: "Agent 配置已损坏,无法解析",
+  CLAUDE_CANCELLED: "Claude 进程被取消",
+  CLAUDE_PROCESS_ERROR: "Claude 进程异常退出",
+  CLAUDE_TIMEOUT: "Claude 执行超时",
+  PI_CANCELLED: "Pi 进程被取消",
+  PI_PROCESS_ERROR: "Pi 进程异常退出",
+  PI_TIMEOUT: "Pi 执行超时",
+  // ---- 权限 / 持久化 ----
+  PERMISSION_DENIED: "权限不足",
+  INVALID_LOG_LEVEL: "日志级别非法(可选 debug|info|warn|error)",
+  DB_ERROR: "数据库操作失败",
+  // ---- DSL ----
   DSL_UNKNOWN_KEY: "DSL 含未知顶层键(检查拼写与缩进)",
   DSL_MISPLACED_KEY: "DSL 段放错了层级(该设置不会生效)",
-  UNKNOWN_FIELD: "请求含未知顶层字段(该字段不会生效)",
-  // 以下三个是**校验期**的 code(出现在校验结果的 errors/warnings 里,
-  // 未必走 HTTP 错误体);留在表里是为了将来后端把它们升级为错误码时
-  // 前端不必再改。
-  UNKNOWN_NODE_CONFIG: "节点含未识别的配置键(该设置不会生效)",
+  DSL_PARSE_ERROR: "DSL 解析失败(检查 YAML 语法)",
+  DSL_ENCODE_ERROR: "DSL 导出失败",
+  // ---- Git ----
+  GIT_COMMAND_FAILED: "Git 命令执行失败",
+  GIT_INVALID_REF: "Git 引用非法",
+  GIT_MISSING_ARG: "Git 缺少必要参数",
+  GIT_UNSUPPORTED_OP: "Git 操作不被支持",
+  // ---- 校验期(validator;出现在校验结果的 errors/warnings 里) ----
+  AGENT_NOT_FOUND: "引用的 Agent 不存在",
+  CYCLE_WITHOUT_CONDITION: "存在无条件的环路(会死循环)",
   DEPRECATED_NODE_CONFIG: "节点配置键已废弃(不再按该键执行)",
+  DUPLICATE_NODE: "节点 ID 重复",
+  EMPTY_WORKFLOW: "工作流为空(至少要有一个节点)",
+  INVALID_EDGE: "连线非法(端点不存在或成环)",
+  INVALID_EXPRESSION: "条件表达式非法",
+  INVALID_GIT_OPERATION: "Git 节点的操作非法",
+  INVALID_NODE: "节点定义非法",
   INVALID_NODE_ENABLED: "节点的 enabled 必须是布尔值(true=启用,false=运行期跳过)",
+  INVALID_PERMISSION_OVERRIDE: "权限覆盖段结构非法(已按拒绝处理)",
+  ISOLATED_NODE: "存在孤立节点(没有任何连线)",
+  LOOP_WITHOUT_MAX_ITERATIONS: "存在环但未设置 max_iterations(会死循环)",
+  MISSING_AGENT: "agent 节点缺少 agent 配置",
+  MISSING_COMMAND: "script 节点缺少 command 配置",
+  MISSING_CONFIG: "节点缺少必需配置",
+  MISSING_ID: "缺少 id",
+  MISSING_MODE: "agent 节点缺少 mode 配置",
+  MISSING_NAME: "缺少 name",
+  MISSING_SKILL: "skill 节点缺少 skill 配置",
+  MISSING_WORKFLOW_ID: "subworkflow 节点缺少 workflow_id 配置",
+  MULTIPLE_START: "存在多个开始节点",
+  NO_EXIT_PATH: "存在没有出口的节点(执行会卡住)",
+  NO_START: "缺少开始节点",
+  SELF_LOOP: "节点自环(非法)",
+  SKILL_NOT_FOUND: "引用的 Skill 不存在",
+  SUBWORKFLOW_NOT_FOUND: "引用的子工作流不存在",
+  UNKNOWN_NODE_CONFIG: "节点含未识别的配置键(该设置不会生效)",
+  UNKNOWN_NODE_TYPE: "未知的节点类型",
+  UNREACHABLE_NODE: "存在不可达节点",
 };
 
 // 状态码兜底提示:错误体完全没有 code 时(向后兼容路径)仍给一句人话。
@@ -114,12 +188,82 @@ const STATUS_HINTS: Record<number, string> = {
 // 后端 model.Error.Error() 的文本格式是 "Kind(CODE): message"
 // (带节点时 "Kind(CODE)[node=n1]: message")。直接把 Kind(CODE) 前缀
 // 弹进 toast 没有信息量,这里剥掉只留人话;code 仍保留在 ApiError.code。
-const KIND_PREFIX_RE = /^[A-Za-z]+\(([A-Z][A-Z0-9_]*)\)(?:\[[^\]]*\])?:\s*/;
+const KIND_PREFIX_RE = /^([A-Za-z]+)\(([A-Z][A-Z0-9_]*)\)(?:\[[^\]]*\])?:\s*/;
 
 /** 剥掉后端错误文本的 "Kind(CODE): " 前缀;非该形态原样返回。 */
 export function stripErrorPrefix(text: string): string {
   const m = text.match(KIND_PREFIX_RE);
   return m ? text.slice(m[0].length) : text;
+}
+
+/**
+ * 解析后端错误文本的 "Kind(CODE): " 前缀。
+ *
+ * 桌面模式(Wails IPC)没有 HTTP 错误体 —— 后端的 model.Error 以纯文本
+ * 形式 reject,只能从这段文本里还原 kind/code;服务器模式则由错误体直接
+ * 给出。少了这层还原,同一个错误在两种模式下前端拿到的 code/kind 全丢
+ * (约定 10:双分支必须给出一致的结构化信息)。
+ */
+export function parseErrorPrefix(text: string): {
+  kind?: string;
+  code?: string;
+  message: string;
+} {
+  const m = text.match(KIND_PREFIX_RE);
+  if (!m) return { message: text };
+  return { kind: m[1], code: m[2], message: text.slice(m[0].length) };
+}
+
+/** 取某个错误码的人话提示(带原型链守卫:code 来自服务端)。 */
+function hintFor(code?: string): string {
+  if (!code) return "";
+  if (!Object.prototype.hasOwnProperty.call(CODE_HINTS, code)) return "";
+  return CODE_HINTS[code];
+}
+
+/**
+ * 把桌面模式 IPC 的错误统一成 ApiError。
+ *
+ * 桌面分支此前**完全没有错误处理**:绑定 reject 的原始字符串直接冒泡,
+ * 用户看到的是 "ValidationError(UNKNOWN_FIELD): 未知的顶层字段 …" 这种
+ * 带内部前缀的裸文本,而服务器模式看到的是剥掉前缀的 ApiError。
+ */
+function toApiError(e: unknown): ApiError {
+  if (e instanceof ApiError) return e;
+  const text = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  const parsed = parseErrorPrefix(text);
+  const message = parsed.message || hintFor(parsed.code);
+  return new ApiError(message, 0, parsed.code, parsed.kind);
+}
+
+/**
+ * 给 Wails 绑定服务的每个方法套一层错误转换(集中一处,不必逐个分支改)。
+ *
+ * 服务器模式的错误是结构化错误体 {error, code, kind};桌面模式是 IPC
+ * reject 的纯文本 —— 不统一的话,同一个错误在两种模式下前端拿到的
+ * code/kind 完全不同(约定 10)。
+ */
+function wrapService<T extends object>(mod: T): T {
+  return new Proxy(mod, {
+    get(target, prop, receiver) {
+      const v = Reflect.get(target, prop, receiver);
+      if (typeof v !== "function") return v;
+      return (...args: unknown[]) => {
+        let out: unknown;
+        try {
+          out = (v as (...a: unknown[]) => unknown)(...args);
+        } catch (e) {
+          throw toApiError(e);
+        }
+        if (out && typeof (out as { catch?: unknown }).catch === "function") {
+          return (out as Promise<unknown>).catch((e: unknown) => {
+            throw toApiError(e);
+          });
+        }
+        return out;
+      };
+    },
+  });
 }
 
 /**
@@ -143,10 +287,7 @@ function buildApiError(status: number, body: unknown): ApiError {
   if (!message) {
     // hasOwnProperty 守卫:code 来自服务端,不能让它命中 Object 原型链
     // ("constructor"/"toString" 会取到函数而不是提示文案)。
-    const hint =
-      (code && Object.prototype.hasOwnProperty.call(CODE_HINTS, code)
-        ? CODE_HINTS[code]
-        : "") || STATUS_HINTS[status];
+    const hint = hintFor(code) || STATUS_HINTS[status];
     message = hint ? `HTTP ${status}: ${hint}` : `HTTP ${status}`;
   }
   return new ApiError(message, status, code, kind);
@@ -196,6 +337,8 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // Wails bindings 按需加载(仅桌面模式)。
+// 每个服务都套一层 wrapService:桌面模式的错误统一成 ApiError(与服务器
+// 模式同构),否则同一个错误在两种模式下的 code/kind 全丢(约定 10)。
 async function wailsBindings() {
   const [wf, ex, ag, sk, gt, st] = await Promise.all([
     import("@bindings/agentworkflow/app/application/workflowservice.js"),
@@ -205,7 +348,31 @@ async function wailsBindings() {
     import("@bindings/agentworkflow/app/application/gitservice.js"),
     import("@bindings/agentworkflow/app/application/settingsservice.js"),
   ]);
-  return { wf, ex, ag, sk, gt, st };
+  return {
+    wf: wrapService(wf),
+    ex: wrapService(ex),
+    ag: wrapService(ag),
+    sk: wrapService(sk),
+    gt: wrapService(gt),
+    st: wrapService(st),
+  };
+}
+
+/**
+ * 归一化工作流结果:两种模式都补齐附加字段的缺省值。
+ *
+ * 后端在"没有警告 / 没有被忽略的键"时**省略**这些字段(omitempty),
+ * 两个分支都统一成空数组 —— 调用方不必区分"没有"与"空"。
+ */
+function normalizeWorkflow(wf: Workflow | null): Workflow {
+  if (!wf) return wf as unknown as Workflow;
+  return { ...wf, warnings: wf.warnings ?? [], ignored_keys: wf.ignored_keys ?? [] };
+}
+
+/** 归一化执行结果(同上:warnings 缺省为空数组)。 */
+function normalizeExecution(ex: Execution | null): Execution {
+  if (!ex) return ex as unknown as Execution;
+  return { ...ex, warnings: ex.warnings ?? [] };
 }
 
 export const api = {
@@ -220,8 +387,21 @@ export const api = {
     return http(`/api/workflows/${id}`);
   },
   async saveWorkflow(wf: Workflow): Promise<Workflow> {
-    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).wf.Save(wf as unknown as never));
-    return http("/api/workflows", { method: "POST", body: JSON.stringify(wf) });
+    if ((await detectMode()) === "desktop") {
+      // 桌面模式必须走**载荷级**入口(SavePayload):未知顶层键在模型级
+      // Save 里查不出来(反序列化时已被 json.Unmarshal 静默丢弃)——
+      // 服务器模式会报 UNKNOWN_FIELD,桌面模式此前静默接受(约定 10)。
+      //
+      // 返回形状两种模式一致:工作流字段在顶层 + warnings(校验警告)。
+      return normalizeWorkflow(
+        nn<Workflow>(
+          await (await wailsBindings()).wf.SavePayload(JSON.stringify(wf)),
+        ),
+      );
+    }
+    return normalizeWorkflow(
+      await http<Workflow>("/api/workflows", { method: "POST", body: JSON.stringify(wf) }),
+    );
   },
   async deleteWorkflow(id: string): Promise<void> {
     if ((await detectMode()) === "desktop") return (await wailsBindings()).wf.Delete(id);
@@ -249,13 +429,20 @@ export const api = {
   },
   async importYAML(content: string): Promise<Workflow> {
     if ((await detectMode()) === "desktop") {
-      return nn(await (await wailsBindings()).wf.ImportYAML(content));
+      // 桌面模式此前拿不到"被忽略的键"(服务器模式的 import 端点自己又
+      // 解析了一遍 DSL 才补上这个字段)—— 现在由应用层统一产出,两种
+      // 模式同源(约定 10)。
+      return normalizeWorkflow(
+        nn<Workflow>(await (await wailsBindings()).wf.ImportYAML(content)),
+      );
     }
-    return http("/api/workflows/import", {
-      method: "POST",
-      body: content,
-      headers: { "Content-Type": "application/yaml" },
-    });
+    return normalizeWorkflow(
+      await http<Workflow>("/api/workflows/import", {
+        method: "POST",
+        body: content,
+        headers: { "Content-Type": "application/yaml" },
+      }),
+    );
   },
   async validateWorkflow(wf: Workflow): Promise<ValidationResult> {
     if ((await detectMode()) === "desktop") {
@@ -280,16 +467,22 @@ export const api = {
     variables?: Record<string, unknown>,
   ): Promise<Execution> {
     if ((await detectMode()) === "desktop")
-      return nn(
-        await (await wailsBindings()).ex.Run(id, task, variables ?? {}),
+      return normalizeExecution(
+        nn<Execution>(
+          await (await wailsBindings()).ex.Run(id, task, variables ?? {}),
+        ),
       );
-    return http(`/api/workflows/${id}/run`, {
-      method: "POST",
-      body: JSON.stringify({ task, variables }),
-    });
+    return normalizeExecution(
+      await http<Execution>(`/api/workflows/${id}/run`, {
+        method: "POST",
+        body: JSON.stringify({ task, variables }),
+      }),
+    );
   },
   async listExecutions(workflowID = "", limit = 50): Promise<Execution[]> {
-    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.List(workflowID, limit));
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).ex.List(workflowID, clampLimit(limit)));
+    }
     const q = workflowID
       ? `?workflow_id=${encodeURIComponent(workflowID)}&limit=${limit}`
       : `?limit=${limit}`;
@@ -358,9 +551,11 @@ export const api = {
   },
   async updateAgentConfig(id: string, cfg: AgentConfig): Promise<AgentConfig> {
     if ((await detectMode()) === "desktop") {
-      return nn(
-        await (await wailsBindings()).ag.UpdateConfig(id, cfg as unknown as never),
-      );
+      await (await wailsBindings()).ag.UpdateConfig(id, cfg as unknown as never);
+      // 服务器模式在更新后回读**掩码后**的配置(约定 8:API 返回掩码);
+      // 桌面模式此前直接返回绑定的 void 结果 → 调用方拿到 null,
+      // 掩码展示失效(两种模式行为不同)。
+      return nn<AgentConfig>(await (await wailsBindings()).ag.GetConfig(id));
     }
     return http(`/api/agents/${id}/config`, {
       method: "PUT",
@@ -371,7 +566,9 @@ export const api = {
     // 后端 ResetConfig 与 POST /api/agents/{id}/reset 都已存在,但两个模式
     // 都没封装、UI 也没入口 —— 能力空洞(配错配置后无法恢复默认)。
     if ((await detectMode()) === "desktop") {
-      return nn(await (await wailsBindings()).ag.ResetConfig(id));
+      await (await wailsBindings()).ag.ResetConfig(id);
+      // 同 updateAgentConfig:回读掩码后的配置,两种模式形状一致。
+      return nn<AgentConfig>(await (await wailsBindings()).ag.GetConfig(id));
     }
     return http(`/api/agents/${id}/reset`, { method: "POST" });
   },
@@ -438,7 +635,7 @@ export const api = {
       return nn(
         await (await wailsBindings()).ex.AllEvents(
           params.get("type") ?? "",
-          Number(params.get("limit")) || 200,
+          clampLimit(Number(params.get("limit")) || 200),
         ),
       );
     }
@@ -559,10 +756,30 @@ export const api = {
   async gitLog(limit = 10): Promise<
     { hash: string; author: string; date: string; subject: string }[]
   > {
-    if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).gt.Log(limit));
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).gt.Log(clampLimit(limit)));
+    }
     return http(`/api/git/log?limit=${limit}`);
   },
 };
+
+/**
+ * 把校验警告拼成一句人话(UI 展示用)。
+ *
+ * 警告此前只进后端日志,用户永远看不到 —— 用户以为"已废弃的配置键"仍然
+ * 生效。两种模式现在都带回 warnings,这里统一成一句可读的提示。
+ *
+ * 带 code 是为了可追溯(用户报问题时能直接给出码),message 本身已是中文。
+ */
+export function describeWarnings(warnings?: ValidationError[]): string {
+  if (!warnings || warnings.length === 0) return "";
+  return warnings
+    .map((w) => {
+      const where = w.node ? `节点 ${w.node}` : "工作流";
+      return `${where}: ${w.message}(${w.code})`;
+    })
+    .join(";");
+}
 
 // ---- 实时事件(统一订阅层) ----
 

@@ -35,7 +35,7 @@ import {
   ShieldCheck,
   LayoutGrid,
 } from "lucide-react";
-import { api, asArray } from "@/lib/api";
+import { api, asArray, describeWarnings } from "@/lib/api";
 import type { AgentInfo, ValidationError, Workflow, WFNode } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -401,6 +401,10 @@ function DesignerInner() {
       setWf(saved);
       hydrate(saved);
       toast.success(`已保存 (v${saved.version})`);
+      // 校验警告必须让用户看到:此前只进后端日志,用户以为"已废弃的
+      // 配置键"仍然生效(两种模式现在都带回 warnings)。
+      const warns = describeWarnings(saved.warnings);
+      if (warns) toast.warning(warns);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {

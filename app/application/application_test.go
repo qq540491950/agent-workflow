@@ -48,7 +48,9 @@ edges:
 	if err != nil {
 		t.Fatalf("save sample workflow: %v", err)
 	}
-	return wf
+	// ImportYAML 现在返回 *WorkflowResult(携带被忽略的键与校验警告);
+	// 这里只要工作流本体 —— 断言未改动。
+	return wf.Workflow
 }
 
 // 回归:环境变量更新时 "***" 表示保留原值、空串表示删除,
@@ -655,8 +657,34 @@ func TestSkillSetEnabledPersistsBeforeMemory(t *testing.T) {
 	}
 }
 
+// logLevelRaceIterations 是 TestLogLevelConcurrentAccess 的写次数。
+//
+// 依据(实测:-race 下**去掉** logLevelMu 的读写锁,同一份代码跑 5 次统计
+// "DATA RACE" 命中数):
+//
+//	走 Settings.Update(含一次 SQLite 写)20 次  → 0/5 命中(假绿!)
+//	走 Settings.Update 200 次                 → 5/5 命中
+//	走 setLogLevel(真正的争用点)20 次         → 5/5 命中
+//
+// 迭代数太小 = 恒真的假保护(去掉锁仍全绿,比没有测试更危险);太大又拖慢
+// 门禁。这里取 3000:比"能稳定命中的最小值"高一个数量级以上的余量,
+// 而写循环本身只占 ~1ms —— 整个测试仍由 150ms 的观察窗口主导
+// (实测:3000 次 Settings.Update(含落库)要 2.6s,混合写只要 0.15s)。
+const logLevelRaceIterations = 3000
+
 // TestLogLevelConcurrentAccess 验证 Settings.Info 与 Settings.Update
 // 并发时 LogLevel 无数据竞争(此前是无锁裸 string 字段)。
+//
+// 此前迭代数只有 20:把 logLevelMu 的读写锁去掉后,-race **仍全绿**
+// (实测 0/5 命中)—— 恒真的假保护。现在写侧分两路:
+//
+//  1. setLogLevel:Settings.Update 真正写 a.logLevel 的地方(真正的争用
+//     点),迭代 logLevelRaceIterations 次;
+//  2. Settings.Update:公开路径(落库 + 应用日志级别 + 写内存态),每 100
+//     次迭代来一次 —— 端到端语义仍然被覆盖。
+//
+// 读侧保持 4 个 goroutine 持续读(Settings.Info + LogLevelValue),
+// 观察窗口 150ms。
 func TestLogLevelConcurrentAccess(t *testing.T) {
 	a := newTestApp(t)
 	var wg sync.WaitGroup
@@ -681,8 +709,12 @@ func TestLogLevelConcurrentAccess(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		levels := []string{"debug", "info", "warn", "error"}
-		for i := 0; i < 20; i++ {
-			_, _ = a.Settings.Update("", levels[i%len(levels)], nil)
+		for i := 0; i < logLevelRaceIterations; i++ {
+			level := levels[i%len(levels)]
+			a.setLogLevel(level)
+			if i%100 == 0 {
+				_, _ = a.Settings.Update("", level, nil)
+			}
 		}
 	}()
 	time.Sleep(150 * time.Millisecond)

@@ -504,26 +504,109 @@ func (s *WorkflowService) Get(id string) (*model.Workflow, error) {
 	return s.app.Repo.GetWorkflow(id)
 }
 
+// WorkflowResult 是工作流写操作(保存/导入)的返回结果。
+//
+// 形状:**工作流字段仍在顶层**(与既有 REST 响应契约一致 —— 第三方客户端
+// 直接读 body.id / body.nodes,不能被包一层),额外附加两个字段:
+//
+//   - warnings:校验警告(不阻断保存,但必须让调用方看到 —— 此前只进日志,
+//     直连 API 的调用方永远看不到,用户以为设置生效了);
+//   - ignored_keys:导入时被解析器丢弃的键(仅导入路径有值)。
+//
+// ignored_keys 的处理沿用导入接口既有的前例(平铺附加字段,不用
+// {workflow: ...} 包一层):既不破坏既有客户端,也不让"导入 → 原样回存"
+// 这种往返失败。
+type WorkflowResult struct {
+	*model.Workflow
+	// Warnings 校验警告(结构化,与校验结果的 warnings 同源)。
+	Warnings []validator.ValidationError `json:"warnings,omitempty"`
+	// IgnoredKeys 导入时被丢弃的键(仅导入路径有值)。
+	IgnoredKeys []string `json:"ignored_keys,omitempty"`
+}
+
+// UnmarshalJSON 显式实现:model.Workflow 自带 UnmarshalJSON(权限段别名
+// 兼容),嵌入本类型后该方法会被**提升**到 WorkflowResult —— 若不屏蔽,
+// 反序列化时 warnings/ignored_keys 会被整个丢掉。
+//
+// 两个坑(都实测过):
+//  1. 提升后的 UnmarshalJSON 会在 **nil** 嵌入指针上被调用 ——
+//     model.Workflow 里对 *w 赋值会 panic;
+//  2. 更隐蔽:encoding/json 命中提升上来的 UnmarshalJSON 后,把**整个**
+//     JSON 对象交给它,外层自己的字段(warnings/ignored_keys)因此再也
+//     拿不到 —— 所以不能靠"别名类型 + 一次 Unmarshal"绕过去。
+//
+// 因此这里显式分两段解析:工作流本体交给 model.Workflow 自己的解析器
+// (它按惯例忽略无关键),附加字段用一个不含嵌入字段的小结构单独解析。
+func (r *WorkflowResult) UnmarshalJSON(data []byte) error {
+	wf := &model.Workflow{}
+	if err := json.Unmarshal(data, wf); err != nil {
+		return err
+	}
+	var extra struct {
+		Warnings    []validator.ValidationError `json:"warnings"`
+		IgnoredKeys []string                    `json:"ignored_keys"`
+	}
+	if err := json.Unmarshal(data, &extra); err != nil {
+		return err
+	}
+	r.Workflow = wf
+	r.Warnings = extra.Warnings
+	r.IgnoredKeys = extra.IgnoredKeys
+	return nil
+}
+
 // Save 创建或更新(传入带 ID 的 workflow;存在则版本+1)。
+//
+// 模型级入口:调用方已经持有模型,**没有原始载荷**,因此不做顶层键校验
+// (键在反序列化时已丢失,无从检查)。用户提交路径一律走 SavePayload。
+//
+// 校验警告仍然不丢:既进日志,也在 SavePayload/ImportYAML 的返回值里带回。
 func (s *WorkflowService) Save(wf *model.Workflow) (*model.Workflow, error) {
+	saved, _, err := s.saveModel(wf)
+	return saved, err
+}
+
+// SavePayload 保存工作流(载荷级入口:两种模式的用户提交路径都用它)。
+//
+// rawJSON 是调用方提交的**原始 JSON 文本** —— 必须保留原始键:未知顶层键
+// 在反序列化时会被静默丢弃,只有拿到原始载荷才能报 UNKNOWN_FIELD。
+// 桌面模式此前走 Save(模型级),非法载荷被静默接受 —— 双模式行为不一致。
+func (s *WorkflowService) SavePayload(rawJSON string) (*WorkflowResult, error) {
+	wf, err := ParseWorkflowPayload([]byte(rawJSON))
+	if err != nil {
+		return nil, err
+	}
+	saved, warnings, err := s.saveModel(wf)
+	if err != nil {
+		return nil, err
+	}
+	return &WorkflowResult{Workflow: saved, Warnings: warnings}, nil
+}
+
+// saveModel 校验并保存工作流模型:返回保存后的工作流与校验警告。
+//
+// 警告此前被整个丢掉(只回传 res.Errors):DEPRECATED_NODE_CONFIG 这类
+// 警告只有显式 validate 端点看得见,直连 API 的调用方看不到 ——
+// 静默丢失(约定 #14 同族)。这里既记进日志(不丢),也随结果带回。
+func (s *WorkflowService) saveModel(wf *model.Workflow) (*model.Workflow, []validator.ValidationError, error) {
 	if wf.ID == "" {
 		wf.ID = "wf-" + strings.ToLower(randHex(6))
 	}
 	// 保存前必须校验
 	res := s.app.Engine.Validate(wf)
-	// 警告此前被整个丢掉(只回传 res.Errors):DEPRECATED_NODE_CONFIG 这类
-	// 警告只有显式 validate 端点看得见,直连 API 的调用方看不到 ——
-	// 静默丢失(约定 #14 同族)。这里先在应用层记进日志(不丢);
-	// 要让调用方也拿到,需要改 API 契约(见交付报告)。
 	logValidationWarnings("save", wf.ID, res)
 	if !res.Valid {
 		raw, _ := json.Marshal(res.Errors)
-		return nil, model.NewError(model.KindValidationError, "WORKFLOW_INVALID", string(raw))
+		return nil, nil, model.NewError(model.KindValidationError, "WORKFLOW_INVALID", string(raw))
 	}
 	if err := s.app.Repo.SaveWorkflow(wf, true); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return s.app.Repo.GetWorkflow(wf.ID)
+	saved, err := s.app.Repo.GetWorkflow(wf.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return saved, res.Warnings, nil
 }
 
 // validationWarningSink 是"校验警告"的落地出口。
@@ -608,7 +691,12 @@ func (s *WorkflowService) SetEnabled(id string, enabled bool) (*model.Workflow, 
 
 // ImportYAML 导入 DSL 文本创建工作流。
 // ID 冲突时自动分配新 ID;导入前必须通过校验。
-func (s *WorkflowService) ImportYAML(content string) (*model.Workflow, error) {
+//
+// 返回值携带"被解析器丢弃的键"(IgnoredKeys)与校验警告:此前两者只落在
+// 内存与日志里,用户看不到"这份 DSL 有 N 个键被忽略"(设置没生效,却显示
+// 导入成功)—— 服务器模式的 import 端点自己又解析了一遍 DSL 才补上这个
+// 字段,桌面模式(走本绑定)则完全没有。统一由应用层产出,两种模式同源。
+func (s *WorkflowService) ImportYAML(content string) (*WorkflowResult, error) {
 	doc, err := dsl.Parse([]byte(content))
 	if err != nil {
 		return nil, err
@@ -618,7 +706,15 @@ func (s *WorkflowService) ImportYAML(content string) (*model.Workflow, error) {
 		wf.ID = "wf-" + strings.ToLower(randHex(6))
 	}
 	wf.Version = 0
-	return s.Save(wf)
+	saved, warnings, err := s.saveModel(wf)
+	if err != nil {
+		return nil, err
+	}
+	return &WorkflowResult{
+		Workflow:    saved,
+		Warnings:    warnings,
+		IgnoredKeys: doc.IgnoredKeys,
+	}, nil
 }
 
 // Validate 返回结构化校验结果。
@@ -663,9 +759,19 @@ type ExecutionService struct {
 	app *App
 }
 
+// ExecutionResult 是执行启动的结果:执行记录 + 启动前的校验警告。
+//
+// 形状:**执行字段仍在顶层**(与既有 REST 响应契约一致),warnings 是
+// 附加字段(与工作流保存结果同源的处理方式)。
+type ExecutionResult struct {
+	*model.Execution
+	// Warnings 启动前的校验警告(不阻断运行,但必须让调用方看到)。
+	Warnings []validator.ValidationError `json:"warnings,omitempty"`
+}
+
 // Run 启动执行(异步,立即返回 Execution 记录)。
 // 使用脱离请求的生命周期 context:HTTP 响应返回后执行继续在后台进行。
-func (s *ExecutionService) Run(ctx context.Context, workflowID, task string, variables map[string]any) (*model.Execution, error) {
+func (s *ExecutionService) Run(ctx context.Context, workflowID, task string, variables map[string]any) (*ExecutionResult, error) {
 	wf, err := s.app.Repo.GetWorkflow(workflowID)
 	if err != nil {
 		return nil, err
@@ -676,15 +782,16 @@ func (s *ExecutionService) Run(ctx context.Context, workflowID, task string, var
 	// 警告不阻断运行,但必须可见:此前运行路径只回传 res.Errors,
 	// res.Warnings(例如 DEPRECATED_NODE_CONFIG)被整个丢掉,直连 API 的
 	// 调用方看不到(约定 #14 同族)。引擎内部还会再校验一次(以它为准),
-	// 这里只为把警告记出来,不改变判定结果。
-	logValidationWarnings("run", workflowID, s.app.Engine.Validate(wf))
+	// 这里只为把警告记出来并带回,不改变判定结果。
+	res := s.app.Engine.Validate(wf)
+	logValidationWarnings("run", workflowID, res)
 	exec, err := s.app.Engine.Start(context.Background(), wf, task, variables)
 	if err != nil {
 		return nil, err
 	}
 	// 返回的是引擎的深拷贝(cloneExec),脱敏不影响运行期。
 	maskExecution(exec)
-	return exec, nil
+	return &ExecutionResult{Execution: exec, Warnings: res.Warnings}, nil
 }
 
 func (s *ExecutionService) List(workflowID string, limit int) ([]*model.Execution, error) {

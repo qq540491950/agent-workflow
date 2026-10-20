@@ -3,10 +3,11 @@
 > 共 8 轮测试验证(超过最低 5 轮要求),其中轮次 2-8 为浏览器视觉测试(GUI 黑盒)。
 > 每次功能完成与 Bug 修复均有独立 git 提交(见提交号)。
 >
-> **当前状态(轮次 41-52 之后)**:Go 测试文件 **90** 个 / 有测试的包 **21** 个;
-> 前端测试文件 **16** 个 / 用例 **135** 条。完整清单与逐文件说明见
-> "轮次 41-44 / 45-48 / 49-52"三节;"某条测试在什么改动下会变红"的实测
-> 记录见"改坏实现 → 测试变红"专节;门禁自身的盲区见"门禁盲区"一节。
+> **当前状态(轮次 57-60 之后)**:Go 测试文件 **94** 个 / 有测试的包 **21** 个;
+> 前端测试文件 **16** 个 / 用例 **153** 条。完整清单与逐文件说明见
+> "轮次 41-44 / 45-48 / 49-52 / 53-56 / 57-60"五节;"某条测试在什么改动下
+> 会变红"的实测记录见"改坏实现 → 测试变红"专节与"终审实测记录"专节;
+> 门禁自身的盲区见"门禁盲区"一节。
 
 ## 环境
 
@@ -1025,25 +1026,28 @@ stderr 线索。
 >
 > **测试规模变化**:
 >
-> | 维度 | 轮次 33 前 | 轮次 33-40 后 | **当前(轮次 41-52 后)** |
-> | --- | --- | --- | --- |
-> | 有测试的 Go 包 | 19 个 | 21 个(新增 `workflow/model`、根包 `agentworkflow`) | **21 个** |
-> | Go 测试文件 | 41 个 | 66 个 | **90 个** |
-> | 前端测试文件 | 4 个 | 12 个 | **16 个** |
-> | 前端用例 | 46 条 | 89 条 | **135 条** |
+> | 维度 | 轮次 33 前 | 轮次 33-40 后 | 轮次 49-52 后 | **当前(轮次 57-60 后)** |
+> | --- | --- | --- | --- | --- |
+> | 有测试的 Go 包 | 19 个 | 21 个(新增 `workflow/model`、根包 `agentworkflow`) | 21 个 | **21 个** |
+> | Go 测试文件 | 41 个 | 66 个 | 90 个 | **94 个** |
+> | 前端测试文件 | 4 个 | 12 个 | 16 个 | **16 个** |
+> | 前端用例 | 46 条 | 89 条 | 135 条 | **153 条** |
 >
-> 当前值的复算命令(轮次 41-52 之后实测):
+> 当前值的复算命令(轮次 57-60 之后实测):
 >
 > ```bash
-> git ls-files '*_test.go' | wc -l            # 90 个 Go 测试文件
-> git ls-files '*_test.go' | xargs -n1 dirname | sort -u | wc -l   # 21 个有测试的包
-> cd frontend && find src -name '*.test.ts*' | wc -l   # 16 个前端测试文件
-> cd frontend && npx vitest run              # 135 条用例
+> # Go 测试文件:已跟踪 + 新增未跟踪(提交后两者相等,此处给出并集口径)
+> { git ls-files '*_test.go'; git ls-files --others --exclude-standard '*_test.go'; } \
+>   | sort -u | wc -l                                          # 94 个 Go 测试文件
+> { git ls-files '*_test.go'; git ls-files --others --exclude-standard '*_test.go'; } \
+>   | xargs -n1 dirname | sort -u | wc -l                     # 21 个有测试的包
+> cd frontend && find src -name '*.test.ts*' | wc -l          # 16 个前端测试文件
+> cd frontend && npx vitest run                               # 153 条用例
 > ```
 >
 > 前端 12 文件 / 89 用例是**第一轮结束时的**数;第二轮(轮次 37-40)另有
-> 并发轮次继续加测,第三、四、五轮继续加测 —— 完整清单见本文
-> "轮次 41-44 / 45-48 / 49-52"三节。
+> 并发轮次继续加测,第三、四、五、六、七轮继续加测 —— 完整清单见本文
+> "轮次 41-44 / 45-48 / 49-52 / 53-56 / 57-60"五节。
 
 ### 轮次 33:前端(约定 7 / 8 / 10)
 
@@ -1195,7 +1199,7 @@ stderr 线索。
 
 | 检查 | 防的是 |
 | --- | --- |
-| 关键包的**用例存在性**检查 | 测试文件存在但用例被注释 / 全 skip → 门禁照样绿,覆盖率悄悄归零 |
+| **用例存在性**检查 | 测试文件存在但用例被注释 / 全 skip → 门禁照样绿,覆盖率悄悄归零。**注**:本轮的范围是手写的"关键包"清单,**第六轮改为从 `go list` 自动推导的全项目 21 个包**(见 #193) |
 | `go build` 步骤 | `vet` 发现不了的**链接期**错误(缺 main、符号冲突、平台专属代码) |
 | 冒烟脚本的**端口预检** | 端口被上一次残留进程占用时,9 项断言全部打到旧进程上却照样打印 `SMOKE OK` |
 
@@ -1203,6 +1207,11 @@ stderr 线索。
 目录会把 Wails 脚手架(`build/ios`)一起卷进来。
 
 **实测**:重写后 `verify.sh` 8 步全通过,实测 65s。
+
+> **后续变化**:第六轮把"关键包"清单改为自动推导(全项目 21 个包)、
+> gofmt 清单改为 `git ls-files`;第七轮再扩为 **9 步**(补 Windows 交叉编译、
+> 前端三个子检查各自独立),并补上"gofmt 解析不了 ≠ 已格式化"。
+> 详见"轮次 53-56"与"轮次 57-60"两节。
 
 ## 轮次 45-48:第四轮(state_json 脱敏 / CAS 可观测 / 恒真测试清理 / DSL 严格化,commit `4e979eb`)
 
@@ -1237,6 +1246,49 @@ stderr 线索。
 | `api/workflow_payload_test.go`(7 例) | `TestFrontendSavePayloadsAreAccepted`(前端设计器的 payload **必须**被接受 —— 严格化不能打破保存路径)、`TestPostWorkflowAcceptsEveryKnownTopLevelKey`、`TestPostWorkflowAcceptsPermissionsAlias`、`TestPostWorkflowRejectsUnknownTopLevelKey`(**400 `UNKNOWN_FIELD`**)、`TestValidateWorkflowRejectsUnknownTopLevelKey`、`TestImportResponseCarriesIgnoredKeys`(导入响应带 `ignored_keys`)、`TestImportResponseWithoutIgnoredKeysHasNoField`(没有键被忽略时**不出现**该字段) |
 | `frontend/src/pages/designer.test.ts`(+41 行) | `toModel` 抽成纯函数后:保存时**保留**从服务端读到的 `permission`;没有权限覆盖时 payload 不带这个键 |
 | `frontend/src/pages/Workflows.test.tsx`(迭代 21 补) | 导入响应带 `ignored_keys` 时提示"N 个键被忽略"并列出键名;桌面模式没有该字段时 `?? []` 兜底不崩 |
+
+## 轮次 53-56:第六轮(守卫扩面 / 假测试修正 / 门禁盲区,commit `60780a5`)
+
+> 3 个子代理并行。缺陷号 #189-#196,见 `docs/OPTIMIZATION.md` 第九节。
+> 本轮的重点不是"多测了什么",而是**把上一轮的弱守卫改强**。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/runtime/state_mask_test.go`(11 例,本轮 +819 行) | `TestMaskStateDataKeepsStructuredKeys`(结构化键原样)、`TestMaskStateDataMasksFreeTextKeys`(自由文本键脱敏 + 保留键名可读性)、`TestMaskStateDataKeepsOutcomeJSONValid`(脱敏后仍是**合法 JSON**)、`TestInsertExecutionStoresMaskedCopy`(**insert 路径也落脱敏副本** —— 与 saveMeta / casStateAndSave 三条路径口径一致)、`TestStateWriteEntryHandlesNilStateMap`、`TestRetryNodeWritesNodeStatusViaStateEntry`(统一写入口 `setExecState`)、`TestStateWritesAreClassified`(**探针扩面**:扫 compiler+runtime 全部非测试文件,按字段名识别直接 map 写与 `delete`,并有**防空转下限断言** —— 扫不到键 / 扫到的形态太少即失败) |
+| `app/application/loglevel_test.go`(4 例,本轮 +60 行) | `TestLogLevelEffectiveLevelFollowsEveryChoice`:**logx 的实际生效级别**(四档逐一验证)—— 此前只断言 app 层字段与库里的值,改坏 `SetLevelChecked` 不会变红 |
+| `app/application/validation_warning_test.go`(2 例,本轮新增) | `TestSavePathDoesNotDropValidationWarnings` / `TestRunPathDoesNotDropValidationWarnings`:**保存/运行路径不得把校验警告整个丢掉**(此前只回传 `res.Errors`,`res.Warnings` 被丢弃) |
+| `persistence/exec_state_guard_test.go`(1 例,本轮新增) | `TestExecStateGuardAgreesWithStateMachine`:**守卫与状态机一致**(变异三次均变红)—— 终态守卫的语义与 `CanTransitionExecution` 不能各说各话 |
+| `persistence/repo_cas_test.go`(本轮 +41 行) | `TestSaveExecutionRejectsIllegalStateJump` / `TestSaveExecutionAppliesLegalTransition` / `TestSaveExecutionAppliesWaitingUserTransition` / `TestSaveExecutionDoesNotRevertCompleted` / `TestSaveExecutionKeepsCompletedOnSameState` —— 把"终态守卫"的行为写死 |
+| `persistence/zz_vt_test.go` | **本轮删除**:整个文件只有 `fmt.Println` 没有断言 → 恒真的调试探针(虚假安全感) |
+
+**本轮的门禁改动**(`scripts/verify.sh`):
+
+| 改动 | 防的是 |
+| --- | --- |
+| gofmt 文件清单从 `go list` 改 `git ls-files` + `git ls-files --others --exclude-standard` | 平台专属文件(`agent/process_windows.go`)不在检查范围 → macOS 上改坏它门禁全绿 |
+| "关键包有用例"从**手写清单**改为**自动推导**(全项目 21 个包) | 手写清单拦不住"**新增**的包 0 用例" |
+| `go build -o <临时目录>` | 只编译一个 main 包时产物写到项目根,污染工作区 |
+| 删 `persistence/zz_vt_test.go` | 恒真的调试探针 |
+
+## 轮次 57-60:第七轮(双模式一致性 / 探针补齐 / 终审复审,迭代 22-25)
+
+> 4 个子代理并行(迭代 22 / 23 / 24 / 25)。缺陷号 #197-#211,见
+> `docs/OPTIMIZATION.md` 第十节。
+
+### 迭代 22:双模式一致性(顶层键契约下沉应用层)
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `api/dual_mode_test.go`(7 例,新增) | `TestSaveAndValidateAgreeOnUnknownTopLevelKey`(**保存与校验给出同一个判定** —— 否则"校验通过"却保存不了)、`TestServerAndDesktopAgreeOnUnknownTopLevelKey`(**两种模式对同一份非法载荷都报错,且给出同一个 code**)、`TestSaveResponseCarriesValidationWarnings` / `TestSaveResponseWithoutWarningsHasNoField`(**无警告时该字段不出现**)、`TestRunResponseCarriesValidationWarnings`、`TestImportResponseMatchesAppLayerIgnoredKeys`(**导入的 `ignored_keys` 与应用层一致**)、`TestParseWorkflowPayloadIsSharedByBothModes` |
+| `app/application/dual_mode_test.go`(12 例,新增) | `TestSavePayloadRejectsUnknownTopLevelKey`(**桌面模式的载荷级入口也拒绝未知顶层键** —— 此前只有服务器模式拒绝)、`TestSavePayloadAcceptsFrontendPayload`(**前端设计器的 payload 必须能被接受** —— 严格化不能打破保存路径)、`TestSavePayloadAcceptsEveryKnownTopLevelKey`、`TestParseWorkflowPayloadRejectsInvalidJSON`、`TestSavePayloadReturnsValidationWarnings`、`TestImportYAMLReturnsIgnoredKeys` / `TestImportYAMLWithoutIgnoredKeys`、`TestRunReturnsValidationWarnings`、`TestWorkflowResultJSONKeepsFlatShape` / `TestWorkflowResultJSONRoundTrip` / `TestExecutionResultJSONRoundTrip`(**响应形状往返不变** —— 附加字段不能把既有 API 契约改掉)、`TestAllowedWorkflowTopLevelKeysDerivedFromModel`(**允许键集合由模型反射派生** —— 模型加字段自动生效) |
+| `frontend/src/lib/api.test.ts`(本轮 +475 行) | 新增三组**双分支契约**用例:"保存(顶层键严格化)"、"校验警告(warnings)"、"导入的 ignored_keys" —— 同一份断言在**浏览器分支与桌面分支各跑一遍**,两种模式的行为必须一致(约定 10) |
+
+### 迭代 24:探针补齐
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/compiler/conditionenv_contract_test.go`(4 例,新增) | `TestConditionEnvContractMatchesRuntimeBackings`(**契约表声明的取值来源运行期必须提供**,反之亦然)、`TestConditionEnvRuntimeBackingsAreReal`(运行期事实表里的每一项必须在源码里**真的被写入** —— 防事实表自己腐烂成恒真假保护)、`TestConditionEnvNoUndeclaredRuntimeInjection`(**运行期不得注入契约未声明的变量**)、`TestConditionEnvProbeScansEnough`(**防空转**:探针扫到的内容太少即失败) |
+| `frontend/src/test/list-guard.test.ts`(本轮 +322 行,第 3 条用例) | "列表接口结果被赋值给变量后,使用前必须过 `asArray`" —— 补上"先赋值再 `.map`"的盲区;按**语义成员**(`map`/`forEach`/`filter`/`length`/…)判定"把值当列表用";含防空转断言(绑定数下限) |
 
 ## "改坏实现 → 测试变红":实测记录
 
@@ -1320,6 +1372,13 @@ stderr 线索。
 | `TestImportResponseWithoutIgnoredKeysHasNoField` | 无条件带上该字段 → 前端把"没有 ignored_keys"误当成"没解析到" → 红 |
 | `TestValidLogLevelAppliedAndPersisted` | 让设置层不落库 / 不改内存级别 → 红(**注**:该用例只断言 app 层字段与库里的值,`logx` 的**实际级别**没有被验证 —— 见"门禁盲区") |
 
+### 第六轮与第七轮(见下节)
+
+第六轮之后的实测记录不在本表里,而是集中放在**"终审实测记录"**专节:
+那里的 15 组变异实验是**在隔离副本上真的注入变异、跑测试、记录红/绿**得到的,
+比本表"从断言反推可验证方向"更硬;另有 5 组门禁探针、5 组修复后复测,
+以及端到端的正面证据("该失败却成功"5/5、脱敏链路、三层脱敏幂等)。
+
 ### 迭代 21 补做的两条实测
 
 | 测试 | 改坏什么会变红 |
@@ -1327,23 +1386,137 @@ stderr 线索。
 | `frontend/src/pages/Workflows.test.tsx` 的"被忽略的键必须可见" **【实测】** | 删掉 `toast.warning` 那一段 → 提示不再出现 → 红(实测报 `expected '' to contain '2 个键被忽略'`) |
 | `frontend/src/lib/api.test.ts` 的 `CODE_HINTS` 参数化用例 **【实测】** | 从 `CODE_HINTS` 删掉任一新码 → 回落成"HTTP 400: 请求参数不合法" → 红(实测报 `Expected: "未知顶层键" / Received: "HTTP 400: 请求参数不合法"`) |
 
-## 门禁盲区(本轮登记)
+## 终审实测记录(第七轮 · 迭代 23/25)
+
+> 这是回归史里**最有价值的一节**:不是"测了什么",而是**"把实现改坏以后,
+> 哪些测试真的会红"**。前六轮的登记项里有相当一部分是**看代码看出来的**,
+> 这一节把它们换成**可复现的实验**。
+>
+> **方法**:在仓库的一份**隔离副本**(`/tmp`,不碰工作区)上逐条注入变异 →
+> 跑目标测试 → 记录"变红 / 没变红" → 还原 → 复跑确认变绿。
+> 每条变异只改一处,还原后必须重新变绿(证明变异是唯一变量)。
+>
+> **结果:15 组变异,13 组变红、2 组没变红**。没变红的两组就是真实的
+> 测试盲区(已登记为 #207 / #210,并在本轮修掉其中 #207)。
+
+### 15 组"改坏实现 → 测试变红"
+
+| # | 注入的变异 | 目标测试 | 结果 |
+| --- | --- | --- | --- |
+| 1 | `logx.SetLevelChecked` 不再真正设置级别(只解析不 store) | `TestLogLevelEffectiveLevelFollowsEveryChoice` | ✅ 红 |
+| 2 | app 层 `SetPermission` 去掉 `permMu` 串行化 | `TestSetPermissionConcurrentNoLostUpdate` | ✅ 红 |
+| 3 | `state_mask` 把 `output` 当结构化键(免脱敏) | `TestMaskStateDataMasksFreeTextKeys` | ✅ 红 |
+| 4 | `state_mask` 不再把 `node:<id>:status` 当结构化键 | `TestMaskStateDataKeepsStructuredKeys` | ✅ 红 |
+| 5 | 运行期 `enabled` 非布尔改为 fail open(照常执行副作用) | `TestNodeEnabledInvalidValueFailsNode` | ✅ 红 |
+| 6 | 契约外 Skill 状态改为按成功处理 | `TestSkillStatusUnknownFailsNode` | ✅ 红 |
+| 7 | 配置契约表多声明一个运行期不读的键 | `TestNodeConfigSpecMatchesRuntimeReads` | ✅ 红 |
+| 8 | 运行期直接写 map 引入未登记的状态键 | `TestStateWritesAreClassified` | ✅ 红 |
+| 9 | 条件变量契约表改错取值来源(与运行期分叉) | `TestConditionEnvContractMatchesRuntimeBackings` | ✅ 红 |
+| 10 | 应用层不再拒绝未知顶层键(双模式同源失效) | `TestSavePayloadRejectsUnknownTopLevelKey` | ✅ 红 |
+| 11 | 导入结果不再回报被忽略的键 | `TestImportYAMLReturnsIgnoredKeys` | ✅ 红 |
+| 12 | 保存结果不再回报校验警告 | `TestSavePayloadReturnsValidationWarnings` | ✅ 红 |
+| 13 | 前端:桌面分支 `saveWorkflow` 改走模型级 `Save` | `frontend/src/lib/api.test.ts` 的双分支契约用例 | ✅ 红(实测报"桌面分支与浏览器分支对同一份非法 payload 都报错,且给出同一个 code") |
+| 14 | `template.Engine.RenderErr` 吞掉 panic 错误 / 整个删掉 `recover()` | `template` + `workflow/runtime` **全包** | ❌ **没变红** → 登记为 #207,本轮已修(加测试接缝 `lookupFn`) |
+| 15 | 前端:列表接口调用点丢掉 `asArray` 防御 | `frontend/src/test/list-guard.test.ts` | ❌ **没变红** → 登记为 #210,仍然开放 |
+
+**第 15 条的边界实测**(值得单列,因为它划出了守卫的真实能力):
+
+| 变异 | 守卫结果 |
+| --- | --- |
+| `Dashboard.tsx` 的**两个列表调用点**去掉 `asArray`,但 `api.stats()` 上的 `asArray` 保留 | **三条用例全绿** —— 守卫第 2 条只要求"文件里**出现过** `asArray` 字样",非列表接口上的那次也算数 |
+| 同一文件里**所有** `asArray` 都去掉 | ❌ 红(命中"文件里没出现 `asArray`") |
+
+结论:守卫能挡住"整个文件都不防御",**挡不住"文件里少了一处防御"**。
+
+### 5 组门禁探针(门禁自己可不可信)
+
+| 探针 | 旧门禁(8 步) | 新门禁(9 步) |
+| --- | --- | --- |
+| **干净环境里 `npm run lint` 找不到 eslint** | ❌ `exit 127` → `&&` 链短路 → **前端构建与 153 条用例从未被执行**(登记为 #202) | ✅ eslint 已声明;三个子检查**各自独立**跑完再统一判定(lint 失败时 tsc/vitest 仍执行) |
+| **含语法错误的 `//go:build windows` 文件** | ❌ 全绿(实测):`gofmt -l` 对它的输出是 **stdout 空 / stderr 解析错 / 退出码 2**,门禁 `2>/dev/null \|\| true` 把三者一起吞掉 → "解析不了"被当成"已格式化";而 `vet`/`build`/`test` 在 macOS 上**不编译** Windows 文件(登记为 #203) | ✅ 第 1 步分离 stdout/stderr 并检查退出码;新增第 4 步 `GOOS=windows go build` 交叉编译 |
+| **一个只含 `t.Skip` 的包** | ❌ `go test` 输出 `ok skipcase 0.006s` → 门禁第 5/6 步的判据(`no tests to run`)**不命中** → 判为"有真实用例"放行(登记为 #209) | ❌ **仍然放行** —— 本轮未修 |
+| **冒烟端口被占用** | ⚠️ 只报端口号,不报占用者(登记为 #211) | ✅ 打印占用者(`lsof` → `ss` → `netstat`,都拿不到时明说"未能定位") |
+| **`asArray` 守卫的第 2 条判定粒度** | ⚠️ 文件级(登记为 #210) | ❌ 仍然放行 —— 本轮未修 |
+
+### 修复后复测(本轮修掉的三条盲区)
+
+> 上表第 14 行(以及"门禁探针"里的两条)在登记后当轮修复。为确认"新加的测试
+> 真的能拦住对应的改坏",在**同一套隔离副本方法**下重跑了一遍:
+
+| 登记项 | 注入的变异 | 目标测试 | 结果 |
+| --- | --- | --- | --- |
+| #204(顶层键名判定缺失) | `maskStateValue` 退回"只按值形态脱敏" | `TestMaskStateDataMasksSensitiveKeyNames` | ✅ 红 |
+| #206(契约守卫恒真) | 归属检查改回"只记日志不报错" | `TestRuntimeConfigReadsAllAttributed` | ✅ 红 |
+| #206(契约守卫恒真) | 运行期新增一个**未归属**的读配置函数 | `TestRuntimeConfigReadsAllAttributed` | ✅ 红 |
+| #207(模板错误出口零覆盖) | `RenderErr` 吞掉 panic 错误 | `TestRenderErrConvertsRenderPanicToError` | ✅ 红 |
+| #207(模板错误出口零覆盖) | `RenderErr` 整个删掉 `recover()` | `TestRenderErrConvertsRenderPanicToError` | ✅ 红 |
+
+### 端到端实测结论(真实 server,正面证据)
+
+> 这一组是**回归史里同样重要**的另一半:证明门禁与人工复审**确实有效**,
+> 而不只是"没抓到东西"。
+
+**"该失败却成功"专项 5/5 全部正确**(真实 server,HTTP 直连):
+
+| 场景 | 期望 | 实测 |
+| --- | --- | --- |
+| 条件出口全不匹配 | 落 FAILED 并给出可读原因 | ✅ `state=FAILED`,`error=决策节点 review 没有匹配的出口分支(decision="REJECTED"),已尝试条件: decision == "NEVER_MATCHES_XYZ";请补一条无条件默认分支,或修正条件表达式` |
+| 非布尔 `enabled` | 拒绝 | ✅ HTTP 400 `INVALID_NODE_ENABLED`:"节点 \"a\" 的 enabled 必须是布尔值" |
+| agent 节点缺 `mode` | 拒绝 | ✅ HTTP 400 `MISSING_MODE`:"agent 节点 \"a\" 缺少 mode 配置" |
+| 悬空边 | 拒绝 | ✅ HTTP 400 `INVALID_EDGE` + `NO_EXIT_PATH`:"第 1 条边的 to 节点 \"nope\" 不存在" |
+| 顶层未知键 | 拒绝 | ✅ HTTP 400 `UNKNOWN_FIELD`:"未知的顶层字段 bogus_key(允许: …)" |
+
+**脱敏链路端到端正确**(skill 节点输出 `ANTHROPIC_API_KEY=sk-e2etest123456`):
+
+- SQLite 原始 `state_json` 里凭据是 `***`:`"output":"cli stderr: ANTHROPIC_API_KEY=***"`;
+  节点明细表 `execution_nodes.output` 同样已脱敏;
+- **结构化键原样**:`node:note:status` / `node:note:attempt` / `status` / `decision` 均未被改写;
+- `node:<id>:result` **仍是合法 JSON**(可被 `json.Unmarshal` 解析)——
+  恢复路径靠它还原节点结果,非法 JSON 会被当成"未答复"→ 静默重跑节点。
+
+**三层脱敏幂等**(同一份状态连续脱敏 1 / 2 / 3 次,逐字节相同):
+
+```
+第 1 次: {"_error":"boom ANTHROPIC_API_KEY=***","decision":"APPROVED","node:work:result":"{\"Output\":\"ANTHROPIC_API_KEY=***\",\"State\":\"SUCCESS\"}","node:work:status":"success","output":"cli stderr: ANTHROPIC_API_KEY=***","status":"success","variables":{"api_key":"***"}}
+第 2 次: (与第 1 次逐字节相同)
+第 3 次: (与第 1 次逐字节相同)
+```
+
+## 门禁盲区(当前状态)
 
 | 盲区 | 现状 | 后果 |
 | --- | --- | --- |
-| **gofmt 漏掉平台专属文件** | `scripts/verify.sh` 的 gofmt 文件清单由 `go list` 的 `.GoFiles` 推导 —— `go list` **只返回当前平台的文件**。实测:`agent/process_windows.go`(`//go:build windows`)**不在** darwin 的检查清单里 | 在 macOS 上改坏 `process_windows.go`,`gofmt -l` 仍然是空、门禁全绿;Windows 构建才会暴露。**第六轮修复中** |
-| **`state_mask` 分类守卫覆盖面不足** | 守卫只扫 `workflow/compiler/lower.go` 与 `workflow/runtime/executor.go` 两个文件,且只认 `.Set()` 调用式(receiver 名必须是 `st` / `state`)。`engine.go` 里的 `exec.StateData[compiler.StatusKey(nodeID)] = …` 这种**直接写 map** 的形式完全不可见 | 新加的状态键若走直接 map 写,守卫不会报警,落库脱敏会按"自由文本"处理 —— 结构化键被改写 = 执行语义变(见 `docs/OPTIMIZATION.md` 第九节第 14 条) |
-| **日志级别"即时生效"缺真正的断言** | `app/application/loglevel_test.go` 断言了 app 层字段与库里的值,但 `logx` **没有导出**"当前级别"的读取接口 | 改坏 `logx.SetLevelChecked` 不会让门禁变红(测试名与实际覆盖范围不符) |
-| **顶层键严格化只在服务器模式生效** | `UNKNOWN_FIELD` 的检查在 `api/server.go` 的 `parseWorkflow` 里 | 桌面模式(走 Wails 绑定 → app 层 → `model.Workflow.UnmarshalJSON`)仍是宽松的 `json.Unmarshal`,未知顶层键照旧静默丢弃 |
-| **契约探针只覆盖"配置键"维度** | `nodeconfig_contract_test.go` 有 AST 探针,`compiler/conditionenv.go` 只有普通单测 | 校验期与运行期若再次分叉条件变量集合,没有机制会报警 |
-| **`asArray` 守卫是源码扫描** | `frontend/src/test/list-guard.test.ts` 能抓"调用点后面直接 `.map`" | "先赋值给变量再 `.map`"的写法扫不到 |
+| **门禁看不见"所有用例都被 `t.Skip()` 跳过"** | 门禁第 6 步按 `go test` 的结果行判"有没有真实用例",判据是 `no tests to run`;而**全部 skip** 时 `go test` 仍报 `ok <pkg> 0.006s` | **实测**:一个只含 `t.Skip` 的包,门禁判为"有真实用例"放行。`agent/claude/real_smoke_test.go` 在无 CLI 的环境里正是全 skip。**仍然开放**(见 `docs/OPTIMIZATION.md` 第十一节第 19 条 / #209) |
+| **`asArray` 守卫是文件级判定,单点绕过** | 守卫第 2 条只要求"调用了列表接口的文件里**出现过** `asArray` 字样" | **实测**:同一文件里某一个列表调用点丢掉 `asArray`、别处(哪怕在非列表接口上)还有 `asArray` → 守卫全绿。**仍然开放**(见第十一节第 17 条 / #210) |
+| **`asArray` 守卫是源码扫描,不是类型系统** | 即使判定粒度修到"每个调用点",它仍然是**文本扫描** | 换一种写法(`for (const x of list)`、`list.length`)仍可能绕过。**仍然开放** |
+| **并发探针依赖 `time.Sleep` 建立读写重叠窗口** | 5 个并发测试靠 `time.Sleep(100ms)` 让读写重叠 | 调度不巧时重叠窗口为零,`-race` 什么也报不出。**实测**:受控复现里 `-race` 对 20 / 200 / 3000 次迭代的**报告数完全相同** → 问题不是"迭代次数太少",而是**重叠不确定**。**仍然开放**(见第十一节第 18 条 / #208) |
+| **`output` 键在 resume 与实时路径的口径差** | 实时路径用原文求值,resume 路径用**已脱敏**的 `state_json` 求值 | **实测可达的分支改变**:人批准 A 分支,恢复后走 B 分支。**仍然开放**(见第十一节第 11 条 / #205) |
 | **SSE 订阅释放无端到端断言** | 单测覆盖了写失败即关流 | 冒烟脚本没有"断开后订阅数归零"的断言,端到端层面仍可能回归 |
+| **列表接口的 `limit` 上限 1000 无"已截断"标记** | 超过 1000 条被静默截断 | 响应里没有任何提示,真正需要大数据量时得引入分页契约 |
+
+### 已关闭的盲区(留档)
+
+| 曾经的盲区 | 关闭方式 |
+| --- | --- |
+| **gofmt 漏掉平台专属文件** | 第六轮:清单由 `go list` 改为 `git ls-files`(+ 新增未跟踪文件);第七轮:补"gofmt 解析不了 ≠ 已格式化"与 `GOOS=windows go build` 交叉编译(#192 / #203) |
+| **`state_mask` 分类守卫覆盖面不足** | 第六轮:扫 compiler+runtime 全部非测试文件,按字段名识别直接 map 写与 `delete`,加防空转下限断言(#189) |
+| **日志级别"即时生效"缺真正的断言** | 第六轮:补 `logx` 实际生效级别断言(`Handler.Enabled`)(#191) |
+| **顶层键严格化只在服务器模式生效** | 第七轮:契约下沉到应用层,两模式走同一段代码(#197) |
+| **契约探针只覆盖"配置键"维度** | 第七轮:补 `conditionenv_contract_test.go` AST 探针(#200) |
+| **`asArray` 守卫漏"先赋值再 `.map`"** | 第七轮:补跨语句的赋值-使用形态(#201) |
+| **门禁第 6 步在干净环境必红** | 第七轮:声明 eslint + 三个前端子检查各自独立(#202) |
+| **`MaskStateData` 顶层字符串值不做键名判定** | 第七轮:脱敏改为"键名 + 值形态"两级判定(#204) |
+| **`nodeconfig_contract_test.go` 的恒真路径** | 第七轮:归属检查改真断言 + 防空转断言(#206) |
+| **`template.Engine.RenderErr` 的错误出口零覆盖** | 第七轮:加测试接缝 `lookupFn`,让 panic→error 出口可测(#207) |
+
 
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
-| 41-52 | **三轮并行复审(10 个子代理 + 1 个独立 verifier)**:跨文件收口 / 前端契约同步 / 门禁重写 / `state_json` 脱敏 / CAS 可观测 / 恒真测试清理 / DSL 严格化 / runtime 静默丢弃三处 / API 严格化 / 累积退化复审 | ✅ | #142-#188 共 **47 条**:当轮修复 43 条,转下一轮 4 条(#185 `state_mask` 守卫覆盖面、#186 日志级别无实际断言、#187 `execStateGuardSQL` 作用范围注释、#188 gofmt 平台文件盲区;其中 #187 / #188 在第六轮处理中);新增**源码扫描守卫** 4 处(dsl 禁声明配置结构体 / 运行期与持久层列集合一致 / 状态键必须登记分类 / 前端未知顶层键);门禁重写为 **8 步**(补 `go build`、关键包用例存在性、gofmt 按文件清单、冒烟端口预检);Go 测试文件 66→**90**、有测试包 21 个、前端 12→**16** 文件 / 89→**135** 用例;新增专节"改坏实现 → 测试变红"(实测记录 40+ 条)与"门禁盲区" |
+| 57-60 | **第七轮(4 个子代理)**:迭代 22 双模式一致性 / 迭代 24 探针补齐 / 迭代 23 终审复审 / 迭代 25 门禁与冒烟加固 | ✅ | #197-#211 共 **15 条**:当轮修复 11 条(#197 顶层键契约下沉 / #198 校验告警 / #199 `ignored_keys` / #200 条件变量 AST 探针 / #201 `asArray` 守卫补形态 / #202 eslint 未声明 / #203 gofmt 吞语法错误 + Windows 交叉编译 / #204 顶层键名判定 / #206 契约守卫恒真 / #207 模板错误出口零覆盖 / #211 冒烟打印端口占用者),**4 条仍然开放**(#205 `output` 键 resume/实时口径差、#208 并发探针重叠窗口、#209 全部 skip 看不见、#210 `asArray` 文件级判定);门禁由 **8 步扩为 9 步**;新增 `api/dual_mode_test.go` / `app/application/dual_mode_test.go` / `workflow/compiler/conditionenv_contract_test.go` 三个测试文件与 `frontend/src/lib/api.test.ts` 的三组双分支契约用例;新增专节"终审实测记录"(**15 组变异实验 + 5 组门禁探针 + 5 组修复后复测 + 端到端正面证据**);Go 测试文件 90→**94**、前端 135→**153** 用例 |
+| 53-56 | **第六轮(3 个子代理)**:守卫扩面 / 假测试修正 / 门禁盲区 / 文档补第三至五轮 | ✅ | #189-#196 共 **8 条**(#189 `state_mask` 守卫扩面 / #190 统一状态写入口 `setExecState` / #191 logx 实际级别断言 / #192 gofmt 清单改 git / #193 用例存在性自动推导 / #194 build 产物落临时目录 / #195 insert 路径落脱敏副本 / #196 删零断言探针 `zz_vt_test.go` + `execStateGuardSQL` 注释事实化);`docs/OPTIMIZATION.md` 补齐轮次 41-52(此前断档)并重写开放清单;Go 测试文件 → **91** |
+| 41-52 | **三轮并行复审(10 个子代理 + 1 个独立 verifier)**:跨文件收口 / 前端契约同步 / 门禁重写 / `state_json` 脱敏 / CAS 可观测 / 恒真测试清理 / DSL 严格化 / runtime 静默丢弃三处 / API 严格化 / 累积退化复审 | ✅ | #142-#188 共 **47 条**:当轮修复 43 条,转下一轮 4 条(#185 `state_mask` 守卫覆盖面、#186 日志级别无实际断言、#187 `execStateGuardSQL` 作用范围注释、#188 gofmt 平台文件盲区 —— **四条已在第六轮全部关闭**);新增**源码扫描守卫** 4 处(dsl 禁声明配置结构体 / 运行期与持久层列集合一致 / 状态键必须登记分类 / 前端未知顶层键);门禁重写为 **8 步**(补 `go build`、关键包用例存在性、gofmt 按文件清单、冒烟端口预检);Go 测试文件 66→**90**、有测试包 21 个、前端 12→**16** 文件 / 89→**135** 用例;新增专节"改坏实现 → 测试变红"(实测记录 40+ 条)与"门禁盲区" |
 | 33-40 | **两轮并行审计(8 个子代理)**:前端 / DSL+模型 / 持久化+事件 / API+应用层 / 运行时 / 编译器+校验器 / 适配层 / 支撑包 | ✅ | #95-#122(第一轮 28 条)+ #123-#141(第二轮 19 条),共 47 条全部修复;新增**探针式测试** 2 处(AST 契约扫描 + 前端源码扫描);Go 有测试包 19→21、测试文件 41→66,前端 4→12 文件 / 46→89 用例;门禁自身修 3 处(排除 build/ 与 node_modules/、补 `go build`、前端构建输出不再被吞) |
 | 32 | 可视化/端到端验证(Browser + 真实 .app) | ✅ | Dashboard 桌面模式像素级验证通过(mode: desktop / IPC 绑定 / 5 统计卡 / 3 工作流表);另修裸二进制启动即退出的真实缺陷(缺 bundle identifier → notifications 服务启动失败 → os.Exit);Browser 的 EventSource 冻结属工具限制,已用 API 冒烟覆盖 10 项端到端 |
 | 31 | 复审最近三轮:修自己引入的缺陷 + 约定违反 + 恒真测试清理 | ✅ | #86 检查点节流是死代码 #87 Approve 不重映射决策 #88 并行不收敛违反约定 #14 #89 nil 测试恒真 #90 契约测试不断言 #91 死代码半成品 #92 mock runs 无界增长 #93 自造 itoa #94 结构体 Agent panic 兜底(纵深防御) |

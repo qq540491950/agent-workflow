@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -50,6 +51,12 @@ var runtimeNodeFuncs = map[string]model.NodeType{
 var runtimeGlobalFuncs = map[string]bool{
 	// dispatchNode 在类型分发之前读节点级开关 enabled(对所有节点生效)。
 	"dispatchNode": true,
+	// nodeEnabled 是 dispatchNode 读 enabled 的取值辅助函数:同样只读
+	// **全局键**(NodeEnabledKey = "enabled"),与节点类型无关。
+	// (此前漏登记 → TestRuntimeConfigReadsAllAttributed 只能记日志:
+	//  探针看见了一个"未归属"的读取点,却没人能判断它是真漂移还是
+	//  归属表漏登记。)
+	"nodeEnabled": true,
 	// Engine.Start 遍历所有节点取引用到的 agent(与节点类型无关)。
 	"Start": true,
 }
@@ -448,12 +455,26 @@ func TestGlobalConfigKeysMatchRuntime(t *testing.T) {
 // TestRuntimeConfigReadsAllAttributed 运行期每个读取配置的函数都应该归属到
 // 某个节点类型或全局。
 //
-// 只记日志不阻断:运行期把配置读取搬进新的辅助函数(例如把 enabled 的解析
-// 抽成 nodeEnabled)是正常重构,不应让门禁变红。键级漂移由
-// TestRuntimeReadsOnlyKnownConfigKeys 与 TestNodeConfigSpecMatchesRuntimeReads
-// 兜底。
+// 这条守卫此前只 t.Logf —— **恒真**:探针扫到未归属的读取点也只是打条
+// 日志,门禁照常绿。全仓唯一一条恒真的契约测试。
+//
+// 现在改成真断言。归属规则:
+//
+//   - runtimeNodeFuncs:读取某节点类型专属的配置键(如 runAgentNode);
+//   - runtimeGlobalFuncs:读取跨节点类型的键(如 dispatchNode / nodeEnabled
+//     读全局开关 enabled)。
+//
+// 未归属意味着"这个读取点属于哪种节点类型"没人确认过 —— 运行期新增了
+// 一个读配置的辅助函数而没登记,契约表就可能漏掉它读到的键(约定 #13:
+// 校验期与运行期同源)。键级漂移由 TestRuntimeReadsOnlyKnownConfigKeys
+// 与 TestNodeConfigSpecMatchesRuntimeReads 兜底,本条兜"归属"这一层。
 func TestRuntimeConfigReadsAllAttributed(t *testing.T) {
 	reads := runtimeConfigReads(t)
+	// 防空转:探针一个函数都没扫到 → 下面的循环是空转,本测试恒真通过。
+	if len(reads) == 0 {
+		t.Fatal("探针没有扫到任何读取配置的运行期函数(扫描范围或识别逻辑已退化),本测试会恒真通过")
+	}
+	var unattributed []string
 	for fn, r := range reads {
 		if _, ok := runtimeNodeFuncs[fn]; ok {
 			continue
@@ -461,7 +482,13 @@ func TestRuntimeConfigReadsAllAttributed(t *testing.T) {
 		if runtimeGlobalFuncs[fn] {
 			continue
 		}
-		t.Logf("运行期函数 %s 读取了配置键 %v,未归属到节点类型(若这是新的全局读取点,请补进 runtimeGlobalFuncs)", fn, r.nodeKeys)
+		unattributed = append(unattributed, fmt.Sprintf("%s(读取键 %v)", fn, r.nodeKeys))
+	}
+	if len(unattributed) > 0 {
+		sort.Strings(unattributed)
+		t.Errorf("运行期函数读取了配置键却未归属到节点类型或全局: %s"+
+			"(请补进 runtimeNodeFuncs / runtimeGlobalFuncs)",
+			strings.Join(unattributed, "; "))
 	}
 }
 

@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"reflect"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -20,7 +18,6 @@ import (
 	"agentworkflow/event"
 	"agentworkflow/logx"
 	"agentworkflow/permission"
-	"agentworkflow/workflow/dsl"
 	"agentworkflow/workflow/model"
 )
 
@@ -80,16 +77,20 @@ func (s *Server) routes() {
 		return writeJSON(w, wf, err)
 	}))
 	s.mux.HandleFunc("POST /api/workflows", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		var wf map[string]any
-		if err := decodeJSON(r, &wf); err != nil {
-			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
+		// 原始载荷交给应用层:顶层未知键的判定必须与桌面模式同源
+		// (桌面模式走 app.Workflows.SavePayload,同一段代码)。
+		body, err := readLimitedBody(r)
+		if err != nil {
+			return err // 结构化错误(PAYLOAD_TOO_LARGE)
 		}
-		parsed, err := parseWorkflow(wf)
+		created, err := s.app.Workflows.SavePayload(body)
 		if err != nil {
 			return err
 		}
-		created, err := s.app.Workflows.Save(parsed)
-		return writeJSON(w, created, err)
+		// 响应形状:工作流字段仍在顶层(第三方客户端直接读 body.id),
+		// 校验警告作为附加字段 warnings 一并带回 —— 此前警告只进日志,
+		// 直连 API 的调用方永远看不到,用户以为设置生效了。
+		return writeJSON(w, created, nil)
 	}))
 	s.mux.HandleFunc("DELETE /api/workflows/{id}", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		return s.app.Workflows.Delete(r.PathValue("id"))
@@ -116,11 +117,13 @@ func (s *Server) routes() {
 		return writeJSON(w, wf, err)
 	}))
 	s.mux.HandleFunc("POST /api/workflows/validate", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		var wf map[string]any
-		if err := decodeJSON(r, &wf); err != nil {
-			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
+		body, err := readLimitedBody(r)
+		if err != nil {
+			return err // 结构化错误(PAYLOAD_TOO_LARGE)
 		}
-		parsed, err := parseWorkflow(wf)
+		// 与保存端点同源:同一份载荷,保存与校验必须给出同一个判定
+		// (否则"校验通过"却保存不了,用户无从下手)。
+		parsed, err := application.ParseWorkflowPayload([]byte(body))
 		if err != nil {
 			return err
 		}
@@ -146,34 +149,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/workflows/import", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		// 上限与 JSON 端点一致(1MB);多读 1 字节用于识别超限,
 		// 否则超长内容会被静默截断,报出与真实原因无关的 YAML 解析错误。
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBody+1))
-		if err != nil {
-			return badRequest(err.Error())
-		}
-		if len(body) > maxJSONBody {
-			return model.NewError(model.KindValidationError, "PAYLOAD_TOO_LARGE",
-				fmt.Sprintf("导入内容超过 %d MB 上限", maxJSONBody>>20))
-		}
-		wf, err := s.app.Workflows.ImportYAML(string(body))
-		if err != nil {
-			return writeJSON(w, wf, err)
-		}
-		// 附上"被忽略的键"清单:DSL 解析器把闭合结构里的未知键丢掉了
-		// (记入 Document.IgnoredKeys + WARN 日志),但 IgnoredKeys 不参与
-		// 序列化,用户此前**看不到** —— 导入成功 ≠ 每个设置都生效了。
-		//
-		// 响应形状:工作流字段仍在**顶层**(前端 api.importYAML 直接把响应
-		// 当 Workflow 用,契约不变),额外附加一个 ignored_keys 数组。
-		ignored := dslIgnoredKeys(body)
-		if len(ignored) == 0 {
-			return writeJSON(w, wf, nil)
-		}
-		out, err := workflowJSONMap(wf)
+		body, err := readLimitedBody(r)
 		if err != nil {
 			return err
 		}
-		out["ignored_keys"] = ignored
-		return writeJSON(w, out, nil)
+		// 被忽略的键由应用层产出(此前本层自己又解析了一遍 DSL:
+		// 同一份解析做两遍,且桌面模式根本没有这个字段)。
+		res, err := s.app.Workflows.ImportYAML(body)
+		if err != nil {
+			return err
+		}
+		// 响应形状:工作流字段仍在**顶层**(前端 api.importYAML 直接把响应
+		// 当 Workflow 用,契约不变),额外附加 ignored_keys / warnings 数组。
+		return writeJSON(w, res, nil)
 	}))
 	s.mux.HandleFunc("GET /api/workflows/{id}/export", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		out, err := s.app.Workflows.ExportYAML(r.PathValue("id"))
@@ -641,6 +629,28 @@ func decodeOptionalJSON(r *http.Request, out any) error {
 	return wrapDecodeError(err)
 }
 
+// readLimitedBody 读取受上限保护的请求体**原文**(不解析)。
+//
+// 上限(maxJSONBody)与既有 JSON 端点一致:服务器模式监听 127.0.0.1 且
+// 无鉴权,本机任意进程都能打这些端点,一个大 body 即可把应用 OOM 掉。
+//
+// 工作流保存/校验/导入三个端点改用它:载荷的**解析与判定**下沉到应用层
+// (application.ParseWorkflowPayload / SavePayload),服务器模式与桌面模式
+// 走同一段代码 —— 顶层未知键的判定不能只在 api 层有(约定 10)。
+func readLimitedBody(r *http.Request) (string, error) {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return "", model.NewError(model.KindValidationError, "PAYLOAD_TOO_LARGE",
+				fmt.Sprintf("请求体超过 %d MB 上限", maxJSONBody>>20))
+		}
+		return "", badRequest(err.Error())
+	}
+	return string(b), nil
+}
+
 func writeJSON(w http.ResponseWriter, data any, err error) error {
 	if err != nil {
 		return err
@@ -694,110 +704,4 @@ func parseVersion(s string) (int, error) {
 		}
 	}
 	return n, nil
-}
-
-// parseWorkflow 把请求体(map)转为 Workflow。
-// 结构非法(字段类型不符等)必须报错:此前丢弃 Unmarshal 错误,
-// 错类型字段会静默变成零值,产出空白/残缺工作流。
-//
-// **未知顶层键也必须报错**(UNKNOWN_FIELD):json.Unmarshal 默认宽松,多余
-// 的键被**静默丢弃** —— 用户提交了一份含多余键的 JSON,接口返回 200,
-// 用户以为那份设置生效了,实际根本没进模型(约定 14:静默丢弃 = 用户
-// 以为设置还在)。
-//
-// 与 DSL 顶层键策略同源:workflow/dsl 对文档顶层的未知键报
-// DSL_UNKNOWN_KEY(迭代 15),JSON 保存路径此前却没有对应行为 —— 同一份
-// 定义换个格式导入行为就不同。
-//
-// 前端发出的 payload 只含模型里的字段(设计器 toWorkflowModel / 新建
-// 工作流),因此严格化**不会**打破前端保存路径(见
-// TestFrontendSavePayloadsAreAccepted)。
-func parseWorkflow(m map[string]any) (*model.Workflow, error) {
-	if unknown := unknownTopLevelKeys(m); len(unknown) > 0 {
-		return nil, model.NewError(model.KindValidationError, "UNKNOWN_FIELD",
-			fmt.Sprintf("未知的顶层字段 %s(允许: %s)",
-				strings.Join(unknown, ", "), strings.Join(allowedTopLevelKeys(), ", ")))
-	}
-	raw, err := json.Marshal(m)
-	if err != nil {
-		return nil, badRequest("工作流结构非法: " + err.Error())
-	}
-	var wf model.Workflow
-	if err := json.Unmarshal(raw, &wf); err != nil {
-		return nil, badRequest("工作流结构非法: " + err.Error())
-	}
-	return &wf, nil
-}
-
-// workflowTopLevelKeys 是工作流 JSON 允许的顶层键集合。
-//
-// 唯一来源:model.Workflow 的 json tag(反射派生 —— 模型加字段这里自动
-// 生效,不会与模型漂移),外加两个特例:
-//
-//   - "permissions":DSL 根级段的正式写法(需求.md 第十八章),模型读它时
-//     映射到 Permission 字段(见 model.Workflow.UnmarshalJSON);
-//   - "ignored_keys":导入接口的**响应专用**字段(见 import 处理器)。
-//     保存时忽略它 —— 拒掉它会让"导入 → 原样回存"这种往返失败。
-var workflowTopLevelKeys = buildWorkflowTopLevelKeys()
-
-func buildWorkflowTopLevelKeys() map[string]bool {
-	out := map[string]bool{}
-	t := reflect.TypeOf(model.Workflow{})
-	for i := 0; i < t.NumField(); i++ {
-		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
-		if name == "" || name == "-" {
-			continue
-		}
-		out[name] = true
-	}
-	out["permissions"] = true
-	out["ignored_keys"] = true
-	return out
-}
-
-// allowedTopLevelKeys 返回允许的顶层键(排序后),用于错误信息。
-func allowedTopLevelKeys() []string {
-	out := make([]string, 0, len(workflowTopLevelKeys))
-	for k := range workflowTopLevelKeys {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// unknownTopLevelKeys 返回请求体里不被识别的顶层键(排序)。
-func unknownTopLevelKeys(m map[string]any) []string {
-	var out []string
-	for k := range m {
-		if !workflowTopLevelKeys[k] {
-			out = append(out, k)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// dslIgnoredKeys 解析 DSL 文本,返回"出现在文档里但被解析器丢弃"的键。
-//
-// 解析失败时返回 nil:真正的错误由 app 层的 ImportYAML 报出(这里不重复
-// 报错,避免两处错误语义不一致)。
-func dslIgnoredKeys(content []byte) []string {
-	doc, err := dsl.Parse(content)
-	if err != nil {
-		return nil
-	}
-	return doc.IgnoredKeys
-}
-
-// workflowJSONMap 把工作流展开成 map(便于在响应里附加额外字段)。
-func workflowJSONMap(wf *model.Workflow) (map[string]any, error) {
-	raw, err := json.Marshal(wf)
-	if err != nil {
-		return nil, badRequest("工作流序列化失败: " + err.Error())
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, badRequest("工作流序列化失败: " + err.Error())
-	}
-	return m, nil
 }

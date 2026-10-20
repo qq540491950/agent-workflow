@@ -17,6 +17,10 @@ import * as persistence$0 from "../../persistence/models.js";
 // @ts-ignore: Unused imports
 import * as model$0 from "../../workflow/model/models.js";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as $models from "./models.js";
+
 /**
  * AllEvents 跨执行审计事件流。
  */
@@ -84,7 +88,7 @@ export function RetryNode(id: string, skip: boolean): $CancellablePromise<model$
  * Run 启动执行(异步,立即返回 Execution 记录)。
  * 使用脱离请求的生命周期 context:HTTP 响应返回后执行继续在后台进行。
  */
-export function Run(workflowID: string, task: string, variables: { [_ in string]?: any } | null): $CancellablePromise<model$0.Execution | null> {
+export function Run(workflowID: string, task: string, variables: { [_ in string]?: any } | null): $CancellablePromise<$models.ExecutionResult | null> {
     return $Call.ByID(3075246354, workflowID, task, variables);
 }
 

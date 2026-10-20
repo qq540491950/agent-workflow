@@ -12,7 +12,7 @@ import {
   Power,
   FileUp,
 } from "lucide-react";
-import { api, asArray } from "@/lib/api";
+import { api, asArray, describeWarnings } from "@/lib/api";
 import type { Workflow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -91,6 +91,10 @@ export default function Workflows() {
         settings: { max_iterations: 5, on_loop_limit: "wait_user" },
       });
       toast.success("工作流已创建");
+      // 校验警告必须让用户看到:此前只进后端日志,用户以为那份设置生效了
+      // (两种模式现在都带回 warnings)。
+      const warns = describeWarnings(wf.warnings);
+      if (warns) toast.warning(warns);
       setCreating(false);
       setNewName("");
       nav(`/workflows/${wf.id}/design`);
@@ -361,6 +365,9 @@ export default function Workflows() {
                       `有 ${ignored.length} 个键被忽略(这些设置不会生效):${ignored.join("、")}`,
                     );
                   }
+                  // 校验警告同样要展示(此前只进后端日志)。
+                  const warns = describeWarnings(wf.warnings);
+                  if (warns) toast.warning(warns);
                   setImportOpen(false);
                   setImportText("");
                   refresh();

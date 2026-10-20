@@ -17,6 +17,10 @@ import * as model$0 from "../../workflow/model/models.js";
 // @ts-ignore: Unused imports
 import * as validator$0 from "../../workflow/validator/models.js";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as $models from "./models.js";
+
 export function Delete(id: string): $CancellablePromise<void> {
     return $Call.ByID(2490950045, id);
 }
@@ -42,8 +46,13 @@ export function Get(id: string): $CancellablePromise<model$0.Workflow | null> {
 /**
  * ImportYAML 导入 DSL 文本创建工作流。
  * ID 冲突时自动分配新 ID;导入前必须通过校验。
+ * 
+ * 返回值携带"被解析器丢弃的键"(IgnoredKeys)与校验警告:此前两者只落在
+ * 内存与日志里,用户看不到"这份 DSL 有 N 个键被忽略"(设置没生效,却显示
+ * 导入成功)—— 服务器模式的 import 端点自己又解析了一遍 DSL 才补上这个
+ * 字段,桌面模式(走本绑定)则完全没有。统一由应用层产出,两种模式同源。
  */
-export function ImportYAML(content: string): $CancellablePromise<model$0.Workflow | null> {
+export function ImportYAML(content: string): $CancellablePromise<$models.WorkflowResult | null> {
     return $Call.ByID(1216022400, content);
 }
 
@@ -53,9 +62,25 @@ export function List(): $CancellablePromise<(model$0.Workflow | null)[] | null> 
 
 /**
  * Save 创建或更新(传入带 ID 的 workflow;存在则版本+1)。
+ * 
+ * 模型级入口:调用方已经持有模型,**没有原始载荷**,因此不做顶层键校验
+ * (键在反序列化时已丢失,无从检查)。用户提交路径一律走 SavePayload。
+ * 
+ * 校验警告仍然不丢:既进日志,也在 SavePayload/ImportYAML 的返回值里带回。
  */
 export function Save(wf: model$0.Workflow | null): $CancellablePromise<model$0.Workflow | null> {
     return $Call.ByID(3116476783, wf);
+}
+
+/**
+ * SavePayload 保存工作流(载荷级入口:两种模式的用户提交路径都用它)。
+ * 
+ * rawJSON 是调用方提交的**原始 JSON 文本** —— 必须保留原始键:未知顶层键
+ * 在反序列化时会被静默丢弃,只有拿到原始载荷才能报 UNKNOWN_FIELD。
+ * 桌面模式此前走 Save(模型级),非法载荷被静默接受 —— 双模式行为不一致。
+ */
+export function SavePayload(rawJSON: string): $CancellablePromise<$models.WorkflowResult | null> {
+    return $Call.ByID(288438303, rawJSON);
 }
 
 export function SetEnabled(id: string, enabled: boolean): $CancellablePromise<model$0.Workflow | null> {

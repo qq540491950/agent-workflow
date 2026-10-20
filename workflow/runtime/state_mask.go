@@ -24,6 +24,16 @@ package runtime
 // 因此本文件维护一份"结构化键"清单(免脱敏),**其余键一律脱敏** ——
 // 默认脱敏:将来新增的状态键不会因为漏登记就明文落库。
 //
+// "一律脱敏"具体是**两级判定**(规则来自 logx,唯一定义处):
+//
+//  1. **键名判定**:键名本身是敏感词(api_key / auth_token / password …)
+//     → 整值替换为 "***"(与值的类型无关)。
+//  2. **值形态判定**:值里含 key=value 形态的凭据 → 就地替换,保留上下文。
+//
+// 此前只有第 2 级:顶层字符串值("api_key":"sk-plain-value-999")原样落库,
+// 与上面的"默认脱敏"承诺相反(约定 #8)。第 1 级的唯一例外是 outcome
+// JSON 键(见 maskStateValue)。
+//
 // 清单的来源:workflow/compiler 的会话状态键常量与键构造函数(唯一定义处)
 // + runtime 自己写入的键。TestStateWritesAreClassified 扫描 compiler
 // 与 runtime 的源码,确保每个被写入的状态键都已分类 —— 凭印象维护清单
@@ -175,13 +185,45 @@ func MaskStateData(data map[string]any) map[string]any {
 }
 
 // maskStateValue 脱敏一个自由文本状态值。
+//
+// 两级判定(规则来自 logx,本文件不复制一份 —— 同源,约定 #13 的精神):
+//
+//  1. **键名判定**:键名本身是敏感词(api_key / auth_token / password …)
+//     → 整值替换为 "***"(强敏感与值的类型无关)。
+//     这一级此前缺失:顶层字符串值("api_key":"sk-plain-value-999")只做
+//     值形态判定,原样返回 —— 与本文件头"其余键一律脱敏 —— 默认脱敏"的
+//     承诺相反(约定 #8)。
+//  2. **值形态判定**:值里含 key=value 形态的凭据 → 就地替换。
+//
+// 唯一的例外是 outcome JSON 键(node:<id>:result / node:<id>:answered):
+// 它们的值是一个 JSON 文档,敏感度由**内层键名**决定(解析后判定),
+// 不能按外层键名整值替换 —— 外层键名里的节点 ID 是用户自定的标识,
+// 不是数据字段名;整值替换会产出非法 JSON,恢复路径解析失败 →
+// 静默重跑节点(见 maskStateString)。
 func maskStateValue(key string, v any) any {
-	if s, ok := v.(string); ok {
-		return maskStateString(key, s)
+	if outcomeJSONKey(key) {
+		if s, ok := v.(string); ok {
+			return maskStateString(key, s)
+		}
+		// 非字符串的 outcome 值(理论上不该有):按值形态脱敏。
+		return logx.MaskValue(v)
 	}
-	// map/slice 等容器:交给 logx 按键名+值形态递归脱敏
-	// (返回新容器,不改原对象)。
-	return logx.MaskValue(v)
+	return maskStateValueByKey(key, v)
+}
+
+// maskStateValueByKey 按"键名 + 值形态"两级判定脱敏一个状态值。
+//
+// 实现:把值包进一个**单键 map** 交给 logx.MaskValue —— logx 遍历 map 时
+// 对每个键都做键名判定(内部 maskWithKey),键名不敏感时才退回按值形态
+// 处理。这样键名规则只有一份来源(logx.keySensitivity),本文件不再各写
+// 一份 —— 两份实现各自演化,就会出现"运行期脱敏了但日志侧没脱敏"这类
+// 半吊子防护(约定 #13 的同源精神)。
+func maskStateValueByKey(key string, v any) any {
+	out, ok := logx.MaskValue(map[string]any{key: v}).(map[string]any)
+	if !ok {
+		return v
+	}
+	return out[key]
 }
 
 // maskStateString 脱敏字符串形态的状态值。
@@ -197,6 +239,12 @@ func maskStateValue(key string, v any) any {
 //     则整值替换,漏不掉。
 //
 // 解析失败时退回文本脱敏 —— 不能因为格式异常就把原文整个留下。
+//
+// 注意:这条路径**不做外层键名判定**(与 maskStateValue 的例外一致):
+// 外层键名里的节点 ID 是用户自定的标识而非数据字段名,按数据字段名的
+// 规则判敏感会误伤(节点 ID 含 "token" 之类)—— 误伤 = 把 outcome 快照
+// 整值替换成 "***" → 恢复路径解析失败 → 静默重跑节点(约定 #14 同族:
+// 脱敏不得改写执行语义)。
 func maskStateString(key string, s string) string {
 	if s == "" {
 		return s

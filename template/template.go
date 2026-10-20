@@ -12,7 +12,23 @@ import (
 )
 
 // Engine 渲染 {{var}} 风格的模板。
-type Engine struct{}
+type Engine struct {
+	// lookupFn 是变量查找的间接层(**测试接缝**);nil 时用包级 lookup。
+	//
+	// 为什么要这个缝:RenderErr 的 panic→error 出口在生产路径上**不可达**
+	// —— 渲染期的两个 panic 源(toString 对 Stringer 的兜底、fmt 内部对
+	// String/Error/Format 方法的兜底)都会自己 recover;畸形模板("{{v")、
+	// 会 panic 的 fmt.Formatter、空数据,RenderErr 一律返回 nil error
+	// (实测,见 template_test.go)。没有缝就没有办法验证"渲染 panic 被兜底
+	// 成 error"这条契约 —— 把 err = nil 改回去也不会有任何测试变红
+	// (恒真的假保护,比没有测试更危险)。
+	//
+	// 生产代码一律用 NewEngine() 构造(lookupFn 为 nil → 走包级 lookup);
+	// 只有**同包测试**能注入会 panic 的实现(未导出字段,包外无法写)。
+	// 它挂在实例上而不是包级变量上:不引入跨 goroutine 共享可变状态
+	// (约定 15),也不必为它加锁。
+	lookupFn func(key string, data map[string]any) (any, bool)
+}
 
 // NewEngine 创建模板引擎。
 func NewEngine() *Engine { return &Engine{} }
@@ -48,6 +64,11 @@ func (e *Engine) Render(tpl string, data map[string]any) (string, []string) {
 
 // RenderErr 是带错误返回的渲染入口:渲染期的 panic 被兜底成 error,
 // 而不是向上抛(调用方想知道"渲染失败"时应使用它)。
+//
+// 契约(由 template_test.go 锁住):兜底后 error **非 nil** 且文本可读
+// (含 panic 的内容),返回值是**原始模板**(调用方据此给出可读提示),
+// missing 为 nil。err = nil 会让这条契约失效 → 渲染失败被当成成功
+// (约定 14:该失败却成功等同 P0)。
 func (e *Engine) RenderErr(tpl string, data map[string]any) (out string, missing []string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -60,7 +81,7 @@ func (e *Engine) RenderErr(tpl string, data map[string]any) (out string, missing
 	seen := map[string]bool{}
 
 	out = renderAll(tpl, func(key string) string {
-		v, ok := lookup(key, data)
+		v, ok := e.lookupValue(key, data)
 		if !ok {
 			if !seen[key] {
 				seen[key] = true
@@ -73,6 +94,17 @@ func (e *Engine) RenderErr(tpl string, data map[string]any) (out string, missing
 
 	sort.Strings(miss)
 	return out, miss, nil
+}
+
+// lookupValue 解析一个模板变量。
+//
+// 优先用注入的 lookupFn(测试接缝);没有注入时走包级 lookup。
+// nil 接收者也安全:调用方不该传 nil Engine,但别因此把渲染带崩。
+func (e *Engine) lookupValue(key string, data map[string]any) (any, bool) {
+	if e != nil && e.lookupFn != nil {
+		return e.lookupFn(key, data)
+	}
+	return lookup(key, data)
 }
 
 // MustRender 渲染并忽略缺失变量(用于日志等非关键场景)。

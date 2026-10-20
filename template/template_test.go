@@ -1,6 +1,7 @@
 package template
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -117,6 +118,73 @@ func TestRenderErrReportsPanic(t *testing.T) {
 		t.Fatalf("Stringer panic 不应导致整体失败(已就地兜底): %v", err)
 	}
 	if !strings.Contains(out, "<unrenderable>") {
+		t.Errorf("期望占位文本: %q", out)
+	}
+}
+
+// panickingLookup 是"渲染期必然 panic"的变量查找实现(测试接缝)。
+//
+// 为什么需要它:RenderErr 的 panic→error 出口在生产路径上不可达 ——
+// toString 对 Stringer 有兜底、fmt 内部对 String/Error/Format 方法也有
+// 兜底,畸形模板/空数据都不会 panic(实测:把 err = fmt.Errorf(...) 改成
+// err = nil,go test ./template/ 仍全绿)。没有缝就没有办法验证这条契约。
+func panickingLookup(key string, data map[string]any) (any, bool) {
+	panic("render boom: " + key)
+}
+
+// TestRenderErrConvertsRenderPanicToError 渲染期 panic 必须被兜底成
+// **非 nil error**,且错误文本可读。
+//
+// 这条出口此前没有任何测试:恒真的假保护(比没有测试更危险)。
+func TestRenderErrConvertsRenderPanicToError(t *testing.T) {
+	e := &Engine{lookupFn: panickingLookup}
+
+	out, missing, err := e.RenderErr("v={{value}}", map[string]any{"value": "x"})
+	if err == nil {
+		t.Fatal("渲染期 panic 必须返回非 nil error(把 err = nil 改回去后本测试必须变红)")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Errorf("错误文本应说明是渲染 panic: %v", err)
+	}
+	if !strings.Contains(err.Error(), "render boom") {
+		t.Errorf("错误文本应带上 panic 的内容(可读原因): %v", err)
+	}
+	// 兜底后返回原始模板:调用方拿到的不是空串(能给出可读提示)。
+	if out != "v={{value}}" {
+		t.Errorf("panic 兜底后应返回原始模板: %q", out)
+	}
+	if missing != nil {
+		t.Errorf("panic 兜底后不应报告缺失变量: %v", missing)
+	}
+}
+
+// TestRenderSurvivesRenderPanic Render 也必须扛住渲染期 panic(不得把
+// panic 抛给调用方 —— 约定 12:模板渲染是明确的 panic 风险路径)。
+func TestRenderSurvivesRenderPanic(t *testing.T) {
+	e := &Engine{lookupFn: panickingLookup}
+	out, _ := e.Render("v={{value}}", map[string]any{"value": "x"})
+	if out != "v={{value}}" {
+		t.Errorf("Render 在渲染 panic 后应回退为原始模板: %q", out)
+	}
+}
+
+// TestRenderErrDoesNotFailOnPanickingFormatter 兜底各就各位:
+// fmt.Formatter 的 panic 由 fmt 自己兜住(渲染成占位文本),**不是**
+// 整次渲染的失败 —— 不应因此返回 error。
+//
+// 这条测试同时是接缝的"反向自检":如果哪天 toString 不再兜底
+// Formatter,这里会红,提醒同步更新 RenderErr 的语义。
+type panickingFormatter struct{}
+
+func (panickingFormatter) Format(s fmt.State, verb rune) { panic("formatter boom") }
+
+func TestRenderErrDoesNotFailOnPanickingFormatter(t *testing.T) {
+	e := NewEngine()
+	out, _, err := e.RenderErr("v={{value}}", map[string]any{"value": panickingFormatter{}})
+	if err != nil {
+		t.Fatalf("Formatter panic 由 fmt 兜住,不应导致整次渲染失败: %v", err)
+	}
+	if !strings.Contains(out, "<unrenderable>") && !strings.Contains(out, "PANIC") {
 		t.Errorf("期望占位文本: %q", out)
 	}
 }

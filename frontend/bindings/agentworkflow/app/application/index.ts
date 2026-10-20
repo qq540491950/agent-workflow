@@ -17,5 +17,7 @@ export {
 };
 
 export type {
-    SettingsInfo
+    ExecutionResult,
+    SettingsInfo,
+    WorkflowResult
 } from "./models.js";

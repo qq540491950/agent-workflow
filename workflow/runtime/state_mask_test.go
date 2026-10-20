@@ -148,6 +148,86 @@ func TestMaskStateDataKeepsOutcomeJSONValid(t *testing.T) {
 	}
 }
 
+// TestMaskStateDataMasksSensitiveKeyNames 顶层键的**键名**也必须参与敏感判定。
+//
+// 回归:此前顶层字符串值只做"值形态"脱敏(logx.Mask),不做键名判定 ——
+// {"api_key":"sk-plain-value-999"} 原样返回,与 state_mask.go 头注释
+// "其余键一律脱敏 —— 默认脱敏"的承诺相反(约定 #8)。同一份输入经
+// logx.MaskValue 则会被判为 "***"(logx 内部对 map 的键做键名判定)。
+//
+// 下面的断言必须**只能**由键名判定满足:取值刻意不含 key=value 形态
+// (logx.Mask 改不动它),否则测试会退化成恒真。
+func TestMaskStateDataMasksSensitiveKeyNames(t *testing.T) {
+	// 前置自检:这些值不会被"值形态"脱敏改动 —— 否则下面的断言测不到键名判定。
+	const plain = "sk-plain-value-999"
+	if got := logx.Mask(plain); got != plain {
+		t.Fatalf("测试前提不成立:logx.Mask 会改动 %q(无法用它区分键名判定与值形态判定)", plain)
+	}
+
+	for _, key := range []string{
+		"api_key", "auth_token", "password", "client_secret", "user_token",
+	} {
+		out := MaskStateData(map[string]any{key: plain})
+		got, ok := out[key].(string)
+		if !ok {
+			t.Errorf("顶层键 %q 的值类型被改动了: %T", key, out[key])
+			continue
+		}
+		if got != "***" {
+			t.Errorf("顶层敏感键名 %q 未被脱敏: got %q want %q", key, got, "***")
+		}
+	}
+}
+
+// TestMaskStateDataKeyNameJudgmentDoesNotTouchStructuredKeys 键名判定
+// 不得越过"结构化键免脱敏"这条线。
+//
+// logx 的键名规则把"token 结尾"判为强敏感:节点 ID 里带 token 的状态键
+// (node:my-token:status)会被整值替换成 "***" —— 节点状态直接丢失,恢复时
+// 该节点会被重跑(约定 #14 同族:脱敏不得改写执行语义)。
+func TestMaskStateDataKeyNameJudgmentDoesNotTouchStructuredKeys(t *testing.T) {
+	const plain = "sk-plain-value-999"
+	for _, key := range []string{
+		"node:my-token:status",
+		"node:my-api-key:status",
+		"node:client-secret:attempt",
+	} {
+		out := MaskStateData(map[string]any{key: plain})
+		if got := fmt.Sprint(out[key]); got != plain {
+			t.Errorf("结构化键 %q 被键名判定改动了: got %q want %q", key, got, plain)
+		}
+		if !structuredStateKey(key) {
+			t.Errorf("键 %q 未被登记为结构化键(删掉登记后本测试必须变红)", key)
+		}
+	}
+}
+
+// TestMaskStateDataKeyNameJudgmentKeepsOutcomeJSON 键名判定不得破坏
+// outcome JSON 快照。
+//
+// node:<id>:result / node:<id>:answered 的外层键名里嵌着用户自定的节点
+// ID(含 "token" 之类时会被 logx 判为弱敏感)。若按外层键名整值替换,快照
+// 就变成 "***" —— 恢复路径 json.Unmarshal 失败 → 按"未答复"处理 → 静默
+// 重跑节点(用户白等一次)。
+func TestMaskStateDataKeyNameJudgmentKeepsOutcomeJSON(t *testing.T) {
+	raw := `{"State":"SUCCESS","Decision":"APPROVED","Output":"ok"}`
+	for _, key := range []string{
+		"node:my-token:result",
+		"node:my-token:answered",
+	} {
+		out := MaskStateData(map[string]any{key: raw})
+		got := fmt.Sprint(out[key])
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+			t.Errorf("%s 被键名判定破坏成非法 JSON(恢复路径会解析失败): %v (%s)", key, err, got)
+			continue
+		}
+		if parsed["Decision"] != "APPROVED" {
+			t.Errorf("%s 的结构化字段被改动: %v", key, parsed["Decision"])
+		}
+	}
+}
+
 // TestMaskStateDataDoesNotMutateInput 脱敏不得就地改运行期状态。
 //
 // 入参是运行期正在用的 StateData(还要读它做路由与决策)。

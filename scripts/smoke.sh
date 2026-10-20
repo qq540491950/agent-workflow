@@ -49,11 +49,38 @@ fail() {
 	exit 1
 }
 
+# 打印端口占用者 —— 排障时"端口被占用"必须告诉用户**谁**占的,
+# 只报端口号等于让用户自己去猜。
+# 依次尝试 lsof(macOS 自带)→ ss(Linux)→ netstat(兜底);三者都没有
+# 或都拿不到(权限不足 / 端口刚被释放)时,明说"未能定位",不假装
+# 打印了占用者。`lsof` 在非 root 下看不到其它用户的进程,这也是
+# 退回到 ss/netstat 的原因。
+print_port_owners() {
+	po_port="$1"
+	po_out=""
+	if command -v lsof >/dev/null 2>&1; then
+		po_out=$(lsof -nP -iTCP:"$po_port" -sTCP:LISTEN 2>/dev/null || true)
+	fi
+	if [ -z "$po_out" ] && command -v ss >/dev/null 2>&1; then
+		po_out=$(ss -ltnp 2>/dev/null | grep -E "[:.]${po_port}[[:space:]]" || true)
+	fi
+	if [ -z "$po_out" ] && command -v netstat >/dev/null 2>&1; then
+		po_out=$(netstat -anp 2>/dev/null | grep -E "[:.]${po_port}[[:space:]]" || true)
+	fi
+	if [ -n "$po_out" ]; then
+		echo "---- 端口 $po_port 占用者 ----"
+		printf '%s\n' "$po_out" | sed 's/^/    /'
+	else
+		echo "    (未能定位占用者进程:lsof / ss / netstat 不可用或无权限)"
+	fi
+}
+
 # 端口占用预检:能连上说明有人(多半是上次的残留进程)占着端口。
 if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
 	exec 3<&- 2>/dev/null || true
 	exec 3>&- 2>/dev/null || true
 	echo "❌ SMOKE FAIL: 端口 $PORT 已被占用(可能有残留进程);请先清理再运行"
+	print_port_owners "$PORT"
 	exit 1
 fi
 

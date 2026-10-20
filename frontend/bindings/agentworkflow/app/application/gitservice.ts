@@ -28,6 +28,8 @@ export function Log(maxCount: number): $CancellablePromise<git$0.LogEntry[] | nu
 
 /**
  * SetWorkingDir 更新 Git 工作目录。
+ * 先落库再改内存:此前反过来,落库失败时接口返回错误但内存态已被改掉
+ * (界面提示失败,Git 面板却已指向新目录;重启后又回到旧目录)。
  */
 export function SetWorkingDir(dir: string): $CancellablePromise<void> {
     return $Call.ByID(1240058987, dir);

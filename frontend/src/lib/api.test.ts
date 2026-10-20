@@ -1,6 +1,7 @@
 // api.ts 统一服务层测试:双模式探测、防御性转换、HTTP 错误传播、事件订阅。
 // 桌面模式的 @wailsio/runtime 与 @bindings/* 全部 mock,纯逻辑验证。
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Workflow } from "./types";
 
 const callByID = vi.fn();
 vi.mock("@wailsio/runtime", () => ({
@@ -9,15 +10,62 @@ vi.mock("@wailsio/runtime", () => ({
 }));
 
 const wfList = vi.fn();
+const wfSavePayload = vi.fn();
+const wfImportYAML = vi.fn();
 const exAllEvents = vi.fn();
+const exRun = vi.fn();
 const stExportBackup = vi.fn();
 const stRestoreBackup = vi.fn();
-vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () => ({
-  List: (...a: unknown[]) => wfList(...a),
-}));
-vi.mock("@bindings/agentworkflow/app/application/executionservice.js", () => ({
-  AllEvents: (...a: unknown[]) => exAllEvents(...a),
-}));
+// 桌面绑定用 bindingStub(见下):显式声明导出清单,访问后端并不存在的
+// 导出会在读取属性时立刻抛错 —— 绑定漂移测得出来。
+vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () =>
+  bindingStub(
+    "WorkflowService",
+    [
+      "Delete",
+      "Duplicate",
+      "ExportYAML",
+      "Get",
+      "ImportYAML",
+      "List",
+      "Save",
+      "SavePayload",
+      "SetEnabled",
+      "Validate",
+      "VersionDSL",
+      "Versions",
+    ],
+    {
+      List: (...a: unknown[]) => wfList(...a),
+      SavePayload: (...a: unknown[]) => wfSavePayload(...a),
+      ImportYAML: (...a: unknown[]) => wfImportYAML(...a),
+    },
+  ),
+);
+vi.mock("@bindings/agentworkflow/app/application/executionservice.js", () =>
+  bindingStub(
+    "ExecutionService",
+    [
+      "AllEvents",
+      "Artifacts",
+      "Cancel",
+      "Delete",
+      "Events",
+      "Export",
+      "Get",
+      "List",
+      "Nodes",
+      "ProvideInput",
+      "RetryNode",
+      "Run",
+      "Stats",
+    ],
+    {
+      AllEvents: (...a: unknown[]) => exAllEvents(...a),
+      Run: (...a: unknown[]) => exRun(...a),
+    },
+  ),
+);
 // 桌面绑定用 Proxy 桩:被调用的导出自动返回 vi.fn()(默认 undefined),
 // 但**显式断言模块形状**—— 访问一个后端并不存在的绑定(例如
 // ResetConfig 被改名)会在读取属性时立刻抛出,而不是静默得到 undefined
@@ -106,7 +154,10 @@ async function freshApi() {
 beforeEach(() => {
   callByID.mockReset();
   wfList.mockReset();
+  wfSavePayload.mockReset();
+  wfImportYAML.mockReset();
   exAllEvents.mockReset();
+  exRun.mockReset();
   stExportBackup.mockReset();
   stRestoreBackup.mockReset();
   vi.unstubAllGlobals();
@@ -708,6 +759,35 @@ describe("绑定形状守卫", () => {
     const dir = path.join(import.meta.dirname, "..", "..", "bindings",
       "agentworkflow", "app", "application");
     const expected: Record<string, string[]> = {
+      "workflowservice": [
+        "Delete",
+        "Duplicate",
+        "ExportYAML",
+        "Get",
+        "ImportYAML",
+        "List",
+        "Save",
+        "SavePayload",
+        "SetEnabled",
+        "Validate",
+        "VersionDSL",
+        "Versions",
+      ],
+      "executionservice": [
+        "AllEvents",
+        "Artifacts",
+        "Cancel",
+        "Delete",
+        "Events",
+        "Export",
+        "Get",
+        "List",
+        "Nodes",
+        "ProvideInput",
+        "RetryNode",
+        "Run",
+        "Stats",
+      ],
       "agentservice": ["GetConfig", "List", "ResetConfig", "SetPermission", "Test", "UpdateConfig"],
       "skillservice": ["List", "SetEnabled", "Test"],
       "gitservice": ["Commit", "Diff", "Log", "SetWorkingDir", "Status"],
@@ -718,5 +798,388 @@ describe("绑定形状守卫", () => {
       const actual = [...src.matchAll(/^export function ([A-Za-z]+)/gm)].map((m) => m[1]).sort();
       expect(actual, `${file} 的绑定导出清单`).toEqual([...names].sort());
     }
+  });
+});
+
+// ---- 迭代 22:双模式一致性契约 ----
+//
+// 同一个语义在两种模式下必须给出**同一个**结果:桌面模式走 Wails 绑定
+// (IPC),服务器模式走 REST + SSE。冒烟脚本只测服务器模式,抓不到这类
+// 差异 —— 下面这些用例把两条分支钉在同一份契约上。
+//
+// 工作流的顶层键严格化此前只在服务器模式生效:桌面模式走模型级 Save,
+// 未知顶层键在反序列化时被 json.Unmarshal 静默丢弃 → 同一个非法载荷,
+// 桌面模式"保存成功",服务器模式 400。
+
+// badWorkflowPayload 含未知顶层键 timeout_seconds。
+const badWorkflowPayload = {
+  id: "wf-bad",
+  name: "非法",
+  description: "",
+  version: 1,
+  enabled: true,
+  nodes: [],
+  edges: [],
+  settings: {},
+  // 未知顶层键(后端必须拒掉)
+  timeout_seconds: 30,
+} as unknown as Workflow;
+
+// goodWorkflowPayload 是一份合法载荷。
+const goodWorkflowPayload: Workflow = {
+  id: "wf-good",
+  name: "合法",
+  description: "",
+  version: 1,
+  enabled: true,
+  nodes: [],
+  edges: [],
+  settings: {},
+};
+
+describe("双分支契约:保存(顶层键严格化)", () => {
+  it("桌面分支与浏览器分支对同一份非法 payload 都报错,且给出同一个 code", async () => {
+    // ---- 桌面分支 ----
+    callByID.mockResolvedValue([]); // desktop
+    wfSavePayload.mockRejectedValue(
+      new Error(
+        "ValidationError(UNKNOWN_FIELD): 未知的顶层字段 timeout_seconds(允许: id, name, …)",
+      ),
+    );
+    const { api, ApiError } = await freshApi();
+    const deskErr = (await api
+      .saveWorkflow(badWorkflowPayload)
+      .catch((e: unknown) => e)) as InstanceType<typeof ApiError>;
+    expect(deskErr, "桌面分支必须拒绝未知顶层键").toBeInstanceOf(ApiError);
+    expect(deskErr.code).toBe("UNKNOWN_FIELD");
+    expect(deskErr.kind).toBe("ValidationError");
+    // 前缀必须被剥掉(与服务器模式给用户看的是同一句话)
+    expect(deskErr.message).toContain("timeout_seconds");
+    expect(deskErr.message).not.toContain("ValidationError(");
+
+    // ---- 浏览器分支 ----
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () =>
+          JSON.stringify({
+            error:
+              "ValidationError(UNKNOWN_FIELD): 未知的顶层字段 timeout_seconds(允许: id, name, …)",
+            code: "UNKNOWN_FIELD",
+            kind: "ValidationError",
+          }),
+      }),
+    );
+    const { api: webApi } = await freshApi();
+    const webErr = (await webApi
+      .saveWorkflow(badWorkflowPayload)
+      .catch((e: unknown) => e)) as InstanceType<typeof ApiError>;
+    expect(webErr.code).toBe("UNKNOWN_FIELD");
+    // 关键断言:两种模式给用户**同一句话**
+    expect(webErr.message).toBe(deskErr.message);
+  });
+
+  it("桌面分支把原始载荷(JSON 文本)交给后端,而不是反序列化后的模型", async () => {
+    callByID.mockResolvedValue([]);
+    wfSavePayload.mockResolvedValue({ id: "wf-good", name: "合法" });
+    const { api } = await freshApi();
+    await api.saveWorkflow(goodWorkflowPayload);
+    expect(wfSavePayload).toHaveBeenCalledTimes(1);
+    const arg = wfSavePayload.mock.calls[0][0] as string;
+    expect(typeof arg).toBe("string");
+    // 载荷里必须保留原始键(后端据此判定未知顶层键)
+    expect(JSON.parse(arg).id).toBe("wf-good");
+  });
+
+  it("合法载荷在两个分支都保存成功", async () => {
+    callByID.mockResolvedValue([]);
+    wfSavePayload.mockResolvedValue({ id: "wf-good", name: "合法" });
+    const { api } = await freshApi();
+    await expect(api.saveWorkflow(goodWorkflowPayload)).resolves.toMatchObject({
+      id: "wf-good",
+    });
+
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => JSON.stringify({ id: "wf-good", name: "合法" }),
+      }),
+    );
+    const { api: webApi } = await freshApi();
+    await expect(webApi.saveWorkflow(goodWorkflowPayload)).resolves.toMatchObject({
+      id: "wf-good",
+    });
+  });
+});
+
+describe("双分支契约:校验警告(warnings)", () => {
+  it("两个分支都把保存时的校验警告带回(此前只进后端日志)", async () => {
+    const warnings = [
+      { code: "DEPRECATED_NODE_CONFIG", message: "节点 c 的 expression 配置键已废弃" },
+    ];
+
+    callByID.mockResolvedValue([]);
+    wfSavePayload.mockResolvedValue({ id: "wf-good", name: "合法", warnings });
+    const { api } = await freshApi();
+    const desk = await api.saveWorkflow(goodWorkflowPayload);
+    expect(desk.warnings).toEqual(warnings);
+
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => JSON.stringify({ id: "wf-good", name: "合法", warnings }),
+      }),
+    );
+    const { api: webApi } = await freshApi();
+    const web = await webApi.saveWorkflow(goodWorkflowPayload);
+    expect(web.warnings).toEqual(warnings);
+  });
+
+  it("两个分支都把运行时的校验警告带回", async () => {
+    const warnings = [
+      { code: "DEPRECATED_NODE_CONFIG", message: "节点 c 的 expression 配置键已废弃" },
+    ];
+
+    callByID.mockResolvedValue([]);
+    exRun.mockResolvedValue({ id: "exec-1", workflow_id: "wf-good", state: "RUNNING", warnings });
+    const { api } = await freshApi();
+    const desk = await api.runWorkflow("wf-good", "t");
+    expect(desk.warnings).toEqual(warnings);
+
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () =>
+          JSON.stringify({ id: "exec-1", workflow_id: "wf-good", state: "RUNNING", warnings }),
+      }),
+    );
+    const { api: webApi } = await freshApi();
+    const web = await webApi.runWorkflow("wf-good", "t");
+    expect(web.warnings).toEqual(warnings);
+  });
+});
+
+describe("双分支契约:导入的 ignored_keys", () => {
+  it("两个分支都带回被忽略的键(桌面模式此前完全没有)", async () => {
+    const ignored = ["workflow.settings"];
+
+    callByID.mockResolvedValue([]);
+    wfImportYAML.mockResolvedValue({ id: "wf-imp", name: "导入", ignored_keys: ignored });
+    const { api } = await freshApi();
+    const desk = await api.importYAML("workflow:\n  id: wf-imp\n");
+    expect(desk.ignored_keys).toEqual(ignored);
+
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => JSON.stringify({ id: "wf-imp", name: "导入", ignored_keys: ignored }),
+      }),
+    );
+    const { api: webApi } = await freshApi();
+    const web = await webApi.importYAML("workflow:\n  id: wf-imp\n");
+    expect(web.ignored_keys).toEqual(ignored);
+  });
+
+  it("后端没给 ignored_keys 时两个分支都兜底为空数组", async () => {
+    callByID.mockResolvedValue([]);
+    wfImportYAML.mockResolvedValue({ id: "wf-imp", name: "导入" });
+    const { api } = await freshApi();
+    await expect(api.importYAML("x")).resolves.toMatchObject({ ignored_keys: [] });
+  });
+});
+
+describe("桌面模式的错误处理", () => {
+  it("IPC reject 的原始文本被转成带 code/kind 的 ApiError", async () => {
+    callByID.mockResolvedValue([]);
+    wfSavePayload.mockRejectedValue(
+      new Error("PermissionError(PERMISSION_DENIED): agent \"x\" 无权执行 git.push"),
+    );
+    const { api, ApiError } = await freshApi();
+    const err = (await api
+      .saveWorkflow(goodWorkflowPayload)
+      .catch((e: unknown) => e)) as InstanceType<typeof ApiError>;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.code).toBe("PERMISSION_DENIED");
+    expect(err.kind).toBe("PermissionError");
+    expect(err.message).toBe('agent "x" 无权执行 git.push');
+  });
+
+  it("没有 Kind(CODE) 前缀的 IPC 错误也变成 ApiError(不抛裸字符串)", async () => {
+    callByID.mockResolvedValue([]);
+    wfSavePayload.mockRejectedValue("boom");
+    const { api, ApiError } = await freshApi();
+    const err = (await api
+      .saveWorkflow(goodWorkflowPayload)
+      .catch((e: unknown) => e)) as InstanceType<typeof ApiError>;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.message).toBe("boom");
+    expect(err.code).toBeUndefined();
+  });
+});
+
+// ---- 迭代 22:错误码全集守卫(防漂移) ----
+//
+// 后端新增一个错误码而前端没补提示 → 用户只能看到裸的 "HTTP 400"。
+// 本用例扫描后端 Go 源码里的**全部** code,与前端 CODE_HINTS 求差集:
+//
+//   - 后端有、前端没有 → 红(必须补一句人话提示)
+//   - 前端有、后端没有 → 红(键写错或后端已删)
+//     此前就有一个这样的键:"DENIED" —— 后端真实码是 PERMISSION_DENIED,
+//     这条权限提示从来没生效过。
+//
+// 扫描规则(刻意保守,只认"确凿是错误码"的写法):
+//   1. model.NewError(kind, "CODE", …)      —— 结构化错误码
+//   2. Code: "CODE"                          —— model.Error 字面量
+//   3. "code": "CODE" / body["code"] = "…"   —— API 层的错误体字段
+//   4. const x = "CODE"                      —— 具名错误码常量
+//   5. workflow/validator 包里的全大写字面量  —— 校验期错误码
+async function collectGoFiles(dir: string, out: string[] = []): Promise<string[]> {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (
+      entry.name.startsWith(".") ||
+      entry.name === "node_modules" ||
+      entry.name === "build" ||
+      entry.name === "bin" ||
+      entry.name === "frontend" ||
+      entry.name === "dist"
+    ) {
+      continue;
+    }
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) await collectGoFiles(p, out);
+    else if (entry.name.endsWith(".go") && !entry.name.endsWith("_test.go")) out.push(p);
+  }
+  return out;
+}
+
+async function collectBackendCodes(): Promise<Set<string>> {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const codes = new Set<string>();
+  // frontend/src/lib → 仓库根
+  const root = path.join(import.meta.dirname, "..", "..", "..");
+  for (const file of await collectGoFiles(root)) {
+    const src = fs.readFileSync(file, "utf8");
+    const isValidator = file.includes(`${path.sep}workflow${path.sep}validator${path.sep}`);
+    const add = (re: RegExp) => {
+      for (const m of src.matchAll(re)) codes.add(m[1]);
+    };
+    add(/model\.NewError\(\s*[^,()]+,\s*"([A-Z][A-Z0-9_]*)"/g);
+    add(/\bCode:\s*"([A-Z][A-Z0-9_]*)"/g);
+    add(/"code":\s*"([A-Z][A-Z0-9_]*)"/g);
+    add(/body\["code"\]\s*=\s*"([A-Z][A-Z0-9_]*)"/g);
+    add(/const\s+\w+\s*=\s*"([A-Z][A-Z0-9_]{3,})"/g);
+    if (isValidator) add(/"([A-Z][A-Z0-9_]{3,})"/g);
+  }
+  return codes;
+}
+
+async function collectCodeHints(): Promise<Set<string>> {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const src = fs.readFileSync(path.join(import.meta.dirname, "api.ts"), "utf8");
+  const block = src.match(/const CODE_HINTS: Record<string, string> = \{([\s\S]*?)\n\};/);
+  if (!block) throw new Error("api.ts 里找不到 CODE_HINTS 表");
+  return new Set(
+    [...block[1].matchAll(/^\s*([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]),
+  );
+}
+
+describe("错误码全集守卫(后端 code ↔ 前端 CODE_HINTS)", () => {
+  it("后端的每个错误码都有中文提示", async () => {
+    const backend = await collectBackendCodes();
+    const hints = await collectCodeHints();
+    const missing = [...backend].filter((c) => !hints.has(c)).sort();
+    expect(
+      missing,
+      "后端存在但前端 CODE_HINTS 没有的错误码(用户只能看到裸 HTTP 码)",
+    ).toEqual([]);
+  });
+
+  it("前端没有为不存在的错误码留提示(键写错/后端已删)", async () => {
+    const backend = await collectBackendCodes();
+    const hints = await collectCodeHints();
+    const stale = [...hints].filter((c) => !backend.has(c)).sort();
+    expect(stale, "CODE_HINTS 里存在后端没有的错误码").toEqual([]);
+  });
+
+  it("扫描确实扫到了后端的错误码(守卫本身不是恒真的)", async () => {
+    const backend = await collectBackendCodes();
+    // 抽样几个已知的码:来自 model.NewError / 校验器 / 权限包
+    for (const code of [
+      "UNKNOWN_FIELD",
+      "WORKFLOW_INVALID",
+      "INVALID_JSON",
+      "PERMISSION_DENIED",
+      "INTERNAL",
+      "DSL_MISPLACED_KEY",
+      "MISSING_ID",
+      "UNKNOWN_NODE_TYPE",
+    ]) {
+      expect(backend.has(code), `后端应包含错误码 ${code}`).toBe(true);
+    }
+    // 规模下限:后端现有 60+ 个错误码
+    expect(backend.size).toBeGreaterThan(50);
+  });
+});
+
+// ---- 迭代 22:校验警告的展示文案 ----
+describe("describeWarnings", () => {
+  it("没有警告时返回空串(调用方据此决定要不要提示)", async () => {
+    const { describeWarnings } = await freshApi();
+    expect(describeWarnings(undefined)).toBe("");
+    expect(describeWarnings([])).toBe("");
+  });
+
+  it("把警告拼成可读文案(带节点与错误码,便于追溯)", async () => {
+    const { describeWarnings } = await freshApi();
+    const text = describeWarnings([
+      {
+        code: "DEPRECATED_NODE_CONFIG",
+        node: "c",
+        message: "节点 c 的配置键 expression 已废弃",
+      },
+      { code: "UNKNOWN_NODE_CONFIG", message: "节点含未识别的配置键" },
+    ]);
+    expect(text).toContain("节点 c");
+    expect(text).toContain("expression 已废弃");
+    expect(text).toContain("DEPRECATED_NODE_CONFIG");
+    expect(text).toContain("UNKNOWN_NODE_CONFIG");
+  });
+});
+
+// ---- 迭代 22:显式 limit 参数的上限(两种模式同一口径) ----
+//
+// 服务端 api.queryInt 把 limit 收敛到 maxQueryLimit=1000(防整数溢出成
+// 负数后被仓储层当成"不限制")。桌面分支此前不设上限:同一个请求,服务器
+// 模式返回 1000 条,桌面模式可能把整表拉出来。
+describe("limit 上限(双模式一致)", () => {
+  it("桌面分支把超大的 limit 收敛到 1000", async () => {
+    callByID.mockResolvedValue([]);
+    exAllEvents.mockResolvedValue([]);
+    const { api } = await freshApi();
+    await api.allEvents("?type=node.started&limit=999999");
+    expect(exAllEvents).toHaveBeenCalledWith("node.started", 1000);
+  });
+
+  it("limit 缺省与非正数沿用服务端口径(0 = 不限制)", async () => {
+    callByID.mockResolvedValue([]);
+    exAllEvents.mockResolvedValue([]);
+    const { api } = await freshApi();
+    await api.allEvents("?type=node.started");
+    expect(exAllEvents).toHaveBeenCalledWith("node.started", 200);
   });
 });

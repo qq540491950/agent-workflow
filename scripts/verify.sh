@@ -1,7 +1,8 @@
 #!/bin/bash
 # 一键完整验证门禁:
-#   gofmt → go vet → go build → 全量 race 测试 → 每个包都必须有真实用例
-#   → 前端 lint/构建/vitest → 冒烟(REST+SSE+HITL)→ 冒烟(SSE 实时流)
+#   gofmt → go vet → go build → Windows 交叉编译 → 全量 race 测试
+#   → 每个包都必须有真实用例 → 前端 lint/构建/vitest(各自独立)
+#   → 冒烟(REST+SSE+HITL)→ 冒烟(SSE 实时流)
 #
 # 用法: ./scripts/verify.sh   (任一步失败即非零退出)
 #
@@ -57,13 +58,48 @@ fail() {
 BUILD_LOG=""
 TEST_LOG=""
 BUILD_OUT=""
+WIN_OUT=""
+WIN_LOG=""
+GOFMT_OUT=""
+GOFMT_ERR=""
+EMBED_PLACEHOLDER=""
 cleanup() {
 	if [ -n "$BUILD_LOG" ]; then rm -f "$BUILD_LOG"; fi
 	if [ -n "$TEST_LOG" ]; then rm -f "$TEST_LOG"; fi
 	if [ -n "$BUILD_OUT" ]; then rm -rf "$BUILD_OUT"; fi
+	if [ -n "$WIN_LOG" ]; then rm -f "$WIN_LOG"; fi
+	if [ -n "$WIN_OUT" ]; then rm -rf "$WIN_OUT"; fi
+	if [ -n "$GOFMT_OUT" ]; then rm -f "$GOFMT_OUT"; fi
+	if [ -n "$GOFMT_ERR" ]; then rm -f "$GOFMT_ERR"; fi
+	# 占位文件:只在它**仍是**我们放的那一个时才清掉(按内容比对)。
+	# 前端真实构建已经把它换成真产物的话,一个字都不动。
+	if [ -n "$EMBED_PLACEHOLDER" ] && [ -f "$EMBED_PLACEHOLDER" ]; then
+		if grep -q 'build placeholder' "$EMBED_PLACEHOLDER" 2>/dev/null; then
+			rm -f "$EMBED_PLACEHOLDER"
+			rmdir frontend/dist 2>/dev/null || true
+		fi
+	fi
 	return 0
 }
 trap cleanup EXIT
+
+# ---- embed 目标目录兜底(必须在 go list 之前)--------------------------
+# main.go 有 `//go:embed all:frontend/dist`,而 frontend/dist 被
+# .gitignore 忽略、从未入库 —— 干净 clone 里 `go list ./...` 直接失败:
+#   "pattern all:frontend/dist: no matching files found"
+# 门禁在**第 0 步**就退出,后面 9 步一步都跑不到:前端构建与全部前端
+# 用例在干净环境里仍然是死代码(只是死在了更前面)。
+#
+# 兜底方式:目录已存在且**非空** → 一个字节都不动(不碰真实构建产物);
+# 缺失或为空 → 放一个占位文件(embed 不接受空目录:"contains no
+# embeddable files")。前端真实构建(vite build,emptyOutDir 默认 true)
+# 会清掉占位文件换成真产物。
+if [ ! -d frontend/dist ] || [ -z "$(ls -A frontend/dist 2>/dev/null)" ]; then
+	mkdir -p frontend/dist
+	EMBED_PLACEHOLDER="frontend/dist/index.html"
+	printf '<!doctype html><title>build placeholder</title>\n' >"$EMBED_PLACEHOLDER"
+	echo "提示: frontend/dist 缺失或为空,已放占位文件让 //go:embed 能解析(前端构建后会被真实产物替换)"
+fi
 
 # ---- 本项目的包列表(排除 build/ 与 node_modules/)-----------------------
 if ! PKGS=$(go list ./... | grep -vE '(^|/)(build|node_modules)/'); then
@@ -101,7 +137,7 @@ if [ -n "$EXEMPT_PKGS" ]; then
 	echo "豁免(确实不该有测试的包): $EXEMPT_PKGS"
 fi
 
-step "1/8" "gofmt"
+step "1/9" "gofmt"
 # 文件清单来自 git,**不再**从 `go list` 推导 —— 后者只给出**当前平台**
 # 参与编译的文件(GoFiles/TestGoFiles/XTestGoFiles),被 build constraint
 # 排除的文件(如 agent/process_windows.go)根本不在清单里:在 macOS 上跑
@@ -134,17 +170,35 @@ GOFMT_FILES=$(
 )
 GOFMT_COUNT=$(printf '%s\n' "$GOFMT_FILES" | grep -c . || true)
 [ "$GOFMT_COUNT" -gt 0 ] || fail "Go 文件清单为空(git ls-files 没给出任何文件?)"
-UNFORMATTED=$(gofmt -l $GOFMT_FILES 2>/dev/null || true)
+# gofmt 对**语法错误**文件的输出是:stdout 空、stderr 报解析错、退出码 2。
+# 此前这里是 `gofmt -l $GOFMT_FILES 2>/dev/null || true` —— stderr 与
+# 退出码一起被吞掉,于是"gofmt 解析不了"被当成"已格式化",门禁放行。
+# (实测:一个含语法错误的 `//go:build windows` 文件能让整条门禁全绿。)
+# 现在 stderr 与退出码都必须被检查:非 0 → 门禁失败并回显解析错误。
+GOFMT_OUT=$(mktemp /tmp/awo-verify-gofmt-out.XXXXXX)
+GOFMT_ERR=$(mktemp /tmp/awo-verify-gofmt-err.XXXXXX)
+GOFMT_RC=0
+gofmt -l $GOFMT_FILES >"$GOFMT_OUT" 2>"$GOFMT_ERR" || GOFMT_RC=$?
+if [ "$GOFMT_RC" -ne 0 ]; then
+	echo "---- gofmt 解析错误(stderr)----" >&2
+	cat "$GOFMT_ERR" >&2
+	fail "gofmt 解析失败(exit $GOFMT_RC):上述 .go 文件有语法错误 —— gofmt 解析不了时 stdout 为空,不能当成'已格式化'"
+fi
+if [ -s "$GOFMT_ERR" ]; then
+	echo "---- gofmt 警告(stderr,退出码 0)----"
+	cat "$GOFMT_ERR"
+fi
+UNFORMATTED=$(cat "$GOFMT_OUT")
 [ -z "$UNFORMATTED" ] || fail "未格式化: $UNFORMATTED"
 echo "OK($GOFMT_COUNT 个文件)"
 end_step
 
-step "2/8" "go vet"
+step "2/9" "go vet"
 go vet $PKGS
 echo "OK"
 end_step
 
-step "3/8" "go build"
+step "3/9" "go build"
 # 此前门禁只有 vet 没有 build:vet 能发现类型/语法错,但链接期错误
 # (缺 main、符号冲突、平台专属代码)只有 build 才暴露。
 #
@@ -166,10 +220,36 @@ grep -v "was built for newer 'macOS' version" "$BUILD_LOG" || true
 echo "OK"
 end_step
 
-step "4/8" "go test -count=1 -race"
+step "4/9" "Windows 交叉编译(GOOS=windows go build)"
+# 此前 Windows 专属文件(`//go:build windows`)在 macOS/Linux 上**从不
+# 参与**任何编译:go list / vet / build / test 都只看当前平台的文件。
+# 结果:一个含语法错误或类型错误的 Windows 文件可以让整条门禁全绿 ——
+# AGENTS.md 里的 `GOOS=windows go build` 只是**手工**命令,不在门禁里。
+# 现在把交叉编译纳入门禁。
+#
+# 包集合 = $PKGS(与第 3 步同范围,排除 build/ 与 node_modules/):
+# 用全量而不是 AGENTS.md 里的 ./agent/... ./workflow/... 子集,是为了
+# 任何**新增**的 //go:build windows 文件(不论在哪个包)都被覆盖 ——
+# 今天的 Windows 文件只有 agent/process_windows.go,手写子集就会有
+# 下一次同样的漏检。
+#
+# 不污染工作区:-o 指向临时目录,退出时删掉(多包调用时 go build 本来
+# 就不落产物,但根 main 包会落一个 .exe —— 用 -o 目录钉死)。
+# GOOS=windows 会自动把 CGO_ENABLED 置 0;本项目无 cgo 文件
+# (grep 'import "C"' 无命中),交叉编译不需要 C 工具链。
+WIN_OUT=$(mktemp -d /tmp/awo-verify-winbuild.XXXXXX)
+WIN_LOG=$(mktemp /tmp/awo-verify-winbuild-log.XXXXXX)
+if ! GOOS=windows go build -o "$WIN_OUT/" $PKGS >"$WIN_LOG" 2>&1; then
+	cat "$WIN_LOG" >&2
+	fail "GOOS=windows go build 失败:Windows 专属文件在当前平台不会被其它任何步骤编译到"
+fi
+echo "OK"
+end_step
+
+step "5/9" "go test -count=1 -race"
 TEST_LOG=$(mktemp /tmp/awo-verify-test.XXXXXX)
 # 退出码直接取自 go test(不经管道):管道会把"grep 没匹配到行"的退出码
-# 混进来,让一次成功的测试被误判为失败。完整日志落盘(第 5 步要用),
+# 混进来,让一次成功的测试被误判为失败。完整日志落盘(第 6 步要用),
 # 控制台只滤掉 macOS SDK 版本告警 —— Wails/objc 的链接产物每次刷十几行,
 # 与被测代码无关。
 if ! go test -count=1 -race $PKGS >"$TEST_LOG" 2>&1; then
@@ -180,12 +260,12 @@ grep -v "was built for newer 'macOS' version" "$TEST_LOG" || true
 echo "OK"
 end_step
 
-step "5/8" "每个包都必须有真实用例"
+step "6/9" "每个包都必须有真实用例"
 # 逐包核对第 4 步的测试结果行。go test 的输出变体:
 #   ok   <pkg> 0.12s                    → 有用例
 #   ok   <pkg> 0.00s [no tests to run]  → 包在,但一条用例都没跑(静默 0 用例)
 #   ?    <pkg> [no test files]           → 包里根本没有测试文件
-#   FAIL <pkg> 0.12s                    → 测试失败(第 4 步已拦,这里是兜底)
+#   FAIL <pkg> 0.12s                    → 测试失败(第 5 步已拦,这里是兜底)
 #   ok   <pkg> (cached)                 → 有用例(只是命中缓存)
 #
 # 匹配用 awk 的"第二列精确等于包路径",不用正则/前缀匹配:
@@ -213,22 +293,65 @@ END {
 echo "OK($CHECK_COUNT 个包均有真实用例)"
 end_step
 
-step "6/8" "前端 lint + 构建 + vitest"
-# 不再把构建输出丢进 /dev/null:tsc 的报错走 stdout,丢掉之后
-# 构建失败会只留一行 "npm error",排障时看不到真正的类型错误。
-# 用 if 包裹而不是裸子 shell:`set -e` 在 if 条件里对被测命令不生效,
-# 靠 && 链把三步的失败码传出来,再由这里显式退出。
-if ! ( cd frontend && npm run lint && npm run build && npx vitest run ); then
-	fail "前端门禁失败(lint / build / vitest)"
+step "7/9" "前端 lint / 构建 / vitest"
+# 三个子检查**各自独立**,不再是一条 `&&` 链。
+#
+# 此前:`npm run lint && npm run build && npx vitest run` —— 最前面的
+# lint 一失败(干净环境里 eslint 根本没装 → exit 127),后面的 tsc 与
+# vitest **全被短路跳过**。失败快速用错了地方:lint 的问题不该让你
+# 看不见 tsc 和 vitest 的问题,更不该让"前端构建 + 全部前端用例"在
+# 任何干净环境里变成死代码。
+#
+# 现在:三个子检查**全部跑完**,各自记录退出码,失败项一次性全部打印,
+# 最后统一判定(任一失败 → 整体失败)。lint 失败时 tsc/vitest 仍会执行。
+#
+# 不再把构建输出丢进 /dev/null:tsc 的报错走 stdout,丢掉之后构建失败
+# 会只留一行 "npm error",排障时看不到真正的类型错误。
+#
+# 用 `npm run <script>` 而不是 `npx vitest`:npx 在本地找不到包时会
+# **联网自动安装** —— 门禁不能有联网副作用,也不能在依赖缺失时
+# 变成"临时下载一个 vitest 跑起来再报绿"。npm run 会从
+# frontend/node_modules/.bin 解析,缺依赖就明确报 127。
+FE_FAILED=()
+
+fe_run() { # fe_run <标签> <命令...>
+	fe_label="$1"
+	shift
+	echo "---- 前端 $fe_label ----"
+	# 注意:退出码必须在 `||` 的右侧取 —— `if ( ... ); then ... fi` 这种
+	# 写法里,条件为假时 $? 会被 `fi` 之后的 0 覆盖(没有 else 分支时
+	# if 语句本身返回 0),会把"失败"报成 "exit 0"。
+	fe_rc=0
+	( cd frontend && "$@" ) || fe_rc=$?
+	if [ "$fe_rc" -eq 0 ]; then
+		echo "   ✅ 前端 $fe_label 通过"
+	else
+		echo "   ❌ 前端 $fe_label 失败(exit $fe_rc)"
+		FE_FAILED+=("$fe_label(exit $fe_rc)")
+	fi
+	return 0
+}
+
+fe_run "lint" npm run lint
+fe_run "build(tsc+vite)" npm run build
+fe_run "vitest" npm run test
+
+if [ "${#FE_FAILED[@]}" -gt 0 ]; then
+	echo ""
+	echo "---- 前端门禁失败项汇总(${#FE_FAILED[@]} 项)----"
+	for f in "${FE_FAILED[@]}"; do
+		echo "  ❌ 前端 $f"
+	done
+	fail "前端门禁失败(${#FE_FAILED[@]} 项失败:${FE_FAILED[*]})"
 fi
 echo "OK"
 end_step
 
-step "7/8" "冒烟:服务器模式 REST+SSE+HITL"
+step "8/9" "冒烟:服务器模式 REST+SSE+HITL"
 ./scripts/smoke.sh
 end_step
 
-step "8/8" "冒烟:SSE 实时流"
+step "9/9" "冒烟:SSE 实时流"
 ./scripts/smoke_sse.sh
 end_step
 

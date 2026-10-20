@@ -61,6 +61,14 @@ export interface Workflow {
    * 空数组 = 没有键被忽略。
    */
   ignored_keys?: string[];
+  /**
+   * 保存/导入时的校验警告(响应带这个字段)。
+   *
+   * 不阻断保存,但必须让用户看到:此前警告只进后端日志,直连 API 的调用方
+   * 永远看不到 —— 用户以为"DEPRECATED_NODE_CONFIG 的设置生效了"。
+   * 两种模式形状一致(服务器模式平铺在响应体顶层,桌面模式由绑定返回)。
+   */
+  warnings?: ValidationError[];
 }
 
 export type ExecutionState =
@@ -87,6 +95,12 @@ export interface Execution {
   error?: string;
   node_states?: Record<string, string>;
   state_data?: Record<string, unknown>;
+  /**
+   * 启动前的校验警告(响应带这个字段)。
+   *
+   * 不阻断运行,但必须让用户看到:此前只进后端日志,用户以为设置生效了。
+   */
+  warnings?: ValidationError[];
 }
 
 export interface ExecutionNode {
