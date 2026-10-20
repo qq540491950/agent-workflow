@@ -21,6 +21,8 @@ const exAllEvents = vi.fn();
 const exRun = vi.fn();
 const stExportBackup = vi.fn();
 const stRestoreBackup = vi.fn();
+const stInfo = vi.fn();
+const stUpdate = vi.fn();
 // 桌面绑定用 bindingStub(见下):显式声明导出清单,访问后端并不存在的
 // 导出会在读取属性时立刻抛错 —— 绑定漂移测得出来。
 vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () =>
@@ -146,6 +148,8 @@ vi.mock("@bindings/agentworkflow/app/application/settingsservice.js", () =>
     {
       ExportBackup: (...a: unknown[]) => stExportBackup(...a),
       RestoreBackup: (...a: unknown[]) => stRestoreBackup(...a),
+      Info: (...a: unknown[]) => stInfo(...a),
+      Update: (...a: unknown[]) => stUpdate(...a),
     },
   ),
 );
@@ -165,6 +169,8 @@ beforeEach(() => {
   exRun.mockReset();
   stExportBackup.mockReset();
   stRestoreBackup.mockReset();
+  stInfo.mockReset();
+  stUpdate.mockReset();
   vi.unstubAllGlobals();
 });
 
@@ -1212,5 +1218,65 @@ describe("limit 上限(双模式一致)", () => {
     const { api } = await freshApi();
     await api.allEvents("?type=node.started");
     expect(exAllEvents).toHaveBeenCalledWith("node.started", 200);
+  });
+});
+
+// ---- 迭代 13:E —— 设置接口"省略 = 不修改"的契约(双模式) ----
+//
+// 后端 POST /api/settings 的 git_working_dir 改成 *string:省略(nil)=
+// 不修改,显式 ""= 清除。此前 body 是普通 string,省略的字段被解成零值
+// "",而应用层把 "" 当作"清除" —— 一个只想改日志级别的请求会顺手把用户
+// 的 git 工作目录清空。
+//
+// 桌面分支同理:绑定签名是 (gitWorkingDir: string, ...),没有 nil 的
+// 表达力 → 省略时必须回填当前值,不能下发 ""。
+describe("双分支契约:设置更新省略 git_working_dir", () => {
+  const info = {
+    data_dir: "/data",
+    git_working_dir: "/repo",
+    log_level: "info",
+    allow_script_nodes: false,
+  };
+
+  it("桌面分支:省略 git_working_dir 时回填当前值(不得下发空串)", async () => {
+    callByID.mockResolvedValue([]); // desktop
+    stInfo.mockResolvedValue(info);
+    stUpdate.mockResolvedValue(info);
+    const { api } = await freshApi();
+    await api.updateSettings({ log_level: "debug" });
+    expect(stUpdate).toHaveBeenCalledWith("/repo", "debug", null);
+  });
+
+  it("桌面分支:显式给了 git_working_dir 就用它", async () => {
+    callByID.mockResolvedValue([]); // desktop
+    stInfo.mockResolvedValue(info);
+    stUpdate.mockResolvedValue(info);
+    const { api } = await freshApi();
+    await api.updateSettings({ git_working_dir: "/other" });
+    expect(stUpdate).toHaveBeenCalledWith("/other", "", null);
+  });
+
+  it("桌面分支:显式空串 = 清除(原样下发,不回填)", async () => {
+    callByID.mockResolvedValue([]); // desktop
+    stInfo.mockResolvedValue(info);
+    stUpdate.mockResolvedValue(info);
+    const { api } = await freshApi();
+    await api.updateSettings({ git_working_dir: "" });
+    expect(stUpdate).toHaveBeenCalledWith("", "", null);
+  });
+
+  it("web 分支:省略的字段不进入请求体(不得补成空串)", async () => {
+    callByID.mockRejectedValue(new Error("not in wails")); // web
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(info),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    await api.updateSettings({ log_level: "debug" });
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body).toEqual({ log_level: "debug" });
+    expect("git_working_dir" in body).toBe(false);
   });
 });

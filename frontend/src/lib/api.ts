@@ -673,9 +673,17 @@ export const api = {
     allow_script_nodes: boolean;
   }> {
     if ((await detectMode()) === "desktop") {
+      // 省略 git_working_dir = **不修改**(后端契约:body 里是 *string,
+      // nil 表示不改;显式 "" 才表示清除)。
+      //
+      // 桌面绑定的签名是 (gitWorkingDir: string, ...),没有 nil 的表达力
+      // → 省略时必须回填当前值。直接下发 "" 会被后端当成"清除",
+      // 把用户的 git 工作目录清空(迭代 13)。
+      const dir =
+        patch.git_working_dir ?? (await api.getSettings()).git_working_dir;
       return nn(
         await (await wailsBindings()).st.Update(
-          patch.git_working_dir ?? "",
+          dir,
           patch.log_level ?? "",
           patch.allow_script_nodes ?? null,
         ),

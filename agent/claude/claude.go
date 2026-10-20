@@ -5,6 +5,18 @@
 // 默认职责是 PLAN / REVIEW / DECISION;
 // 通过 --disallowedTools 强制禁止 Write/Edit/删除/Git 提交等写操作,
 // Claude Code 在本系统中默认禁止修改项目文件(权限策略 + CLI 参数双重控制)。
+//
+// 为什么本适配器**没有** Permission Manager 字段(迭代 13):
+//   - 写操作:CLI 层已用 --disallowedTools 硬禁 Write/Edit/MultiEdit/
+//     NotebookEdit/Bash(git commit:*)/Bash(git push:*) —— 适配器物理上
+//     不可能写文件,"查写权限"在这里没有可观测的语义;
+//   - 读操作:运行期的节点检查(workflow/runtime/executor.go)对**所有**
+//     agent 节点都查 fs:read,查的是**有效策略**(全局 ∧ 工作流 permissions 段)
+//     —— 比适配器能查到的全局策略更严,不会与适配器结论相反。
+//
+// 此前 Config 上挂着 Perms 字段但**从不读它**:调用方以为"权限已交给适配器
+// 兜底",实际兜底根本不存在(与 default_working_dir 同族的死设置)。
+// 留着它只会误导人 —— 删掉,让权限判定留在唯一的权威位置。
 package claude
 
 import (
@@ -18,7 +30,6 @@ import (
 
 	coreagent "agentworkflow/agent"
 	"agentworkflow/logx"
-	"agentworkflow/permission"
 	"agentworkflow/workflow/model"
 )
 
@@ -36,8 +47,6 @@ type Config struct {
 	BaseURL string
 	// AgentEnv 调用级环境变量(仅子进程,不改本地配置)。
 	AgentEnv map[string]string
-	// Permissions 由 Permission Manager 提供(可选,用于校验)。
-	Perms *permission.Manager
 	// WaitDelaySeconds 是子进程退出后等待 stdout/stderr 管道关闭的上限
 	// (秒)。管道被孤儿子进程持有时,Wait 在这个上限后返回
 	// exec.ErrWaitDelay —— 此时进程已成功退出、输出完整,必须判成功。

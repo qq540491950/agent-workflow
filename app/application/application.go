@@ -209,7 +209,6 @@ func (a *App) applyAgentConfig(id string, cfg agent.AgentConfig) error {
 	switch id {
 	case "claude-code":
 		return a.Agents.Replace(claude.New(claude.Config{
-			Perms:                 a.Perms,
 			Model:                 cfg.Model,
 			BaseURL:               cfg.BaseURL,
 			AgentEnv:              cfg.Env,
@@ -295,7 +294,9 @@ func buildMock(id string, behavior map[string]any) agent.Agent {
 // 注意:必须复用传入 Engine 的同一个 permission.Manager 实例。
 func (a *App) reloadAgents() {
 	// Claude Code 适配器
-	claudeAgt := claude.New(claude.Config{Perms: a.Perms})
+	// 注意:不传 Permission Manager —— claude 适配器不读它(CLI 层已硬禁写工具),
+	// 权限判定在运行期节点检查处(查有效策略)。见 agent/claude 的包说明。
+	claudeAgt := claude.New(claude.Config{})
 	_ = a.Agents.Register(claudeAgt)
 
 	// Pi Agent 适配器

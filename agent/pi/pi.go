@@ -76,9 +76,14 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	// 有效策略恒为全局的子集,两处结论不会相反(单一来源,见
 	// permission 包的说明)。
 	//
-	// 本检查不是冗余:运行期节点检查目前只对 execute/fix 模式查写权限,
-	// submit 模式由这里兜住。
-	if req.Mode == "execute" || req.Mode == "fix" || req.Mode == "submit" {
+	// 本检查不是冗余:运行期节点检查覆盖的是**有效策略**(全局 ∧ 工作流
+	// permissions 段),这里查的是全局策略 —— 有效策略恒为全局的子集,
+	// 两处结论不会相反(单一来源,见 permission 包的说明)。
+	//
+	// mode 集合与运行期节点检查共用 agent.ModeRequiresWrite(唯一来源):
+	// 两边各写一份必然漂移 —— 漂移方向是"某模式在一边要写权限、
+	// 另一边不要",于是工作流级 permissions 段对那个模式失效。
+	if coreagent.ModeRequiresWrite(req.Mode) {
 		if a.cfg.Perms != nil {
 			if err := a.cfg.Perms.Check(a.ID(), permission.FSWrite); err != nil {
 				return nil, err

@@ -292,6 +292,102 @@ if ! win_check "$ROOT" $PKGS; then
 fi
 echo "OK(build + vet 均通过)"
 
+# ---- 孤儿包检查(迭代 13)-------------------------------------------------
+# 上面那道防线只覆盖"**当前平台存在的包**里的平台专属文件"。
+#
+# 还有一个整类盲区(迭代 11 发现、迭代 13 修):
+#   - `go list ./...` 只列出**当前平台**有可编译文件的包 —— 一个只含
+#     `//go:build windows` 文件的**全新包**根本不在列表里(实测:0 命中);
+#   - `go build -o <dir>/` 只编译**从 main 可达**的包。
+# 于是一个全新 windows-only 包对整条 9 步门禁**完全隐形** ——
+# 连类型错误都不报(实测:造一个这样的包,9 步门禁全绿)。
+#
+# 修法:包集合不再只由 `go list` 决定,而是按 **git 跟踪的 .go 文件**推导
+# (与第 1 步的 gofmt 清单同源:已跟踪 + 新增未忽略)。对其中**当前平台
+# 看不见**的目录(孤儿包)逐个跑交叉 vet:
+#
+#   - 通过 → 该平台能编译这个包(盲区被覆盖);
+#   - "build constraints exclude all Go files" → 该平台**没有**这个包的
+#     文件(正常,不是错误),换下一个平台;
+#   - 其它任何错误 → 类型/语法错误 → 门禁失败。
+#
+# 三个目标平台都排除 → 这个包只存在于别的平台(罕见),跳过并说明
+# (残余盲区,记在下面)。
+#
+# 为什么是"逐包"而不是"整包集合一次 vet":`GOOS=windows go vet ./...`
+# 遇到"该平台没有文件的包"会直接报错退出,没法区分"这个包在 Windows 下
+# 不存在"(正常)与"这个包有类型错误"(要报)。逐包跑才能把两者分开。
+ORPHAN_GOOS="windows linux darwin"
+
+# orphan_check <模块目录> <go list 参数> <候选包目录...>
+#
+# 对每个候选包目录判断:它是不是被某个平台编译到了。
+# 返回 0 = 全部候选包都被覆盖(或该平台不存在此包,正常跳过);
+# 返回 1 = 有候选包在它**声称支持**的平台上编译不过(真实错误)。
+orphan_check() {
+	oc_mod="$1"
+	shift
+	oc_listargs="$1"
+	shift
+	oc_rc=0
+	oc_covered=$(cd "$oc_mod" && go list -f '{{.Dir}}' $oc_listargs 2>/dev/null | sort -u)
+	for oc_rel in "$@"; do
+		oc_abs=$(cd "$oc_mod/$oc_rel" 2>/dev/null && pwd) || continue
+		# 当前平台已经看得见的包 → 前面的步骤已经编译过它,跳过。
+		if printf '%s\n' "$oc_covered" | grep -qxF "$oc_abs"; then
+			continue
+		fi
+		oc_status="skip"
+		for oc_goos in $ORPHAN_GOOS; do
+			oc_vet_rc=0
+			oc_out=$(cd "$oc_mod" && GOOS="$oc_goos" CGO_ENABLED=0 go vet "./$oc_rel" 2>&1) || oc_vet_rc=$?
+			if [ "$oc_vet_rc" -eq 0 ]; then
+				oc_status="ok"
+				break
+			fi
+			# "该平台没有这个包的文件"= 正常,换下一个平台。
+			if printf '%s' "$oc_out" | grep -q "build constraints exclude all Go files"; then
+				continue
+			fi
+			oc_status="err"
+			echo "---- GOOS=$oc_goos go vet ./$oc_rel 输出(孤儿包检查)----" >&2
+			printf '%s\n' "$oc_out" >&2
+			break
+		done
+		case "$oc_status" in
+		err)
+			oc_rc=1
+			;;
+		ok)
+			echo "   覆盖: ./$oc_rel"
+			;;
+		skip)
+			echo "   跳过: ./$oc_rel(在 $ORPHAN_GOOS 下都不存在 —— 只属于其它平台的包)"
+			;;
+		esac
+	done
+	return "$oc_rc"
+}
+
+# 候选包目录 = git 推导出的、含 .go 文件的目录(相对模块根,不带 "./" 前缀)。
+#
+# 排除 go 工具本身就忽略的目录(与 `go list ./...` 的口径一致):
+#   - 任意一级以 "_" 或 "." 开头的目录(go 工具整体忽略);
+#   - 任意一级叫 "testdata" 的目录(go 工具约定:测试夹具,允许故意写坏)。
+# 否则这些目录会被当成"孤儿包"而误报。
+#
+# 注意:这里**不能**在 $( ) 里写 case —— macOS 自带的 bash 3.2 解析不了
+# (实测:bash: syntax error near unexpected token `;;')。用 awk + grep 代替。
+ORPHAN_CANDIDATES=$(
+	printf '%s\n' "$GOFMT_FILES" |
+		awk -F/ 'NF==1 {print "."; next} {d=$1; for (i=2;i<NF;i++) d=d"/"$i; print d}' |
+		sort -u |
+		grep -vE '(^|/)[_.]' |
+		grep -vE '(^|/)testdata(/|$)' || true
+)
+ORPHAN_COUNT=$(printf '%s\n' "$ORPHAN_CANDIDATES" | grep -c . || true)
+echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推导)"
+
 # ---- 门禁自检:本步骤的防线必须真的能抓到平台专属文件的类型错误 ------
 # 目的:证明上面那道防线**有效**,而不是"看上去在跑"。
 # 做法:在 /tmp 里造一个**隔离的最小模块**(不碰工作区),用**同一个**
@@ -332,6 +428,33 @@ rm -f "$WIN_CHECK_DIR/pkg/zz_windows_test.go"
 printf '//go:build windows\n\npackage pkg\n\nvar Bad string = 42\n' >"$WIN_CHECK_DIR/pkg/zz_windows.go"
 if win_check "$WIN_CHECK_DIR" ./...; then
 	fail "门禁自检失败://go:build windows 的**源**文件里的类型错误没有被交叉检查发现"
+fi
+rm -f "$WIN_CHECK_DIR/pkg/zz_windows.go"
+
+# ---- 门禁自检:孤儿包检查本身必须真的能抓到类型错误 ----------------------
+# 目的:证明 orphan_check **有效**,而不是"看上去在跑"。
+# 做法:在同一个隔离模块里造一个只含 //go:build windows 文件的包 ——
+# 它对 `go list ./...` **完全隐形**(这正是要修的盲区:上面三条自检用的
+# win_check 走 ./...,看不见它),只有 orphan_check 能看见它。
+# 依次验证两件事:
+#   1. 对照组 —— 类型**正确**的 windows-only 包必须**通过**。
+#      没有这一条,下面那条就是恒真断言(vet 无论对错都失败也算"成功")。
+#   2. 含类型错误的 windows-only 包必须**失败**。
+mkdir -p "$WIN_CHECK_DIR/winonly"
+printf '//go:build windows\n\npackage winonly\n\nvar Good string = "ok"\n' >"$WIN_CHECK_DIR/winonly/only_windows.go"
+if ! orphan_check "$WIN_CHECK_DIR" "./..." "winonly"; then
+	fail "门禁自检失败:孤儿包检查把一个**类型正确**的 //go:build windows 包判成失败 —— 检查本身不可信"
+fi
+printf '//go:build windows\n\npackage winonly\n\nvar Bad string = 42\n' >"$WIN_CHECK_DIR/winonly/only_windows.go"
+if orphan_check "$WIN_CHECK_DIR" "./..." "winonly"; then
+	fail "门禁自检失败:孤儿包(只含 //go:build windows 文件的包)里的类型错误没有被孤儿包检查发现"
+fi
+rm -rf "$WIN_CHECK_DIR/winonly"
+echo "OK(自检:类型正确的孤儿包通过 / 含类型错误的孤儿包被抓)"
+
+# ---- 真正的孤儿包检查(工作区) -------------------------------------------
+if ! orphan_check "$ROOT" "$PKGS" $ORPHAN_CANDIDATES; then
+	fail "孤儿包检查失败:当前平台看不见的包里有编译不过的(类型/语法错误)—— 这类包对门禁的其它所有步骤都是隐形的"
 fi
 
 rm -rf "$WIN_CHECK_DIR"

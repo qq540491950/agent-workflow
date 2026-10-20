@@ -202,12 +202,35 @@ func newID(prefix string) string {
 }
 
 // Validate 在运行前再次校验(注册表信息已完备)。
+//
+// 除静态规则外,还检查 permissions 段是否试图**放宽**全局已禁用的能力。
+//
+// 为什么引擎层也要这道检查(应用层保存时已经查过):
+//   - 历史工作流(规则之前保存的)、备份恢复出来的工作流,未必经过当次保存校验;
+//   - permissions 段"想放宽"在运行期会被**静默忽略**(有效权限 = 全局 ∧ 覆盖段,
+//     只能收紧),而用户以为它生效了。若该节点恰好不需要那个能力
+//     (如 mode: plan),全程**没有任何**报错 —— 用户永远不知道自己写的规则没起作用
+//     (约定 14:以为生效了实际没有)。
+//
+// 判据与保存期用**同一份实现**(permission.Manager.ValidateTightenOnly),
+// 基线是同一个全局管理器 e.Perms → 两边结论必然一致(约定 13)。
 func (e *Engine) Validate(wf *model.Workflow) *validator.Result {
-	return validator.Validate(wf,
+	res := validator.Validate(wf,
 		func(id string) bool { _, err := e.Agents.Get(id); return err == nil },
 		func(id string) bool { _, err := e.Skills.Get(id); return err == nil },
 		func(id string) bool { _, err := e.Repo.GetWorkflow(id); return err == nil },
 	)
+	if e.Perms == nil {
+		return res
+	}
+	if err := e.Perms.ValidateTightenOnly(wf.Permission); err != nil {
+		res.Valid = false
+		res.Errors = append(res.Errors, validator.ValidationError{
+			Code:    "PERMISSION_OVERRIDE_LOOSENS",
+			Message: err.Error(),
+		})
+	}
+	return res
 }
 
 // Start 创建并异步执行一个 Execution。

@@ -178,7 +178,11 @@ export interface AgentConfig {
   timeout_seconds: number;
   extra_args: string[];
   env: Record<string, string> | null;
-  default_working_dir: string;
+  /**
+   * 注意:后端结构体仍保留 `default_working_dir` 字段(存量配置要能解析),
+   * 但它是**死设置** —— 运行期从不读取,后端会拒绝任何新值。
+   * 前端不再声明、不再下发它(见 Agents.tsx 的说明文案)。
+   */
   /** 仅 Mock Agent:演示用决策序列脚本 */
   behavior?: Record<string, { decisions?: string[]; summary_template?: string; fail_with?: string }> | null;
 }

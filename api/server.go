@@ -374,15 +374,29 @@ func (s *Server) routes() {
 	}))
 	s.mux.HandleFunc("POST /api/settings", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var body struct {
-			GitWorkingDir string `json:"git_working_dir"`
-			LogLevel      string `json:"log_level"`
+			// 缺省(nil / 显式 null)= **不修改**,保持既有值;
+			// 显式 ""= 清除(用户在设置页清空输入框的语义)。
+			//
+			// 此前是普通 string:客户端**省略**该字段时会被解成零值 "",
+			// 而应用层把 "" 当作"清除" —— 一个只想改日志级别的请求
+			// ({"log_level":"debug"})会顺手把用户的 git 工作目录清空,
+			// 用户没要求改它(约定 14 的同类:不该动的却动了)。
+			GitWorkingDir *string `json:"git_working_dir"`
+			LogLevel      string  `json:"log_level"`
 			// 缺省(nil)表示不修改,保持既有值
 			AllowScriptNodes *bool `json:"allow_script_nodes"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
-		info, err := s.app.Settings.Update(body.GitWorkingDir, body.LogLevel, body.AllowScriptNodes)
+		// 省略 = 不修改:回填当前**生效值**(与设置页显示的一致)。
+		// 应用层的 Update 语义是"空串 = 清除",所以这里必须显式回填,
+		// 不能直接把零值传下去。
+		dir := s.app.Settings.Info().GitWorkingDir
+		if body.GitWorkingDir != nil {
+			dir = *body.GitWorkingDir
+		}
+		info, err := s.app.Settings.Update(dir, body.LogLevel, body.AllowScriptNodes)
 		return writeJSON(w, info, err)
 	}))
 

@@ -3,11 +3,13 @@
 > 共 8 轮测试验证(超过最低 5 轮要求),其中轮次 2-8 为浏览器视觉测试(GUI 黑盒)。
 > 每次功能完成与 Bug 修复均有独立 git 提交(见提交号)。
 >
-> **当前状态(轮次 57-60 之后)**:Go 测试文件 **94** 个 / 有测试的包 **21** 个;
-> 前端测试文件 **16** 个 / 用例 **153** 条。完整清单与逐文件说明见
-> "轮次 41-44 / 45-48 / 49-52 / 53-56 / 57-60"五节;"某条测试在什么改动下
-> 会变红"的实测记录见"改坏实现 → 测试变红"专节与"终审实测记录"专节;
-> 门禁自身的盲区见"门禁盲区"一节。
+> **当前状态(轮次 61-70 之后,对应 commit `795f26f`)**:Go 测试文件 **104** 个 /
+> 有测试的包 **21** 个;前端测试文件 **20** 个 / 用例 **190** 条。
+> (工作区另有第十一轮的**在途**改动尚未提交:Go 测试文件 +7 → 111、前端用例 +8 → 198。)完整清单与逐文件说明见
+> "轮次 41-44 / 45-48 / 49-52 / 53-56 / 57-60 / 61-70"六节;"某条测试在什么改动下
+> 会变红"的实测记录见"改坏实现 → 测试变红"专节、"终审实测记录"专节与
+> "第八~十轮实测记录"专节;门禁自身的盲区见"门禁盲区"一节,
+> 门禁的**自检**机制见"门禁自检"专节。
 
 ## 环境
 
@@ -1290,6 +1292,62 @@ stderr 线索。
 | `workflow/compiler/conditionenv_contract_test.go`(4 例,新增) | `TestConditionEnvContractMatchesRuntimeBackings`(**契约表声明的取值来源运行期必须提供**,反之亦然)、`TestConditionEnvRuntimeBackingsAreReal`(运行期事实表里的每一项必须在源码里**真的被写入** —— 防事实表自己腐烂成恒真假保护)、`TestConditionEnvNoUndeclaredRuntimeInjection`(**运行期不得注入契约未声明的变量**)、`TestConditionEnvProbeScansEnough`(**防空转**:探针扫到的内容太少即失败) |
 | `frontend/src/test/list-guard.test.ts`(本轮 +322 行,第 3 条用例) | "列表接口结果被赋值给变量后,使用前必须过 `asArray`" —— 补上"先赋值再 `.map`"的盲区;按**语义成员**(`map`/`forEach`/`filter`/`length`/…)判定"把值当列表用";含防空转断言(绑定数下限) |
 
+## 轮次 61-70:第六至十轮补登(门禁自检 / 凭据回写 / 制品脱敏 / 权限单一源)
+
+> 缺陷号 #212-#244,见 `docs/OPTIMIZATION.md` 第十一节。
+> 本轮的特点是**新增的测试大多在"改坏实现 → 变红"的方向上有实测记录**
+> (见后面的"第八~十轮实测记录"专节)—— 前几轮登记的缺陷多数是**看代码看出来的**,
+> 这一批大多带着**可复现的实验**。
+
+### 轮次 61-63:第六轮补登
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `persistence/exec_state_guard_test.go`(1 例,本轮新增) | `TestExecStateGuardAgreesWithStateMachine`:**持久层守卫与状态机的判定必须逐条一致** —— 两者各写一份时,规则漂移就会出现"持久层拦住了状态机认为合法的跳变"(执行莫名失败)或反之。**实测**:改动其中任一侧的规则,交叉测试变红 |
+| `workflow/runtime/state_mask_test.go`(本轮 +819 行) | `TestStateWritesAreClassified`:**防空转**双下限(扫不到任何写入点即失败;扫到的**状态键形态数** < `minScannedStateKeys`(15)即失败)—— 扫描范围或识别逻辑退化后测试不再空转恒过;**登记不许陈旧**(源码里已找不到写入点的登记项即失败) |
+| `workflow/runtime/state_mask_test.go`(本轮改写的**行为**测试) | 结构化键的**脱敏行为**测试此前**近乎恒真**:用的值(`"APPROVED"` / `"success"`)不含敏感词 → `logx.Mask` 改不动 → 键在不在结构化集合里都 PASS。改用**会被 `logx.Mask` 改动**的凭据形态值(`key=value`),并加**前置自检**断言 `logx.Mask` 确实会改动它 —— 前提不成立就直接失败 |
+| `scripts/verify.sh` 第 6 步(本轮调整) | "每个包都必须有真实用例"的判据细化为三种输出变体分别归类(`zero` / `nofiles` / `missing`),每种给**不同的原因文案** —— 此前"0 个用例"与"没有测试文件"共用一句话,排障时要多读一遍才知道是哪种 |
+
+### 轮次 64-66:第七/八轮补登
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `frontend/src/lib/api.test.ts`(本轮 +475 行) | 三组**双分支契约**用例:"保存(顶层键严格化)"、"校验警告(warnings)"、"导入的 ignored_keys" —— 同一份断言在**浏览器分支与桌面分支各跑一遍**(约定 10) |
+| `frontend/src/lib/api.test.ts`(本轮新增的"错误码全集守卫") | 扫描后端 Go 源码的**全部** code 与前端 `CODE_HINTS` 求**双向**差集:后端有前端没有 → 红;前端有后端没有 → 红(该码从未生效)。**修前实测**:缺 50 个、多 1 个(多出来的 `DENIED` 从未生效过) |
+| `frontend/src/lib/api.test.ts`(本轮新增的桌面分支用例) | 桌面分支 IPC 错误必须转成 `ApiError`(剥 `Kind(CODE):` 前缀 + 解析 code/kind)—— 与服务器模式**同一形状**;`updateAgentConfig` 桌面分支更新后**回读**掩码后配置(此前返回 `null`,掩码展示失效) |
+| `frontend/package.json` + `frontend/eslint.config.mjs`(本轮新增) | eslint **必须被声明** —— 此前 eslint 来自被 gitignore 的仓库根 `node_modules` → 干净 clone 里 `npm run lint` 找不到它(exit 127)→ `&&` 链短路 → **前端构建与全部前端用例从未被执行**。这条由"门禁自检"式的**干净副本实跑**验证(见"门禁自检"专节) |
+
+### 轮次 67-68:第九轮
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/runtime/output_route_resume_test.go`(2 例,新增) | `TestResumeKeepsBranchChosenBeforePause`(**恢复时必须走暂停前已选定的分支** —— 人批准 A 分支、恢复后走 B 分支是可达的分支改变)、`TestRouteBranchDecisionIsStructuredState`(选定的分支记进**结构化**状态键 `route:<id>:branch`,值是分支下标 —— 枚举、不含自由文本、不落凭据) |
+| `workflow/compiler/lower.go` + `workflow/runtime/engine.go` + `workflow/runtime/state_mask.go`(本轮修改) | **路由依据与展示文本分离**:路由一旦选定出口分支就是本次执行的**既成事实**,记进结构化键,恢复时**回放**而非拿脱敏副本重算。`state_mask.go` 写明**残余边界**(循环上限的首次求值、`switchAgent` 每轮回边选择)与规避建议(用 `decision` / `status`,别用 `output` 里的自由文本) |
+| `workflow/runtime/state_mask_test.go`(本轮调整) | 脱敏副本仍要**保持结构化键原样** —— `route:<id>:branch` 被改写 = 恢复时选错分支 |
+| `frontend/src/test/list-guard.test.ts`(本轮 +85 行) | 守卫**自身的**盲区回归(合成源码):换行写法(`api` 换行 `.listAgents()`)的调用点必须被识别、去掉防御必须被判违规;回调形参带类型标注(`.then((execs: Execution[] \| null) => …)`)时该绑定必须可见 |
+
+### 轮次 69-70:第十轮
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `agent/config_mask_test.go`(11 例,新增) | `TestMaskedExtraArgs` / `TestMaskedExtraArgsDoesNotMutate`(掩码**不修改**入参)、`TestMergeExtraArgsKeepsStoredValueByName`(**按参数名**回写真值)、`TestMergeExtraArgsNeverCrossesOptionNames`(**A 的凭据绝不进 B 的参数位** —— 按下标对齐会写错参数名,导致凭据泄漏到第三方服务)、`TestMergeExtraArgsReorderKeepsCredential`(参数顺序变了,凭据仍跟着参数名走)、`TestMergeExtraArgsDropsMaskWithoutStoredValue`(无原值的 `***` 丢弃)、`TestMergeExtraArgsIgnoresStoredMask`(已存值本身是 `***` → 视为无真值)、`TestMergeExtraArgsKeepsUserSuppliedValue`(用户新填的值优先)、`TestSanitizeExtraArgsDropsLiteralMask`(下发 CLI 前剔除字面量 `***`)、`TestMaskExtraArgsRoundTrip` |
+| `agent/credential_mask_test.go`(6 例,新增) | `TestMaskCredentialValuesMasksCredentialShapes`(凭据**形态**必须被替换)、`TestMaskCredentialValuesKeepsCodeIdentifiers`(**代码标识符必须保留** —— `const token = getToken()` 不能整行变 `***`,否则 diff 的可读性被毁)、`TestMaskCredentialValuesKeepsKeyName` / `TestMaskCredentialValuesKeepsDiffStructure`(**diff 结构不被破坏**)、`TestMaskCredentialValuesIdempotent`(脱敏幂等)、`TestMaskCredentialValuesEmpty` |
+| `app/application/masking_test.go`(8 例,新增) | `TestArtifactsReadOutMasksCredentials`(**制品读出口必须脱敏** —— `git diff` 原文经 `/artifacts` 与 `/export` 返回)、`TestExecutionReadOutMasksSecrets` / `TestExecutionStateDataMaskedInDatabase`(**落库侧**也脱敏)、`TestExecutionReadOutDoesNotCorruptRuntimeState`(读出口脱敏**不得**改坏运行期状态)、`TestUpdateConfigExtraArgsMaskRoundTrip` / `...MaskWithoutStoredValue` / `...NoCrossSlotLeak` / `...DropsLegacyLiteralMask`(掩码往返不得毁掉真实凭据) |
+| `app/application/permission_tighten_test.go`(4 例,新增) | `TestSaveWorkflowRejectsPermissionLoosening`(**permissions 段试图放宽全局禁用 → 校验期报出** `PERMISSION_OVERRIDE_LOOSENS`)、`TestSaveWorkflowAcceptsPermissionTightening`(收紧合法)、`TestRunningExecutionSeesTightenedPermission`(**全局收紧立即对在跑的执行生效** —— 此前是启动时快照)、`TestRunningExecutionAllowsBeforeTightening`(收紧前正常放行) |
+| `permission/scoped_test.go`(8 例,新增) | 权限判定**单一来源**:`TestScopedViewFollowsParentLive`(全局策略一改,作用域视图立刻看到)、`TestScopedViewOverrideCannotLoosen`(覆盖段**永远无法放宽**全局禁用)、`TestScopedViewOverrideTightens`、`TestScopedViewDenyMessageExplainsLoosening`(拒绝原因要说明"试图放宽")、`TestValidateTightenOnlyDetectsLoosening` / `...AllowsTightening`、`TestGlobalApplyCheckedCannotLoosen`、`TestScopedViewSnapshotIsEffective` |
+| `app/application/agent_workingdir_test.go`(4 例,新增) | `TestUpdateConfigRejectsNewDefaultWorkingDir`(`default_working_dir` 是**死设置** → 后端**拒绝新值**)、`TestUpdateConfigAcceptsLegacyDefaultWorkingDirRoundTrip`(**已存老值仍可原样回存** —— 不阻断存量工作流)、`TestUpdateConfigAcceptsClearingDefaultWorkingDir`(清空合法)、`TestAdaptersHaveNoWorkingDirLandingPoint`(适配器**没有**工作目录落地点) |
+| `app/application/git_workingdir_clear_test.go`(2 例,新增) | `TestSettingsUpdateClearsGitWorkingDir`(**空串 = 清除**,不是"没传")、`TestSettingsUpdateKeepsGitWorkingDir` |
+| `app/application/settings_update_test.go`(3 例,新增) | `TestSettingsUpdateInvalidLogLevelLeavesWorkingDirUntouched`(**任一项非法则一项都不改** —— 此前先落库后校验,返回 400 但目录已改)、`TestSettingsUpdateInvalidLogLevelKeepsAllowScriptNodesUnchanged`、`TestSettingsUpdateValidValuesAllApplied` |
+| `workflow/validator/looplimit_test.go`(2 例,新增) | `TestInvalidOnLoopLimitRejected`(非法取值报 `INVALID_LOOP_LIMIT` —— 拼错的 `"fl"` 不再静默落回 `wait_user`)、`TestValidOnLoopLimitAccepted` |
+| `workflow/compiler/looplimit_test.go`(2 例,新增) | `TestLoopLimitIllegalValueFailsClosed`(运行期也 fail closed)、`TestLoopLimitLegalValuePreserved` |
+| `main_gitdir_test.go`(3 例,新增) | `TestApplyGitDirArgPersistsAndShowsInSettings`(`--git-dir` **持久化语义** + 设置页可见)、`TestApplyGitDirArgFallsBackWhenPersistFails`(**错误不再被丢弃**:持久化失败要明确回退并说明原因)、`TestApplyGitDirArgEmptyIsNoop`(空串是**无操作**,不是"清空") |
+| `workflow/runtime/masking_test.go`(本轮 +42 行) | `TestGitDiffArtifactMasksCredentialValues`(git diff 制品必须脱敏)、`TestNodeOutputMaskedBeforePersist` / `TestNodeErrorMaskedBeforePersist` / `TestExecutionStateJSONMaskedBeforePersist` / `TestStateSnapshotMaskedBeforePersist`(**落库前**就脱敏)、`TestStateSnapshotKeepsDecisionRouting`(结构化键原样)、`TestMaskedStateDataStillResumesAfterHITL` / `TestMaskedStateDataStillAllowsRetry`(脱敏副本仍能恢复/重试) |
+| `frontend/src/lib/errors.ts` + `frontend/src/lib/errors.test.ts`(13 例,新增) | 统一错误出口:`reportError` 把任意错误变成人话(普通 Error 取 message / 字符串原样 / 带码时补码 / 无文案时退回状态码 / 完全认不出来的也给提示 —— **提示路径本身不能崩**)、fetch 的英文网络错误翻成人话、**后端的具体错误不被泛化提示盖掉**、带 scope 时拼成「哪里出的错:什么错」、**同一个错误在去重窗口内只提示一次**(5 秒,防提示风暴)、超过去重窗口后可再次提示、不同错误各提示一次 |
+| `frontend/src/test/error-guard.test.ts`(4 例,新增) | 静态守卫:生产代码里**没有静默吞掉失败的空 catch**;白名单里的例外**确实存在**(防空转:扫描器失效时白名单也一起失效);**扫描器本身看得见这些模式**(防空转);此前静默吞错的文件都**接上了可见的错误提示** |
+| `frontend/src/lib/task-storage.ts` + `frontend/src/lib/task-storage.test.ts`(6 例,新增) | 任务文本**不往 localStorage 写**(明文任务不落在磁盘上)、**改用 sessionStorage**;超长文本被截断、条数超限淘汰最旧一条(**存储不会无限增长**)、没有记录时返回空串、**升级后清掉旧版本留在 localStorage 里的明文** |
+| `frontend/src/lib/api-desktop-stream.test.ts`(1 例,新增) | 桌面分支 SSE:`@wailsio/runtime` 导入失败时被**报出来**(不再只有 unhandled rejection) |
+| `frontend/src/pages/Dashboard.test.tsx` / `WorkflowHistory.test.tsx` / `Workflows.test.tsx` / `Settings.test.tsx` / `components/layout.test.tsx`(本轮新增用例) | 前端各页"接口失败必须提示"的正面断言(与静态守卫互补:守卫看**代码形态**,这些看**实际行为**) |
+
 ## "改坏实现 → 测试变红":实测记录
 
 > 回归史里最有价值的一类信息不是"测了什么",而是**"某条测试在什么改动下
@@ -1482,17 +1540,109 @@ stderr 线索。
 第 3 次: (与第 1 次逐字节相同)
 ```
 
+## 第八~十轮实测记录(轮次 61-70)
+
+> 这一节记的是**第八、九、十轮**真正做过的"改坏实现 → 跑门禁 → 记录红/绿"
+> 实验。与前面的"终审实测记录"同一套方法(隔离副本、逐条注入变异、还原后
+> 复跑确认变绿),但对象是后三轮新增的防线。
+
+### 门禁红/绿对照实验(第十轮)
+
+| 注入的变异 | 旧门禁(9 步,不含 `go vet`) | 新门禁(含 `GOOS=windows go vet`) |
+| --- | --- | --- |
+| 新增 `agent/zz_windows_test.go`(`//go:build windows`,内含 `var s string = 42`) | ❌ **exit 0 全绿(79s)** —— `go build` 手册明文 "build ignores files that end in `_test.go`" → 平台专属**测试文件**里的类型错误**永久不可见** | ❌→✅ **exit 1,第 4 步红** —— `go vet` 连同 `_test.go` 一起做类型检查 |
+
+**结论**:这不是"多跑了一条命令",而是补上了一整类**从未被任何步骤覆盖**的文件。
+
+### 门禁自检(迭代 11 加的机制,第十轮落地)
+
+> **问题**:门禁第 4 步写着 `GOOS=windows go vet`,但**没有任何机制证明它真的
+> 能抓到错误**。将来有人把 `vet` 从这一步删掉 —— 门禁照样绿,盲区静默回来,
+> 而且**没有任何用例会发现**。
+>
+> **做法**:在 `/tmp` 里造一个**隔离的最小模块**(不碰工作区),用**与真正的
+> 门禁步骤同一条代码路径**(`win_check` 函数)依次验证三件事:
+
+| # | 造什么坏文件 | 期望 | 为什么必须有这一条 |
+| --- | --- | --- | --- |
+| 1 | **对照组**:类型**正确**的 `//go:build windows` 测试文件 | **必须通过** | 没有这一条,下面两条就是恒真断言 —— "vet 无论对错都失败"也会被算成"成功" |
+| 2 | 含类型错误的 `//go:build windows` **测试**文件 | **必须失败** | 这正是 `go build` 看不见、只有 `vet` 看得见的那一类(第十轮修的盲区) |
+| 3 | 含类型错误的 `//go:build windows` **源**文件 | **必须失败** | 第八轮修好的源文件盲区,这里做**回归确认** |
+
+**关键设计**:自检**复用**门禁步骤 4 的 `win_check` 函数,而不是自己另写一套
+命令 —— 自检若自己另写一套,将来有人把 `vet` 从门禁里删掉,自检照样绿,
+盲区就又回来了。
+
+**隔离模块为什么放 `/tmp` 而不是仓库里**:仓库里造坏文件会污染 `go list` 的
+包集合与第 1 步的 gofmt 清单,也会让"工作区是否干净"的自证失去意义。
+`go.mod` 的 go 指令**取自仓库自己的 `go.mod`**(`awk '/^go /{print $2; exit}'`),
+不硬编码版本号 —— 将来 `go.mod` 升版本时这里不会失配。
+
+**第十一轮(在途,尚未提交)补的第 4 条**(孤儿包检查的自检):类型正确的
+`//go:build windows` **孤儿包**(只含该平台文件的全新目录)必须通过;
+含类型错误的孤儿包必须被抓 —— 因为 `go list ./...` **看不见**这类包
+(`win_check` 走 `./...`,看不见它),只有 `orphan_check` 能看见。
+
+### 第九轮:终审复审的正面证据(真实 server,HTTP 直连)
+
+| 场景 | 期望 | 实测 |
+| --- | --- | --- |
+| **"该失败却成功"专项 10/10 场景** | 全部**正确失败**,错误体可读可定位 | ✅ 10/10 通过(条件出口全不匹配 / 并行不收敛 / 回边 / 节点失败 / 契约外状态 / 非布尔 `enabled` / 缺必填 / 悬空边 / 未知键 / 决策缺失) |
+| **凭据六个出口** | 零明文 | ✅ 落库 / 读出口 / 备份 / 导出 / 事件流 / 实时 SSE —— 全部零明文 |
+| **门禁九步的防线** | 8/9 条实测有效 | ✅ 8/9 条防线实测能抓到对应的坏输入(第 9 条 = "全部 skip 看不见",仍开放) |
+| **Go 测试文件恒真模式** | 零恒真 | ✅ 94 个 Go 测试文件**零恒真模式** |
+| **变异实验** | 11 组全部变红 | ✅ 11/11 组变红(覆盖前几轮登记的每一条可测不变量) |
+
+**干净副本实跑**:门禁九步在干净副本上 **93s 全绿**。
+
+### 第十轮:新增测试的"改坏即红"方向
+
+> 以下是第十轮新增测试所断言的不变量的反面 —— 按"改坏实现 → 测试变红"的
+> 等价表述给出。标注 **【实测】** 的是修复当时真的做过闭环验证的。
+
+| 测试 | 改坏什么会变红 |
+| --- | --- |
+| `TestMergeExtraArgsNeverCrossesOptionNames` **【实测】** | 把回写改回**按下标对齐** → A 的凭据被写到 B 的参数位 → 红 |
+| `TestMergeExtraArgsReorderKeepsCredential` | 按下标对齐且**参数顺序变化** → 凭据跟着位置走而不是跟着名字走 → 红 |
+| `TestMergeExtraArgsDropsMaskWithoutStoredValue` | 无原值的 `***` 被原样保留 → 用户下次保存时把 `***` 当成真值写进去 → 红 |
+| `TestSanitizeExtraArgsDropsLiteralMask` | 下发 CLI 前不剔除字面量 `***` → 每次调用都带 `--api-key ***` → 红 |
+| `TestMaskCredentialValuesKeepsCodeIdentifiers` | 按"键名敏感就整值替换"脱敏 → `const token = getToken()` 整行变 `***` → diff 可读性被毁 → 红 |
+| `TestArtifactsReadOutMasksCredentials` | 制品出口不脱敏 → `git diff` 原文里的凭据直接进响应体 → 红 |
+| `TestExecutionStateDataMaskedInDatabase` | 落库路径不落脱敏副本 → SQLite 里出现明文 → 红 |
+| `TestExecutionReadOutDoesNotCorruptRuntimeState` | 读出口**就地**改运行期状态 → 脱敏把结构化键也改了 → 红 |
+| `TestRunningExecutionSeesTightenedPermission` | 全局策略回到"执行启动时的快照" → 运行中收紧对在跑的执行无效 → 红 |
+| `TestScopedViewOverrideCannotLoosen` | 覆盖段回到"替换"语义 → `permissions` 段能放宽全局禁用 → 红 |
+| `TestSaveWorkflowRejectsPermissionLoosening` | 校验期不报 `PERMISSION_OVERRIDE_LOOSENS` → 放宽尝试静默通过 → 红 |
+| `TestUpdateConfigRejectsNewDefaultWorkingDir` | 后端接受 `default_working_dir` 新值 → 死设置继续骗人 → 红 |
+| `TestUpdateConfigAcceptsLegacyDefaultWorkingDirRoundTrip` | 一并拒绝**已存老值** → 存量工作流打不开自己的配置 → 红 |
+| `TestSettingsUpdateClearsGitWorkingDir` | 空串被当成"没传" → 旧值保留 → 红 |
+| `TestSettingsUpdateKeepsGitWorkingDir` | 一律清空 → 没传该字段也被清 → 红 |
+| `TestSettingsUpdateInvalidLogLevelLeavesWorkingDirUntouched` | 先落库后校验 → 返回 400 但目录已改 → 红 |
+| `TestInvalidOnLoopLimitRejected` | 不校验 `on_loop_limit` → 拼错的 `"fl"` 静默落回 `wait_user` → 红 |
+| `TestApplyGitDirArgPersistsAndShowsInSettings` | `--git-dir` 不持久化 → 设置页看不到 → 红 |
+| `TestApplyGitDirArgFallsBackWhenPersistFails` | 持久化失败时**静默吞掉错误** → 用户以为工作目录设对了 → 红 |
+| `TestApplyGitDirArgEmptyIsNoop` | 空串被当成"清空" → 启动参数清掉了用户的设置 → 红 |
+| `TestResumeKeepsBranchChosenBeforePause` **【实测】** | 恢复时拿脱敏副本**重新求值**分支 → 人批准 A 分支、恢复后走 B 分支 → 红 |
+| `TestRouteBranchDecisionIsStructuredState` | 把选定的分支记进**自由文本**键 → 落库时被脱敏 → 恢复时读不到 → 红 |
+| `TestMaskedStateDataStillResumesAfterHITL` | 脱敏破坏了 `node:<id>:result` 的 JSON 合法性 → 恢复路径把它当成"未答复"→ 节点**静默重跑** → 红 |
+| `frontend/src/test/error-guard.test.ts` 的"生产代码里没有静默吞掉失败的空 catch" **【实测】** | 任何一处 `.catch(() => {})` → 红(实测报"pages/Dashboard.tsx: 存在静默吞错的空 catch") |
+| `frontend/src/lib/errors.test.ts` 的"同一个错误在去重窗口内只提示一次" | 去掉 5 秒去重 → 事件刷新风暴一次弹几十条 → 红 |
+| `frontend/src/lib/errors.test.ts` 的"提示路径本身不能崩" | `reportError` 处理完全认不出来的错误时抛异常 → 红 |
+| `frontend/src/lib/task-storage.test.ts` 的"不往 localStorage 写" | 改回 `localStorage` → 明文任务永久留在磁盘上 → 红 |
+| `frontend/src/lib/task-storage.test.ts` 的"升级后清掉旧版本留在 localStorage 里的明文" | 不清扫旧数据 → 老版本留下的明文一直留着 → 红 |
+
 ## 门禁盲区(当前状态)
 
 | 盲区 | 现状 | 后果 |
 | --- | --- | --- |
-| **门禁看不见"所有用例都被 `t.Skip()` 跳过"** | 门禁第 6 步按 `go test` 的结果行判"有没有真实用例",判据是 `no tests to run`;而**全部 skip** 时 `go test` 仍报 `ok <pkg> 0.006s` | **实测**:一个只含 `t.Skip` 的包,门禁判为"有真实用例"放行。`agent/claude/real_smoke_test.go` 在无 CLI 的环境里正是全 skip。**仍然开放**(见 `docs/OPTIMIZATION.md` 第十一节第 19 条 / #209) |
-| **`asArray` 守卫是文件级判定,单点绕过** | 守卫第 2 条只要求"调用了列表接口的文件里**出现过** `asArray` 字样" | **实测**:同一文件里某一个列表调用点丢掉 `asArray`、别处(哪怕在非列表接口上)还有 `asArray` → 守卫全绿。**仍然开放**(见第十一节第 17 条 / #210) |
+| **门禁看不见"所有用例都被 `t.Skip()` 跳过"** | 门禁第 6 步按 `go test` 的结果行判"有没有真实用例",判据是 `no tests to run`;而**全部 skip** 时 `go test` 仍报 `ok <pkg> 0.006s` | **实测**:一个只含 `t.Skip` 的包,门禁判为"有真实用例"放行。`agent/claude/real_smoke_test.go` 在无 CLI 的环境里正是全 skip。**仍然开放**(见 `docs/OPTIMIZATION.md` 第十二节第 10 条 / #209) |
+| **`asArray` 守卫是文件级判定,单点绕过** | 守卫第 2 条只要求"调用了列表接口的文件里**出现过** `asArray` 字样" | **本轮实测复核**:把 `Dashboard.tsx` 的 `listWorkflows()` 与 `listExecutions()` 两个调用点的 `asArray` 去掉(保留 `api.stats()` 上的)→ `list-guard.test.ts` **4 条用例全绿** → 盲区确认仍在。**仍然开放**(见第十二节第 8 条 / #210) |
 | **`asArray` 守卫是源码扫描,不是类型系统** | 即使判定粒度修到"每个调用点",它仍然是**文本扫描** | 换一种写法(`for (const x of list)`、`list.length`)仍可能绕过。**仍然开放** |
-| **并发探针依赖 `time.Sleep` 建立读写重叠窗口** | 5 个并发测试靠 `time.Sleep(100ms)` 让读写重叠 | 调度不巧时重叠窗口为零,`-race` 什么也报不出。**实测**:受控复现里 `-race` 对 20 / 200 / 3000 次迭代的**报告数完全相同** → 问题不是"迭代次数太少",而是**重叠不确定**。**仍然开放**(见第十一节第 18 条 / #208) |
-| **`output` 键在 resume 与实时路径的口径差** | 实时路径用原文求值,resume 路径用**已脱敏**的 `state_json` 求值 | **实测可达的分支改变**:人批准 A 分支,恢复后走 B 分支。**仍然开放**(见第十一节第 11 条 / #205) |
-| **SSE 订阅释放无端到端断言** | 单测覆盖了写失败即关流 | 冒烟脚本没有"断开后订阅数归零"的断言,端到端层面仍可能回归 |
-| **列表接口的 `limit` 上限 1000 无"已截断"标记** | 超过 1000 条被静默截断 | 响应里没有任何提示,真正需要大数据量时得引入分页契约 |
+| **并发探针依赖 `time.Sleep` 建立读写重叠窗口** | 并发测试靠 `time.Sleep(150ms)` 让读写重叠 | 调度不巧时重叠窗口为零,`-race` 什么也报不出。**实测**:受控复现里 `-race` 对 20 / 200 / 3000 次迭代的**报告数完全相同** → 问题不是"迭代次数太少",而是**重叠不确定**。**本轮复核**:第七轮把写侧迭代提到 3000 次只提高了**命中概率**,没有改变"窗口靠 sleep 撞运气"这一根本形态。**仍然开放**(见第十二节第 9 条 / #208) |
+| **SSE 订阅释放无端到端断言** | 单测覆盖了写失败即关流 | 冒烟脚本没有"断开后订阅数归零"的断言,端到端层面仍可能回归。**仍然开放** |
+| **列表接口的 `limit` 上限 1000 无"已截断"标记** | 超过 1000 条被静默截断 | 响应里没有任何提示,真正需要大数据量时得引入分页契约。**仍然开放** |
+| **SSE 的 `json.Marshal` 失败被丢弃** | `api/server.go` 的 SSE 循环里 marshal 出错 → `continue` | 这一条事件**不送达且不留任何痕迹** → 事件流里"少了一条"但没人知道是哪条。**仍然开放**(见第十二节第 12 条 / #233) |
+| **`crypto/rand.Read` 失败被吞** | `_, _ = rand.Read(b)` | 熵不足时 ID 用**全零字节**生成 → ID 可预测且毫无迹象。**仍然开放**(见第十二节第 13 条 / #234) |
 
 ### 已关闭的盲区(留档)
 
@@ -1508,12 +1658,25 @@ stderr 线索。
 | **`MaskStateData` 顶层字符串值不做键名判定** | 第七轮:脱敏改为"键名 + 值形态"两级判定(#204) |
 | **`nodeconfig_contract_test.go` 的恒真路径** | 第七轮:归属检查改真断言 + 防空转断言(#206) |
 | **`template.Engine.RenderErr` 的错误出口零覆盖** | 第七轮:加测试接缝 `lookupFn`,让 panic→error 出口可测(#207) |
+| **门禁第 6 步在干净环境必红(eslint 未声明)** | 第八轮:声明 eslint + `frontend/eslint.config.mjs`;前端三子检查**各自独立**跑完再统一判定(#215 / #216) |
+| **干净 clone 在门禁第 0 步崩溃**(`//go:embed all:frontend/dist`) | 第八轮:门禁在 `go list` 之前加 embed 兜底(目录缺失/为空时放占位文件)(#217) |
+| **`CODE_HINTS` 码表只覆盖子集** | 第八轮:补到 64 码 + **双向守卫**(后端有前端没有 → 红;前端有后端没有 → 红)(#218 / #221) |
+| **桌面分支错误不转 `ApiError` / `updateAgentConfig` 不回读** | 第八轮:`toApiError` 统一转换;桌面分支更新后回读掩码后配置(#219 / #220) |
+| **平台专属 `_test.go` 的类型错误不可见** | 第十轮:第 4 步补 `GOOS=windows go vet`(`go build` 手册明文忽略 `_test.go`)(#237) |
+| **门禁的防线没有自检** | 第十轮:隔离临时模块跑 3 个用例(对照组必须过 / 坏测试文件必须红 / 坏源文件必须红),**复用**门禁步骤 4 的同一函数(#238) |
+| **前端 11 处静默吞错** | 第十轮:统一错误出口 `lib/errors.ts`(5 秒去重)+ 静态守卫 `error-guard.test.ts`(含防空转断言)(#239) |
+| **`output` 键在 resume 与实时路径的口径差** | 第九轮:**路由依据与展示文本分离** —— 选定的分支记进结构化键 `route:<id>:branch`,恢复时**回放**而非拿脱敏副本重算。**残余边界**:循环上限的首次求值、`switchAgent` 每轮回边选择(#205 / #222) |
+| **权限判定双源** | 第十轮:有效权限 = **全局实时** ∧ `permissions` 段(**只收紧**);放宽在校验期报出,全局收紧立即对在跑的执行生效(#229 / #240) |
+| **门禁看不见"孤儿包"** | 第十一轮(**在途,尚未提交**):包集合改按 **git 跟踪的 .go 文件**推导,对 `go list` 看不见的目录逐个跑三平台交叉 `vet` + 自检 |
+
+
 
 
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 61-70 | **第六至十轮补登(4 个 commit)**:门禁硬伤 / 凭据回写 / 制品脱敏 / 门禁自检 / 权限单一源 | ✅ | #212-#244 共 **33 条**:当轮修复 30 条(#212 守卫防空转双下限 / #213 状态机一致性交叉测试 / #214 用例存在性判据细化 / #215 eslint 未声明 / #216 前端 `&&` 链短路 / #217 embed 兜底 / #218+#221 `CODE_HINTS` 64 码 + 双向守卫 / #219 桌面 IPC 转 `ApiError` / #220 `updateAgentConfig` 回读 / #222 `output` 键 resume 口径差根治 / #223 `asArray` 守卫调用点识别盲区 / #224+#235 ExtraArgs 按名合并 / #225+#236 制品出口脱敏 / #237 `GOOS=windows go vet` / #238 门禁自检 / #239 前端吞错可见化 / #240 权限单一源 / #241 `default_working_dir` 拒绝新值 / #242 `Settings.Update` 先校验后落库 / #243 `on_loop_limit` 白名单 / #244 `--git-dir` 持久化),**3 条仍然开放**(#233 SSE marshal 失败丢弃 / #234 `crypto/rand` 失败吞掉 / #226~#232 中转入第十轮修复的 7 条);新增测试文件 **13 个 Go**(`agent/config_mask_test.go` / `agent/credential_mask_test.go` / `app/application/{agent_workingdir,git_workingdir_clear,masking,permission_tighten,settings_update}_test.go` / `permission/scoped_test.go` / `workflow/{compiler,validator}/looplimit_test.go` / `main_gitdir_test.go` / `workflow/runtime/output_route_resume_test.go`)+ **3 个前端**(`lib/errors.test.ts` / `lib/task-storage.test.ts` / `test/error-guard.test.ts`);新增专节"第八~十轮实测记录"(门禁红/绿对照实验 + **门禁自检** 3+1 用例 + 第九轮 10/10 场景正面证据 + 第十轮 26 条"改坏即红"方向);Go 测试文件 94→**104**、前端 16→**20** 文件 / 153→**190** 用例 |
 | 57-60 | **第七轮(4 个子代理)**:迭代 22 双模式一致性 / 迭代 24 探针补齐 / 迭代 23 终审复审 / 迭代 25 门禁与冒烟加固 | ✅ | #197-#211 共 **15 条**:当轮修复 11 条(#197 顶层键契约下沉 / #198 校验告警 / #199 `ignored_keys` / #200 条件变量 AST 探针 / #201 `asArray` 守卫补形态 / #202 eslint 未声明 / #203 gofmt 吞语法错误 + Windows 交叉编译 / #204 顶层键名判定 / #206 契约守卫恒真 / #207 模板错误出口零覆盖 / #211 冒烟打印端口占用者),**4 条仍然开放**(#205 `output` 键 resume/实时口径差、#208 并发探针重叠窗口、#209 全部 skip 看不见、#210 `asArray` 文件级判定);门禁由 **8 步扩为 9 步**;新增 `api/dual_mode_test.go` / `app/application/dual_mode_test.go` / `workflow/compiler/conditionenv_contract_test.go` 三个测试文件与 `frontend/src/lib/api.test.ts` 的三组双分支契约用例;新增专节"终审实测记录"(**15 组变异实验 + 5 组门禁探针 + 5 组修复后复测 + 端到端正面证据**);Go 测试文件 90→**94**、前端 135→**153** 用例 |
 | 53-56 | **第六轮(3 个子代理)**:守卫扩面 / 假测试修正 / 门禁盲区 / 文档补第三至五轮 | ✅ | #189-#196 共 **8 条**(#189 `state_mask` 守卫扩面 / #190 统一状态写入口 `setExecState` / #191 logx 实际级别断言 / #192 gofmt 清单改 git / #193 用例存在性自动推导 / #194 build 产物落临时目录 / #195 insert 路径落脱敏副本 / #196 删零断言探针 `zz_vt_test.go` + `execStateGuardSQL` 注释事实化);`docs/OPTIMIZATION.md` 补齐轮次 41-52(此前断档)并重写开放清单;Go 测试文件 → **91** |
 | 41-52 | **三轮并行复审(10 个子代理 + 1 个独立 verifier)**:跨文件收口 / 前端契约同步 / 门禁重写 / `state_json` 脱敏 / CAS 可观测 / 恒真测试清理 / DSL 严格化 / runtime 静默丢弃三处 / API 严格化 / 累积退化复审 | ✅ | #142-#188 共 **47 条**:当轮修复 43 条,转下一轮 4 条(#185 `state_mask` 守卫覆盖面、#186 日志级别无实际断言、#187 `execStateGuardSQL` 作用范围注释、#188 gofmt 平台文件盲区 —— **四条已在第六轮全部关闭**);新增**源码扫描守卫** 4 处(dsl 禁声明配置结构体 / 运行期与持久层列集合一致 / 状态键必须登记分类 / 前端未知顶层键);门禁重写为 **8 步**(补 `go build`、关键包用例存在性、gofmt 按文件清单、冒烟端口预检);Go 测试文件 66→**90**、有测试包 21 个、前端 12→**16** 文件 / 89→**135** 用例;新增专节"改坏实现 → 测试变红"(实测记录 40+ 条)与"门禁盲区" |

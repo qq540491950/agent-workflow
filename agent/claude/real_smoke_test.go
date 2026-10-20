@@ -8,7 +8,6 @@ import (
 	"time"
 
 	coreagent "agentworkflow/agent"
-	"agentworkflow/permission"
 )
 
 // 真机冒烟:验证真实 claude CLI 路径。
@@ -44,7 +43,7 @@ func requireClaudeCLI(t *testing.T) {
 // TestRealClaudeEndToEnd 真实调用一次,验证参数与输出解析。
 func TestRealClaudeEndToEnd(t *testing.T) {
 	requireClaudeCLI(t)
-	a := New(Config{Perms: permission.NewManager()})
+	a := New(Config{})
 	resp, err := a.Execute(context.Background(), coreagent.AgentRequest{
 		Task:         "回复 OK",
 		Mode:         "plan",
@@ -81,7 +80,7 @@ func TestRealClaudeEndToEnd(t *testing.T) {
 // 在真实 CLI 上确实生效)。
 func TestRealClaudeTimeout(t *testing.T) {
 	requireClaudeCLI(t)
-	a := New(Config{Perms: permission.NewManager()})
+	a := New(Config{})
 	start := time.Now()
 	_, err := a.Execute(context.Background(), coreagent.AgentRequest{
 		Task:    "写一篇 5000 字的长文",

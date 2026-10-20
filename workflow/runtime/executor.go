@@ -306,7 +306,15 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 	if err := e.perms(env).Check(agentID, permission.FSRead); err != nil {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 	}
-	if mode == "execute" || mode == "fix" {
+	// 写权限:mode→是否需要写权限的**唯一来源**是 agent.ModeRequiresWrite
+	// (与 pi 适配器的兜底检查同一份)。
+	//
+	// 此前这里只查 execute|fix,而 pi 适配器查 execute|fix|submit ——
+	// 两份集合各自演化(约定 13 的同源精神)。后果:`mode: submit` 的节点
+	// 不受**工作流级 permissions 段**约束(适配器只看得到全局策略),
+	// 用户在 DSL 里收紧写权限,submit 节点照样跑 —— 以为生效了实际没有
+	// (约定 14)。
+	if coreagent.ModeRequiresWrite(mode) {
 		if err := e.perms(env).Check(agentID, permission.FSWrite); err != nil {
 			return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 		}

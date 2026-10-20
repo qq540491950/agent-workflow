@@ -71,7 +71,7 @@ export default function Agents() {
       setCfg({ ...c, env: c.env ?? {} });
     } catch (e) {
       toast.error((e as Error).message);
-      setCfg({ model: "", base_url: "", timeout_seconds: 0, extra_args: [], env: {}, default_working_dir: "" });
+      setCfg({ model: "", base_url: "", timeout_seconds: 0, extra_args: [], env: {} });
     }
   };
 
@@ -244,23 +244,22 @@ export default function Agents() {
                   onChange={(e) => setCfg({ ...cfg, base_url: e.target.value })}
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">超时(秒,0=默认)</Label>
-                  <Input
-                    type="number"
-                    value={String(cfg.timeout_seconds ?? 0)}
-                    onChange={(e) => setCfg({ ...cfg, timeout_seconds: Number(e.target.value) })}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">默认工作目录(可选)</Label>
-                  <Input
-                    value={cfg.default_working_dir}
-                    onChange={(e) => setCfg({ ...cfg, default_working_dir: e.target.value })}
-                  />
-                </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">超时(秒,0=默认)</Label>
+                <Input
+                  type="number"
+                  value={String(cfg.timeout_seconds ?? 0)}
+                  onChange={(e) => setCfg({ ...cfg, timeout_seconds: Number(e.target.value) })}
+                />
               </div>
+              {/* 此前这里有"默认工作目录(可选)"输入框,但该设置运行期从不读取
+                  (后端会拒绝任何新值)—— 用户填了、界面提示"已保存",Agent 仍在
+                  全局 Git 目录下读写文件(约定 14)。输入框已删除,这里留一行
+                  说明,指向真正生效的地方:节点级 config.working_dir。 */}
+              <p className="text-xs text-muted-foreground">
+                工作目录在<b className="text-foreground">节点级 config.working_dir</b>
+                里设置(留空则用全局 Git 工作目录);Agent 级不提供工作目录设置。
+              </p>
               {configTarget?.id.startsWith("mock") && (
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">

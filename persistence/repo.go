@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"agentworkflow/event"
+	"agentworkflow/logx"
 	"agentworkflow/workflow/dsl"
 	"agentworkflow/workflow/model"
 )
@@ -172,6 +173,31 @@ func (d *DB) ListWorkflowVersions(workflowID string) ([]int, error) {
 
 type rowScanner interface{ Scan(dest ...any) error }
 
+// decodeJSONColumn 解码一个 JSON 列。
+//
+// 空串 = 空值(某些列的默认值就是空串,例如 executions.snapshot_json
+// DEFAULT ”),不算损坏。
+//
+// 非法 JSON → 返回错误,**不**静默退化成零值。
+//
+// 损坏的后果分两类,决定"失败"还是"降级":
+//   - 工作流**定义**列(permission_json / nodes_json / edges_json /
+//     variables_json / settings_json):损坏 = 加载出来的**不是用户保存的
+//     那个工作流**。其中 permission_json 损坏 = 权限收紧**静默失效**
+//     (安全相关:工作流以为自己禁了写权限,实际按全局的宽松策略跑)。
+//     → 显式失败(fail closed),由调用方决定。
+//   - 执行**运行期状态**列:历史记录,坏了不该让整个列表页打不开
+//     → 降级 + WARN(调用点决定)。
+func decodeJSONColumn(column, raw string, out any) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil // 空值(不是损坏)
+	}
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return fmt.Errorf("%s 列的 JSON 损坏: %w", column, err)
+	}
+	return nil
+}
+
 func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 	var wf model.Workflow
 	var variables, nodes, edges, settings, permData string
@@ -184,14 +210,30 @@ func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 		return nil, wrap(err)
 	}
 	wf.Enabled = enabled == 1
-	_ = json.Unmarshal([]byte(variables), &wf.Variables)
+	// 定义列损坏 → **显式失败**(此前一律 `_ = json.Unmarshal(...)`,
+	// 错误被吞,列静默变成空值):
+	//   - permission_json 损坏 = 权限收紧静默失效(安全相关);
+	//   - nodes/edges 损坏 = 跑的是另一个工作流(约定 14)。
+	// 静默成功比崩溃更危险 —— 宁可让用户看到"这条数据坏了",也不要
+	// 让他以为自己的工作流按原样跑。
+	for _, col := range []struct {
+		name string
+		raw  string
+		out  any
+	}{
+		{"variables_json", variables, &wf.Variables},
+		{"permission_json", permData, &wf.Permission},
+		{"nodes_json", nodes, &wf.Nodes},
+		{"edges_json", edges, &wf.Edges},
+		{"settings_json", settings, &wf.Settings},
+	} {
+		if err := decodeJSONColumn(col.name, col.raw, col.out); err != nil {
+			return nil, wrap(err)
+		}
+	}
 	// 变量里的整数值在 JSON 往返后退化成 float64(约定 #2):与执行侧
 	// 同一套归一,保证工作流保存/读回后类型不变。
 	wf.Variables = model.NormalizeStateJSON(wf.Variables)
-	_ = json.Unmarshal([]byte(permData), &wf.Permission)
-	_ = json.Unmarshal([]byte(nodes), &wf.Nodes)
-	_ = json.Unmarshal([]byte(edges), &wf.Edges)
-	_ = json.Unmarshal([]byte(settings), &wf.Settings)
 	if wf.Variables == nil {
 		wf.Variables = map[string]any{}
 	}
@@ -355,17 +397,34 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 	// 而执行期内存里是 int。类型随生命周期变化会让每个读取点都得写
 	// 双类型兼容(漏一处就是静默 bug)。在唯一的解码入口钉死一次。
 	// 见 model.NormalizeStateJSON。
-	_ = json.Unmarshal([]byte(stateData), &e.StateData)
+	//
+	// 列损坏 → **显式失败**:读到的执行不是用户跑的那一个(状态为空
+	// 时"继续执行"会从头再跑一遍,重复副作用)。历史执行记录坏了一条
+	// 就坏这一条,不该被静默当成"空状态"继续用。
+	if err := decodeJSONColumn("state_json", stateData, &e.StateData); err != nil {
+		return nil, wrap(err)
+	}
 	e.StateData = model.NormalizeStateJSON(e.StateData)
 	// variables_json 同理:变量里的 int 经一次往返也会退化成 float64
 	//(约定 #2)。此前只有 state_json 被归一,变量这条路径漏了。
-	_ = json.Unmarshal([]byte(variables), &e.Variables)
+	if err := decodeJSONColumn("variables_json", variables, &e.Variables); err != nil {
+		return nil, wrap(err)
+	}
 	e.Variables = model.NormalizeStateJSON(e.Variables)
-	_ = json.Unmarshal([]byte(iterations), &e.Iterations)
-	_ = json.Unmarshal([]byte(nodeStates), &e.NodeStates)
+	if err := decodeJSONColumn("iterations_json", iterations, &e.Iterations); err != nil {
+		return nil, wrap(err)
+	}
+	if err := decodeJSONColumn("node_states_json", nodeStates, &e.NodeStates); err != nil {
+		return nil, wrap(err)
+	}
 	if snapshot != "" {
 		wf := &model.Workflow{}
-		if err := json.Unmarshal([]byte(snapshot), wf); err == nil {
+		if err := json.Unmarshal([]byte(snapshot), wf); err != nil {
+			// 快照损坏:运行期已有明确失败路径("执行缺少工作流快照
+			// (snapshot 损坏),无法继续"),这里只告警不阻断读取 ——
+			// 读到的执行对象本身是好的(状态、节点明细都在)。
+			logx.Warn("执行快照 JSON 损坏,已按空快照处理", "execution", id, "error", err.Error())
+		} else {
 			e.Snapshot = wf
 		}
 	}
@@ -401,13 +460,40 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 		// 而执行期内存里是 int。类型随生命周期变化会让每个读取点都得写
 		// 双类型兼容(漏一处就是静默 bug)。在唯一的解码入口钉死一次。
 		// 见 model.NormalizeStateJSON。
-		_ = json.Unmarshal([]byte(stateData), &e.StateData)
+		//
+		// 批量列表:列损坏 → **降级 + WARN**,不阻断整张列表
+		// (历史执行记录坏了一条,不该让执行列表页整个打不开)。
+		// 与 GetExecution 的"显式失败"是刻意的差别:单条读取时损坏的
+		// 记录就是**主体**(继续执行会用空状态从头再跑),必须拒绝;
+		// 列表里它只是一条历史记录。
+		if err := decodeJSONColumn("state_json", stateData, &e.StateData); err != nil {
+			logx.Warn("执行记录 state_json 损坏,已按空状态处理",
+				"execution", e.ID, "error", err.Error())
+		}
 		e.StateData = model.NormalizeStateJSON(e.StateData)
 		// variables_json 同理(约定 #2):整数值不得在往返后退化成 float64。
-		_ = json.Unmarshal([]byte(variables), &e.Variables)
+		if err := decodeJSONColumn("variables_json", variables, &e.Variables); err != nil {
+			logx.Warn("执行记录 variables_json 损坏,已按空变量处理",
+				"execution", e.ID, "error", err.Error())
+		}
 		e.Variables = model.NormalizeStateJSON(e.Variables)
-		_ = json.Unmarshal([]byte(iterations), &e.Iterations)
-		_ = json.Unmarshal([]byte(nodeStates), &e.NodeStates)
+		if err := decodeJSONColumn("iterations_json", iterations, &e.Iterations); err != nil {
+			logx.Warn("执行记录 iterations_json 损坏,已按空迭代表处理",
+				"execution", e.ID, "error", err.Error())
+		}
+		if err := decodeJSONColumn("node_states_json", nodeStates, &e.NodeStates); err != nil {
+			logx.Warn("执行记录 node_states_json 损坏,已按空节点明细处理",
+				"execution", e.ID, "error", err.Error())
+		}
+		if snapshot != "" {
+			wf := &model.Workflow{}
+			if err := json.Unmarshal([]byte(snapshot), wf); err != nil {
+				logx.Warn("执行记录 snapshot_json 损坏,已按空快照处理",
+					"execution", e.ID, "error", err.Error())
+			} else {
+				e.Snapshot = wf
+			}
+		}
 		out = append(out, &e)
 	}
 	return out, rows.Err()
@@ -442,7 +528,10 @@ func (d *DB) ListRunningExecutions() ([]*model.Execution, error) {
 	for _, id := range ids {
 		e, err := d.GetExecution(id)
 		if err != nil {
-			return nil, err
+			// 单条坏记录不能打断整个崩溃恢复循环(其余执行仍要被标记)。
+			// 跳过 + 告警:这条执行会一直停在 RUNNING,直到用户处理它。
+			logx.Warn("崩溃恢复:跳过读不出的执行记录", "execution", id, "error", err.Error())
+			continue
 		}
 		out = append(out, e)
 	}

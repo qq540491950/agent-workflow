@@ -4,6 +4,7 @@ package logx
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -12,12 +13,25 @@ import (
 
 var logger atomic.Pointer[slog.Logger]
 
+// levelValue 保存当前生效的级别(供 SetOutput 重建 logger 时保持一致)。
+var levelValue atomic.Int64
+
+// outWriter 保存当前日志输出目的地(默认 stderr;可由 SetOutput 切换)。
+//
+// 单独存着而不是只在 newLogger 时传进去:级别一变(SetLevelChecked)就要
+// 重建 logger,若不带上当前目的地,日志会悄悄回到 stderr —— 测试里
+// 捕获日志就失效了(约定 14:别让"看起来在工作"的机制静默失效)。
+var outWriter atomic.Pointer[io.Writer]
+
 func init() {
+	w := io.Writer(os.Stderr)
+	outWriter.Store(&w)
+	levelValue.Store(int64(slog.LevelInfo))
 	logger.Store(newLogger(slog.LevelInfo))
 }
 
 func newLogger(level slog.Level) *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	return slog.New(slog.NewTextHandler(*outWriter.Load(), &slog.HandlerOptions{Level: level}))
 }
 
 // validLevels 是支持的日志级别。
@@ -71,8 +85,29 @@ func SetLevelChecked(level string) error {
 	if err != nil {
 		return err
 	}
+	levelValue.Store(int64(l))
 	logger.Store(newLogger(l))
 	return nil
+}
+
+// SetOutput 把日志输出切到 w(w == nil 时回到 stderr),返回恢复函数。
+//
+// 用途:桌面模式把日志落到文件;测试里捕获日志以断言"某条告警真的发出"
+// (约定 14:降级路径必须有可验证的告警,不能只写在注释里)。
+//
+// 只换输出目的地,**不改变**生效级别(级别由 SetLevelChecked 管)。
+func SetOutput(w io.Writer) func() {
+	old := logger.Load()
+	oldOut := outWriter.Load()
+	if w == nil {
+		w = os.Stderr
+	}
+	outWriter.Store(&w)
+	logger.Store(newLogger(slog.Level(levelValue.Load())))
+	return func() {
+		outWriter.Store(oldOut)
+		logger.Store(old)
+	}
 }
 
 // SetLevel 控制日志级别(debug/info/warn/error)。
