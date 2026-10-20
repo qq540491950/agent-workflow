@@ -14,6 +14,7 @@ import {
 import { cn } from "@/lib/utils";
 import { api, asArray, detectMode, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
+import { reportError } from "@/lib/errors";
 import type { Execution } from "@/lib/types";
 
 const nav = [
@@ -51,7 +52,11 @@ export default function Layout() {
           ).length;
           setRunning(runningCount);
         })
-        .catch(() => {});
+        // 此前是 `.catch(() => {})`:侧栏的运行中计数加载失败时**静默**
+        // 停在 0,用户看到的是"没有运行中的任务",实际是请求失败。Layout
+        // 挂在所有页面上、且每次路由变化都会重新挂载,同一个错误会被报很多
+        // 次 —— reportError 内部按 5 秒窗口去重,不会变成提示风暴。
+        .catch((e: unknown) => reportError(e, "加载运行中执行数"));
     };
     refresh();
     // 防抖:node.* 等高频事件不应逐条触发执行列表拉取(约定 7:一律 200ms)

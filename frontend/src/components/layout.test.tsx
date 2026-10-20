@@ -7,8 +7,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { toast } from "sonner";
 import Layout from "./layout";
 import { advance, emit, makeEvent, settle } from "@/test/helpers";
+import { resetErrorDedup } from "@/lib/errors";
+
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), message: vi.fn() },
+}));
 
 const m = vi.hoisted(() => ({
   handlers: [] as Array<(ev: import("@/lib/types").UIEvent) => void>,
@@ -33,10 +39,12 @@ vi.mock("@/lib/api", async (importOriginal) => {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  resetErrorDedup();
   m.handlers = [];
   m.listExecutions.mockReset();
   m.listExecutions.mockResolvedValue([]);
   m.detectMode.mockResolvedValue("web");
+  vi.mocked(toast.error).mockClear();
 });
 
 afterEach(() => {
@@ -113,5 +121,28 @@ describe("Layout 列表防御", () => {
     await settle();
     expect(screen.getByText("Dashboard")).toBeTruthy();
     expect(screen.queryByText("2")).toBeNull();
+  });
+});
+
+describe("Layout 失败必须可见", () => {
+  it("执行列表请求失败时弹出错误提示(而不是静默停在 0)", async () => {
+    m.listExecutions.mockRejectedValue(new Error("后端不可用"));
+    renderLayout();
+    await settle();
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("加载运行中执行数");
+  });
+
+  it("事件反复触发刷新失败不会变成提示风暴", async () => {
+    renderLayout(); // 挂载时一切正常
+    await settle();
+    vi.mocked(toast.error).mockClear();
+    // 后端开始出问题,而事件仍在不断到达(Layout 挂在所有页面上)
+    m.listExecutions.mockRejectedValue(new Error("后端不可用"));
+    for (let i = 0; i < 5; i++) {
+      emit(m.handlers, makeEvent("node.started"));
+      await advance(200);
+    }
+    expect(toast.error).toHaveBeenCalledTimes(1);
   });
 });

@@ -60,6 +60,8 @@ TEST_LOG=""
 BUILD_OUT=""
 WIN_OUT=""
 WIN_LOG=""
+WIN_VET_LOG=""
+WIN_CHECK_DIR=""
 GOFMT_OUT=""
 GOFMT_ERR=""
 EMBED_PLACEHOLDER=""
@@ -68,7 +70,9 @@ cleanup() {
 	if [ -n "$TEST_LOG" ]; then rm -f "$TEST_LOG"; fi
 	if [ -n "$BUILD_OUT" ]; then rm -rf "$BUILD_OUT"; fi
 	if [ -n "$WIN_LOG" ]; then rm -f "$WIN_LOG"; fi
+	if [ -n "$WIN_VET_LOG" ]; then rm -f "$WIN_VET_LOG"; fi
 	if [ -n "$WIN_OUT" ]; then rm -rf "$WIN_OUT"; fi
+	if [ -n "$WIN_CHECK_DIR" ]; then rm -rf "$WIN_CHECK_DIR"; fi
 	if [ -n "$GOFMT_OUT" ]; then rm -f "$GOFMT_OUT"; fi
 	if [ -n "$GOFMT_ERR" ]; then rm -f "$GOFMT_ERR"; fi
 	# 占位文件:只在它**仍是**我们放的那一个时才清掉(按内容比对)。
@@ -220,7 +224,7 @@ grep -v "was built for newer 'macOS' version" "$BUILD_LOG" || true
 echo "OK"
 end_step
 
-step "4/9" "Windows 交叉编译(GOOS=windows go build)"
+step "4/9" "Windows 交叉编译(GOOS=windows go build + go vet)"
 # 此前 Windows 专属文件(`//go:build windows`)在 macOS/Linux 上**从不
 # 参与**任何编译:go list / vet / build / test 都只看当前平台的文件。
 # 结果:一个含语法错误或类型错误的 Windows 文件可以让整条门禁全绿 ——
@@ -233,17 +237,106 @@ step "4/9" "Windows 交叉编译(GOOS=windows go build)"
 # 今天的 Windows 文件只有 agent/process_windows.go,手写子集就会有
 # 下一次同样的漏检。
 #
+# **为什么还要 go vet(本轮新增)**:
+# `go build` **不编译 _test.go**(go 命令手册原文:"When compiling
+# packages, build ignores files that end in _test.go")。所以第八轮修好的
+# 是**源文件**盲区,**测试文件**盲区一直在:
+# 实测(本轮):新增 agent/zz_windows_test.go(`//go:build windows`,
+# 内含 `var s string = 42`)→ 完整 9 步门禁 exit 0 全绿。
+# 任何平台专属的**测试**文件里的类型错误,在 macOS/Linux 上永久不可见。
+# `go vet` 会连同 _test.go 一起做类型检查(实测能报出该错误),所以
+# 这里把 vet 加进步骤 4。
+#
+# 两个子检查各司其职,都保留:
+#   go build —— 链接期错误(缺 main、符号冲突、平台专属代码);
+#   go vet   —— 类型检查,**含 _test.go**。
+#
 # 不污染工作区:-o 指向临时目录,退出时删掉(多包调用时 go build 本来
 # 就不落产物,但根 main 包会落一个 .exe —— 用 -o 目录钉死)。
 # GOOS=windows 会自动把 CGO_ENABLED 置 0;本项目无 cgo 文件
 # (grep 'import "C"' 无命中),交叉编译不需要 C 工具链。
 WIN_OUT=$(mktemp -d /tmp/awo-verify-winbuild.XXXXXX)
 WIN_LOG=$(mktemp /tmp/awo-verify-winbuild-log.XXXXXX)
-if ! GOOS=windows go build -o "$WIN_OUT/" $PKGS >"$WIN_LOG" 2>&1; then
-	cat "$WIN_LOG" >&2
-	fail "GOOS=windows go build 失败:Windows 专属文件在当前平台不会被其它任何步骤编译到"
+WIN_VET_LOG=$(mktemp /tmp/awo-verify-winvet-log.XXXXXX)
+
+# win_check <工作目录> <包参数>...
+#
+# 在 <工作目录> 下做 GOOS=windows 交叉检查(build + vet)。
+# 抽成函数是为了让**门禁自检**与真正的门禁步骤走**同一条代码路径** ——
+# 自检若自己另写一套命令,将来有人把 vet 从这里删掉,自检照样绿,
+# 盲区就又回来了(而且没有任何用例会发现)。
+#
+# 两个子检查的日志分别落盘,失败时回显(否则只看到"失败"两个字,
+# 排障时看不到真正的类型错误)。任一失败 → 返回非 0。
+win_check() {
+	win_dir="$1"
+	shift
+	win_rc=0
+	( cd "$win_dir" && GOOS=windows go build -o "$WIN_OUT/" "$@" ) >"$WIN_LOG" 2>&1 || win_rc=1
+	if [ "$win_rc" -ne 0 ]; then
+		echo "---- GOOS=windows go build 输出 ----" >&2
+		cat "$WIN_LOG" >&2
+		return 1
+	fi
+	( cd "$win_dir" && GOOS=windows go vet "$@" ) >"$WIN_VET_LOG" 2>&1 || win_rc=1
+	if [ "$win_rc" -ne 0 ]; then
+		echo "---- GOOS=windows go vet 输出 ----" >&2
+		cat "$WIN_VET_LOG" >&2
+		return 1
+	fi
+	return 0
+}
+
+if ! win_check "$ROOT" $PKGS; then
+	fail "GOOS=windows 交叉检查失败:Windows 专属文件(含 _test.go)里的类型错误在当前平台不会被其它任何步骤发现"
 fi
-echo "OK"
+echo "OK(build + vet 均通过)"
+
+# ---- 门禁自检:本步骤的防线必须真的能抓到平台专属文件的类型错误 ------
+# 目的:证明上面那道防线**有效**,而不是"看上去在跑"。
+# 做法:在 /tmp 里造一个**隔离的最小模块**(不碰工作区),用**同一个**
+# win_check 函数依次验证三件事:
+#   1. 对照组 —— 一个**类型正确**的 //go:build windows 测试文件必须**通过**。
+#      没有这一条,下面两条就是恒真断言(vet 无论对错都失败也算"成功")。
+#   2. 一个含类型错误的 //go:build windows **测试**文件必须**失败**。
+#      这正是 go build 看不见、只有 vet 看得见的那一类(本轮修的盲区)。
+#   3. 一个含类型错误的 //go:build windows **源**文件必须**失败**。
+#      第八轮修好的源文件盲区,这里做回归确认。
+#
+# 隔离模块放在 /tmp 而不是仓库里:仓库里造坏文件会污染 go list 的包集合
+# 与第 1 步的 gofmt 清单,也会让"工作区是否干净"的自证失去意义。
+# go.mod 的 go 指令取自仓库自己的 go.mod —— 与本仓库的模块要求保持一致,
+# 不用硬编码版本号(将来 go.mod 升版本时这里不会失配)。
+WIN_CHECK_DIR=$(mktemp -d /tmp/awo-verify-wincheck.XXXXXX)
+mkdir -p "$WIN_CHECK_DIR/pkg" "$WIN_CHECK_DIR/cmd/selftest"
+SELF_GO_VER=$(awk '/^go /{print $2; exit}' go.mod)
+[ -n "$SELF_GO_VER" ] || fail "读不到 go.mod 的 go 指令(门禁自检需要它)"
+printf 'module awo/selfcheck\n\ngo %s\n' "$SELF_GO_VER" >"$WIN_CHECK_DIR/go.mod"
+printf 'package pkg\n\nfunc Hello() string { return "hi" }\n' >"$WIN_CHECK_DIR/pkg/pkg.go"
+printf 'package main\n\nfunc main() {}\n' >"$WIN_CHECK_DIR/cmd/selftest/main.go"
+
+# 1. 对照组:类型正确的 windows 测试文件 → 必须通过
+printf '//go:build windows\n\npackage pkg\n\nvar good string = "ok"\n' >"$WIN_CHECK_DIR/pkg/zz_windows_test.go"
+if ! win_check "$WIN_CHECK_DIR" ./...; then
+	fail "门禁自检失败:对照组(类型正确的 //go:build windows 测试文件)就让交叉检查失败 —— 自检本身不可信"
+fi
+
+# 2. 含类型错误的 windows **测试**文件 → 必须失败(go build 看不见这一类)
+printf '//go:build windows\n\npackage pkg\n\nvar bad string = 42\n' >"$WIN_CHECK_DIR/pkg/zz_windows_test.go"
+if win_check "$WIN_CHECK_DIR" ./...; then
+	fail "门禁自检失败://go:build windows 的**测试文件**里的类型错误没有被交叉检查发现(go build 不编译 _test.go,只有 vet 能抓)"
+fi
+
+# 3. 含类型错误的 windows **源**文件 → 必须失败(第八轮的盲区,回归确认)
+rm -f "$WIN_CHECK_DIR/pkg/zz_windows_test.go"
+printf '//go:build windows\n\npackage pkg\n\nvar Bad string = 42\n' >"$WIN_CHECK_DIR/pkg/zz_windows.go"
+if win_check "$WIN_CHECK_DIR" ./...; then
+	fail "门禁自检失败://go:build windows 的**源**文件里的类型错误没有被交叉检查发现"
+fi
+
+rm -rf "$WIN_CHECK_DIR"
+WIN_CHECK_DIR=""
+echo "OK(自检:对照组通过 / 测试文件类型错误被抓 / 源文件类型错误被抓)"
 end_step
 
 step "5/9" "go test -count=1 -race"

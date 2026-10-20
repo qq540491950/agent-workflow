@@ -28,6 +28,11 @@ export async function initNotifications() {
   if (Notification.permission === "default") {
     // 在用户首次交互后再请求权限,避免打扰
     const ask = () => {
+      // 这里是**刻意的静默**:requestPermission 失败(浏览器不支持、
+      // 非安全上下文、用户直接拒绝)都不该打扰用户 —— 桌面通知本来就是
+      // 锦上添花,失败只意味着"没有桌面通知",不影响工作流本身。
+      // 与"把请求失败吞掉"那一类缺陷不同:这里没有任何数据要展示,
+      // 报错反而会让用户以为工作流出了问题。
       Notification.requestPermission().catch(() => {});
       window.removeEventListener("click", ask);
     };

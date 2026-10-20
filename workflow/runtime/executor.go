@@ -58,8 +58,10 @@ func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *mo
 	// 泄漏。脱敏只作用于**落库的副本**:返回给编译器的 outcome 原样
 	// 保留(下游节点可能引用 output 原文,决策路由也读它)。
 	//
-	// 注意:artifact(git diff)不在此处脱敏 —— diff 产物要保持可读,
-	// 它由 SaveArtifact 单独落库(见 runGitNode)。
+	// 注意:artifact(git diff)由 SaveArtifact 单独落库(见 runGitNode)——
+	// 那里按"值的形态"脱敏(凭据形态的值替换为 ***,代码里的标识符原样
+	// 保留),diff 的可读性与审计证据不受影响;此处 logx.Mask 的按键名
+	// 整值替换会把代码标识符一起抹掉,不适合 diff 产物。
 	en.Output = truncate(logx.Mask(outcome.Output), 20000)
 	en.Error = logx.Mask(outcome.Error)
 	en.FinishedAt = time.Now().Format(time.RFC3339Nano)
@@ -690,11 +692,28 @@ func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *mod
 	// diff 结果保存为上下文,供 review 节点引用
 	if op == "diff" {
 		st.Set("git_diff", out)
-		_ = e.Repo.SaveArtifact(&model.Artifact{
+		// 制品内容按"值的形态"脱敏后落库(约定 8)。
+		//
+		// 此前原文落库:diff 里若含用户不小心提交进仓库的凭据(.env 之类),
+		// 明文既进 SQLite 又经 API 原样返回 —— 同一份内容在 /nodes 里
+		// 是脱敏的,两个出口口径不一致。
+		//
+		// 脱敏只替换**凭据形态的值**(sk-/ghp_/AKIA/JWT/高熵长串),
+		// 代码里的标识符(token = getToken())原样保留 —— diff 的可读性
+		// 与审计证据不受影响(第八轮"artifact 不脱敏"的理由正是这个,
+		// 本轮改用形态判定而不是"整值替换"来同时满足两边)。
+		artifact := &model.Artifact{
 			ID: newID("art"), ExecutionID: env.Exec.ID, NodeID: node.ID,
-			Name: "git-diff", ContentType: "text/x-diff", Content: out,
+			Name: "git-diff", ContentType: "text/x-diff",
+			Content:   coreagent.MaskCredentialValues(out),
 			CreatedAt: time.Now().Format(time.RFC3339Nano),
-		})
+		}
+		if err := e.Repo.SaveArtifact(artifact); err != nil {
+			// 此前是 _ = ... :落库失败被吞掉,制品静默缺失 ——
+			// 用户在界面上看不到任何提示,只会以为"这次没有 diff"。
+			logx.Error("制品落库失败", "execution", env.Exec.ID,
+				"node", node.ID, "artifact", artifact.Name, "error", err.Error())
+		}
 	}
 	return compiler.NodeOutcome{State: model.NodeSuccess, Output: out, Summary: "git " + op}
 }

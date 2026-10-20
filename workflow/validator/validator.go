@@ -76,6 +76,21 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 		addErr("INVALID_PERMISSION_OVERRIDE", "", "%v", err)
 	}
 
+	// settings.on_loop_limit 的取值白名单(唯一来源:compiler.LoopLimitStrategies)。
+	//
+	// 运行期靠 `p.Loop.OnLoopLimit == "fail"` 区分两条完全不同的路径
+	// (fail = 执行显式失败;wait_user = 暂停等人工)。此前任何非 "fail" 的值
+	// (含拼错的 "fl")都落回 wait_user:用户以为自己配了 fail,实际执行却在
+	// 等人,且既不报错也不告警(约定 14:静默降级同族)。
+	//
+	// 现在校验期就报出来(约定 13:校验期与运行期同源 —— 两边共用
+	// compiler 里的同一份白名单),运行期对历史快照里的非法值 fail closed。
+	if lv := strings.TrimSpace(wf.Settings.OnLoopLimit); lv != "" &&
+		!slices.Contains(compiler.LoopLimitStrategies(), lv) {
+		addErr("INVALID_LOOP_LIMIT", "", "settings.on_loop_limit %q 非法(允许: %s)",
+			lv, strings.Join(compiler.LoopLimitStrategies(), "|"))
+	}
+
 	nodeIDs := make(map[string]bool, len(wf.Nodes))
 	nodeByID := make(map[string]model.Node, len(wf.Nodes))
 	for _, n := range wf.Nodes {

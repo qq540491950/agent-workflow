@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { reportError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,7 +56,12 @@ export default function Settings() {
 
   useEffect(() => {
     refresh();
-    api.version().then((v) => setVer(v ?? {})).catch(() => {});
+    // 此前是 `.catch(() => {})`:版本信息加载失败时静默不显示,用户以为
+    // "没有版本信息"而不是"加载失败"。与上面 refresh 的错误口径统一。
+    api
+      .version()
+      .then((v) => setVer(v ?? {}))
+      .catch((e: unknown) => reportError(e, "加载版本信息"));
   }, [refresh]);
 
   const save = async () => {

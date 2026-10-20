@@ -72,6 +72,18 @@ function renderSettings() {
   return render(<Settings />);
 }
 
+describe("Settings 失败必须可见", () => {
+  // 此前 api.version() 是 `.catch(() => {})`:版本信息加载失败时静默不显示,
+  // 用户以为"没有版本信息"而不是"加载失败"。
+  it("版本信息加载失败时弹出错误提示", async () => {
+    m.version.mockRejectedValue(new Error("后端不可用"));
+    renderSettings();
+    await settle();
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("加载版本信息");
+  });
+});
+
 describe("Settings 恢复备份提示", () => {
   it("拒绝计数写明【结构非法或本机无此 Agent】", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);

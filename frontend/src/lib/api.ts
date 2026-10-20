@@ -1,5 +1,6 @@
 // 统一服务层:桌面模式走 Wails bindings(IPC),浏览器模式走 HTTP+SSE。
 // 页面只依赖本模块,不感知底层传输方式。
+import { reportError } from "@/lib/errors";
 import type {
   AgentConfig,
   AgentInfo,
@@ -129,8 +130,10 @@ const CODE_HINTS: Record<string, string> = {
   PI_CANCELLED: "Pi 进程被取消",
   PI_PROCESS_ERROR: "Pi 进程异常退出",
   PI_TIMEOUT: "Pi 执行超时",
+  UNSUPPORTED_AGENT_SETTING: "该 Agent 设置不生效(请改用节点级 working_dir,或清空该字段)",
   // ---- 权限 / 持久化 ----
   PERMISSION_DENIED: "权限不足",
+  PERMISSION_OVERRIDE_LOOSENS: "权限段试图放宽全局禁用(已按拒绝处理)",
   INVALID_LOG_LEVEL: "日志级别非法(可选 debug|info|warn|error)",
   DB_ERROR: "数据库操作失败",
   // ---- DSL ----
@@ -152,6 +155,7 @@ const CODE_HINTS: Record<string, string> = {
   INVALID_EDGE: "连线非法(端点不存在或成环)",
   INVALID_EXPRESSION: "条件表达式非法",
   INVALID_GIT_OPERATION: "Git 节点的操作非法",
+  INVALID_LOOP_LIMIT: "settings.on_loop_limit 非法(允许: fail|wait_user)",
   INVALID_NODE: "节点定义非法",
   INVALID_NODE_ENABLED: "节点的 enabled 必须是布尔值(true=启用,false=运行期跳过)",
   INVALID_PERMISSION_OVERRIDE: "权限覆盖段结构非法(已按拒绝处理)",
@@ -215,7 +219,7 @@ export function parseErrorPrefix(text: string): {
 }
 
 /** 取某个错误码的人话提示(带原型链守卫:code 来自服务端)。 */
-function hintFor(code?: string): string {
+export function hintForCode(code?: string): string {
   if (!code) return "";
   if (!Object.prototype.hasOwnProperty.call(CODE_HINTS, code)) return "";
   return CODE_HINTS[code];
@@ -232,7 +236,7 @@ function toApiError(e: unknown): ApiError {
   if (e instanceof ApiError) return e;
   const text = e instanceof Error ? e.message : typeof e === "string" ? e : "";
   const parsed = parseErrorPrefix(text);
-  const message = parsed.message || hintFor(parsed.code);
+  const message = parsed.message || hintForCode(parsed.code);
   return new ApiError(message, 0, parsed.code, parsed.kind);
 }
 
@@ -287,7 +291,7 @@ function buildApiError(status: number, body: unknown): ApiError {
   if (!message) {
     // hasOwnProperty 守卫:code 来自服务端,不能让它命中 Object 原型链
     // ("constructor"/"toString" 会取到函数而不是提示文案)。
-    const hint = hintFor(code) || STATUS_HINTS[status];
+    const hint = hintForCode(code) || STATUS_HINTS[status];
     message = hint ? `HTTP ${status}: ${hint}` : `HTTP ${status}`;
   }
   return new ApiError(message, status, code, kind);
@@ -801,11 +805,22 @@ async function ensureEventStream() {
   if (started || typeof window === "undefined") return;
   started = true;
   if ((await detectMode()) === "desktop") {
-    import("@wailsio/runtime").then((runtime) => {
-      runtime.Events.On("ui:event", (data: unknown) => {
-        dispatch(data as UIEvent);
+    // 桌面分支此前**没有 catch**:@wailsio/runtime 导入失败时,桌面端
+    // 彻底收不到实时事件,界面上只剩一条 unhandled rejection —— 用户看到的
+    // 是"页面不动",完全不知道原因。
+    import("@wailsio/runtime")
+      .then((runtime) => {
+        runtime.Events.On("ui:event", (data: unknown) => {
+          dispatch(data as UIEvent);
+        });
+      })
+      .catch((e: unknown) => {
+        // 允许后续订阅重试:模块导入失败可能是瞬时的(资源未就绪),
+        // 永久卡死则事件流永远不可用。reportError 内部按 5 秒窗口去重,
+        // 重试不会变成提示风暴。
+        started = false;
+        reportError(e, "实时事件流(桌面)");
       });
-    });
   } else {
     const es = new EventSource("/api/events");
     es.onmessage = (m) => {
@@ -816,7 +831,10 @@ async function ensureEventStream() {
       }
     };
     es.onerror = () => {
-      // 断线由 EventSource 自动重连
+      // EventSource 会自动重连,但此前这里是空处理 —— 断线时用户看到的
+      // 只是"页面上的实时数据不动了",与"确实没有新数据"无法区分。
+      // 这里报出来(reportError 5 秒内去重,频繁重连不会刷屏)。
+      reportError(new Error("事件流连接中断,正在自动重连"), "实时事件流");
     };
   }
 }

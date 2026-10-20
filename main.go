@@ -181,9 +181,21 @@ func run() int {
 		}
 	}()
 
-	// 启动参数优先:Git 工作目录(默认进程当前目录,亦可在设置页修改)
+	// 启动参数优先:Git 工作目录(默认进程当前目录,亦可在设置页修改)。
+	//
+	// 语义:**持久化设置**。--git-dir 与设置页写的是同一个键
+	// (git_working_dir),所以设置页回显的就是实际在用的目录 ——
+	// 显示与实际永远一致,不会出现"设置页显示 A、实际在 B 里干活"。
+	//
+	// 落库失败时:明确告警 + 回退到默认(保持已持久化的目录)。
+	// 此前 `_ = application.GitAPI.SetWorkingDir(...)` 把错误整个丢掉:
+	// 启动参数没生效、日志里也没有任何痕迹,用户以为参数被接受了
+	// (约定 14:静默失败)。
 	if opts.GitDir != "" {
-		_ = application.GitAPI.SetWorkingDir(opts.GitDir)
+		if err := applyGitDirArg(application, opts.GitDir); err != nil {
+			logx.Warn("启动参数 --git-dir 未能生效,已回退到默认工作目录",
+				"dir", opts.GitDir, "fallback", application.GitSvc.WorkingDir(), "error", err)
+		}
 	}
 
 	if opts.Server {
@@ -198,6 +210,24 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+// applyGitDirArg 应用启动参数 --git-dir(持久化语义)。
+//
+// 抽成独立函数是为了可测:run() 里直接内联时,错误被丢弃且无法断言
+// "落库失败时回退到默认目录"。
+//
+// 落库失败**不改内存态**(GitService.SetWorkingDir 先落库再改内存),
+// 因此调用方看到错误即可知道实际用的还是默认目录 —— 显示与实际一致。
+func applyGitDirArg(application *app.App, dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := application.GitAPI.SetWorkingDir(dir); err != nil {
+		return err
+	}
+	logx.Info("已按启动参数设置 Git 工作目录", "dir", dir)
+	return nil
 }
 
 // runServer HTTP 服务器模式:REST API + SSE + 静态前端资源。

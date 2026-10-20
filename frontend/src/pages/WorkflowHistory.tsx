@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
+import { reportError } from "@/lib/errors";
 import type { Execution, Workflow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,9 +43,22 @@ export default function WorkflowHistory() {
   const [viewDSL, setViewDSL] = useState<{ version: number; text: string } | null>(null);
 
   const refresh = useCallback(() => {
-    api.getWorkflow(id).then(setWf).catch(() => {});
-    api.listExecutions(id, 100).then((x) => setExecs(asArray<Execution>(x))).catch((e) => toast.error(e.message));
-    api.workflowVersions(id).then((x) => setVersions(asArray<number>(x))).catch(() => {});
+    // 此前 getWorkflow / workflowVersions 两处是 `.catch(() => {})`:加载失败
+    // 时静默渲染空态,用户以为"这个工作流没有版本、没有执行记录"。
+    // 同文件下面 listExecutions 那条链已经用了 toast.error —— 口径不一致,
+    // 现在统一走 reportError(同一个错误 5 秒内只提示一次)。
+    api
+      .getWorkflow(id)
+      .then(setWf)
+      .catch((e: unknown) => reportError(e, "加载工作流详情"));
+    api
+      .listExecutions(id, 100)
+      .then((x) => setExecs(asArray<Execution>(x)))
+      .catch((e: unknown) => reportError(e, "加载执行记录"));
+    api
+      .workflowVersions(id)
+      .then((x) => setVersions(asArray<number>(x)))
+      .catch((e: unknown) => reportError(e, "加载版本列表"));
   }, [id]);
 
   useEffect(() => {

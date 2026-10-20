@@ -10,7 +10,57 @@
 // lower.go 将 IR 降级为 ADK agent 树。
 package compiler
 
-import "agentworkflow/workflow/model"
+import (
+	"slices"
+	"strings"
+
+	"agentworkflow/logx"
+	"agentworkflow/workflow/model"
+)
+
+// on_loop_limit 的合法取值。
+//
+// 唯一定义:校验期(workflow/validator)与编译期(本文件)共用同一份白名单
+// (约定 13:校验期与运行期同源)。运行期靠 `p.Loop.OnLoopLimit == "fail"`
+// 区分两条完全不同的路径(fail = 执行显式失败;wait_user = 暂停等人工),
+// 因此"取值非法"必须在校验期就报出来,而不是运行期悄悄换一条语义。
+const (
+	// LoopLimitFail 达到循环上限后执行显式失败(LOOP_LIMIT)。
+	LoopLimitFail = "fail"
+	// LoopLimitWaitUser 达到循环上限后暂停等待人工介入(默认)。
+	LoopLimitWaitUser = "wait_user"
+)
+
+// LoopLimitStrategies 返回 on_loop_limit 的全部合法取值(副本)。
+func LoopLimitStrategies() []string {
+	return []string{LoopLimitFail, LoopLimitWaitUser}
+}
+
+// NormalizeLoopLimit 把 settings.on_loop_limit 归一化为合法取值:
+//
+//   - 空串 → 默认 wait_user;
+//   - 合法值 → 原样返回;
+//   - 非法值(含拼错)→ fail(fail closed)+ 一条 WARN。
+//
+// 此前任何非 "fail" 的值都落回 wait_user:用户以为自己配了 fail,
+// 实际执行却停在"等待人工介入",既不是他要的语义,也没有任何提示
+// (约定 14:静默降级与"该失败却成功"同族)。
+//
+// 非法值按 fail 处理而不是按 wait_user:fail 是**显式失败**(执行带着
+// LOOP_LIMIT 中止),wait_user 是"停下来等人"—— 对一个拼错的取值来说,
+// 明确失败比无限期挂起更安全,也更容易被用户发现。
+func NormalizeLoopLimit(v string) string {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return LoopLimitWaitUser
+	}
+	if slices.Contains(LoopLimitStrategies(), s) {
+		return s
+	}
+	logx.Warn("on_loop_limit 取值非法,按 fail 处理(校验期会拦下这类取值)",
+		"value", v, "allowed", LoopLimitStrategies())
+	return LoopLimitFail
+}
 
 // PlanKind 是 IR 节点种类。
 type PlanKind string
@@ -108,10 +158,9 @@ func BuildPlan(wf *model.Workflow) *Plan {
 	if maxIter <= 0 {
 		maxIter = 5
 	}
-	onLoopLimit := wf.Settings.OnLoopLimit
-	if onLoopLimit == "" {
-		onLoopLimit = "wait_user"
-	}
+	// 取值白名单只有一份来源(见 NormalizeLoopLimit):非法值不再落回
+	// wait_user,而是 fail closed + WARN。
+	onLoopLimit := NormalizeLoopLimit(wf.Settings.OnLoopLimit)
 	b := &irBuilder{wf: wf, maxIterations: maxIter, onLoopLimit: onLoopLimit}
 
 	start := b.findStart()

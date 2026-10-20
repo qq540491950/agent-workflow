@@ -220,10 +220,26 @@ edges: []
 	}
 }
 
-// TestGitDiffArtifactKeepsRawContent 锁住 P0-1 的边界:节点明细脱敏,
-// 但 **artifact(git diff)必须保持原样** —— diff 产物是要给人看的,
-// 抹掉关键行等于毁掉审计证据。
-func TestGitDiffArtifactKeepsRawContent(t *testing.T) {
+// TestGitDiffArtifactMasksCredentialValues 制品(git diff)的凭据脱敏。
+//
+// **语义变更说明(迭代 10,P0-2)**:本用例此前叫
+// TestGitDiffArtifactKeepsRawContent,断言"artifact(git diff)必须保持
+// 原样(不脱敏)",理由是"diff 产物是要给人看的,抹掉关键行等于毁掉
+// 审计证据"。
+//
+// 第九轮审计重新裁决了这个取舍:制品此前**完全没有任何脱敏** ——
+// git diff 原文既落库又经 GET /api/executions/{id}/artifacts 与
+// /export 原样返回明文凭据,而同一份内容在 /nodes 里是脱敏的,
+// 两个出口口径不一致(约定 8:API 返回掩码)。
+//
+// 新的取舍:**按"值的形态"脱敏**,而不是"按键名整值替换"。
+//   - 凭据形态的值(sk-/ghp_/AKIA/JWT/高熵长串)→ 替换为 ***;
+//   - 代码里的标识符(token = getToken()、const apiKey = cfg.key)
+//     → 原样保留,diff 的可读性与审计证据不受影响。
+//
+// 上一轮担心的"抹掉关键行"因此不会发生:被抹掉的只有凭据值本身,
+// "改了哪一行"这个证据完整保留。本用例同时钉住这两面。
+func TestGitDiffArtifactMasksCredentialValues(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("环境里没有 git,跳过")
 	}
@@ -243,8 +259,9 @@ func TestGitDiffArtifactKeepsRawContent(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "app.txt"), "line1\n")
 	run("add", ".")
 	run("commit", "-m", "init")
-	// 未提交的改动里带"凭据"形态的行:节点明细会脱敏,artifact 不脱敏
-	writeFile(t, filepath.Join(dir, "app.txt"), "line1\nANTHROPIC_API_KEY="+leakSecret+"\n")
+	// 未提交的改动:一行凭据形态 + 一行普通代码(可读性回归锁)
+	writeFile(t, filepath.Join(dir, "app.txt"),
+		"line1\nANTHROPIC_API_KEY="+leakSecret+"\nconst token = getToken();\n")
 
 	repo, err := persistence.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -290,8 +307,17 @@ edges: []
 	for _, a := range arts {
 		content += a.Content
 	}
-	if !strings.Contains(content, leakSecret) {
-		t.Errorf("artifact(git diff)必须保持原样(不脱敏): %q", content)
+	// 凭据明文不得落库(约定 8)
+	if strings.Contains(content, leakSecret) {
+		t.Errorf("artifact 不得含凭据明文: %q", content)
+	}
+	// 键名保留、值替换为 ***(可读性:读者要看到是哪个键)
+	if !strings.Contains(content, "ANTHROPIC_API_KEY=***") {
+		t.Errorf("脱敏后的 artifact 应保留键名并把值替换为 ***: %q", content)
+	}
+	// 代码行原样保留(第八轮"不要破坏 diff 可读性"的理由,本轮仍成立)
+	if !strings.Contains(content, "const token = getToken();") {
+		t.Errorf("代码标识符不应被破坏(diff 可读性/审计证据): %q", content)
 	}
 }
 

@@ -36,6 +36,7 @@ import {
   LayoutGrid,
 } from "lucide-react";
 import { api, asArray, describeWarnings } from "@/lib/api";
+import { reportError } from "@/lib/errors";
 import type { AgentInfo, ValidationError, Workflow, WFNode } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -212,10 +213,14 @@ function DesignerInner() {
     // api.listAgents() 可能返回 null 或 HTML 兜底页对象,
     // 直接 .map 抛 TypeError 且被下面的 catch 吞掉 —— 界面只剩一个空的
     // Agent 下拉框,没有任何提示。
+    //
+    // catch 也从 `.catch(() => {})` 改成 reportError:请求失败时同样只留
+    // 一个空下拉框,用户以为"没有可选的 Agent"。同一个错误 5 秒内只提示
+    // 一次(Designer 会被反复挂载)。
     api
       .listAgents()
       .then((as) => setAgents(asArray<AgentInfo>(as).map((a) => a.id)))
-      .catch(() => {});
+      .catch((e: unknown) => reportError(e, "加载 Agent 列表"));
   }, []);
 
   // Cmd/Ctrl+S 快捷保存

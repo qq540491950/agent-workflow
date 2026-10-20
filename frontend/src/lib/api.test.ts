@@ -1,7 +1,12 @@
 // api.ts 统一服务层测试:双模式探测、防御性转换、HTTP 错误传播、事件订阅。
 // 桌面模式的 @wailsio/runtime 与 @bindings/* 全部 mock,纯逻辑验证。
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import type { Workflow } from "./types";
+
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), message: vi.fn() },
+}));
 
 const callByID = vi.fn();
 vi.mock("@wailsio/runtime", () => ({
@@ -306,6 +311,32 @@ describe("subscribeEvents(web 模式)", () => {
     unsub();
     fire?.({ data: JSON.stringify({ type: "node.completed" }) });
     expect(got).toEqual(["node.started"]);
+  });
+
+  // 此前 es.onerror 是空处理:断线时用户只看到"页面上的实时数据不动了",
+  // 与"确实没有新数据"无法区分。现在必须报出来。
+  it("SSE 断线会被报出来(不再静默吞掉)", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    let onerror: (() => void) | null = null;
+    class FakeEventSource {
+      url: string;
+      onmessage: ((m: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(url: string) {
+        this.url = url;
+        onerror = () => this.onerror?.();
+      }
+    }
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.mocked(toast.error).mockClear();
+
+    const { subscribeEvents } = await freshApi();
+    subscribeEvents(() => {});
+    await new Promise((r) => setTimeout(r, 0));
+    (onerror as (() => void) | null)?.();
+    expect(toast.error).toHaveBeenCalled();
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("实时事件流");
   });
 });
 

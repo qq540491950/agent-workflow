@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"agentworkflow/agent"
 	"agentworkflow/workflow/model"
 )
 
@@ -207,6 +208,223 @@ func waitExecutionState(t *testing.T, a *App, execID string, want model.Executio
 	}
 	e, _ := a.Executions.Get(execID)
 	t.Fatalf("执行 %s 未到达 %s,当前: %+v", execID, want, e)
+}
+
+// ---------------------------------------------------------------------------
+// 迭代 10(P0-1):ExtraArgs 的 *** 回写语义
+//
+// GET 返回的 ExtraArgs 里凭据位是 "***";前端把整份配置回传时会把
+// "***" 一起带回来(Agents.tsx 的 openConfig/saveConfig 原样回传整份
+// cfg)。若后端不合并,存库的真实凭据就被字面量 "***" 覆盖 —— 之后
+// 每次 CLI 调用都带 --api-key *** → 鉴权失败,而用户只看到"已保存"。
+// ---------------------------------------------------------------------------
+
+// storedExtraArgs 读库里某 Agent 的 ExtraArgs。
+func storedExtraArgs(t *testing.T, a *App, id string) []string {
+	t.Helper()
+	raw, err := a.Repo.GetAgentConfig(id)
+	if err != nil {
+		t.Fatalf("读取 Agent 配置: %v", err)
+	}
+	var stored agent.AgentConfig
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("解析 Agent 配置: %v", err)
+	}
+	return stored.ExtraArgs
+}
+
+// TestUpdateConfigExtraArgsMaskRoundTrip GET→PUT 往返:只改其它字段,
+// 库里必须仍是**真实凭据**,且下发 CLI 的参数里没有 ***。
+func TestUpdateConfigExtraArgsMaskRoundTrip(t *testing.T) {
+	a := newTestApp(t)
+	svc := a.AgentSvc
+
+	if err := svc.UpdateConfig("claude-code", agent.AgentConfig{
+		Model:     "m1",
+		ExtraArgs: []string{"--verbose", "--api-key", "sk-real-secret"},
+	}); err != nil {
+		t.Fatalf("初次配置: %v", err)
+	}
+
+	// GET:前端拿到的是掩码值
+	got, err := svc.GetConfig("claude-code")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	joined := strings.Join(got.ExtraArgs, " ")
+	if strings.Contains(joined, "sk-real-secret") {
+		t.Fatalf("GetConfig 泄露了凭据明文: %q", joined)
+	}
+	if !strings.Contains(joined, agent.MaskedValue) {
+		t.Fatalf("GetConfig 未返回掩码: %q", joined)
+	}
+
+	// 用户只改了模型,前端把整份 cfg(含 *** )回传
+	roundtrip := got
+	roundtrip.Model = "m2"
+	if err := svc.UpdateConfig("claude-code", roundtrip); err != nil {
+		t.Fatalf("往返保存: %v", err)
+	}
+
+	stored := storedExtraArgs(t, a, "claude-code")
+	joined = strings.Join(stored, " ")
+	if strings.Contains(joined, agent.MaskedValue) {
+		t.Errorf("库里被写入了字面量 %s(凭据已被毁掉): %q", agent.MaskedValue, joined)
+	}
+	if !strings.Contains(joined, "sk-real-secret") {
+		t.Errorf("库里应仍是真实凭据: %q", joined)
+	}
+	if !strings.Contains(joined, "--verbose") {
+		t.Errorf("普通参数丢失: %q", joined)
+	}
+}
+
+// TestUpdateConfigExtraArgsMaskWithoutStoredValue 无原值的 *** 应丢弃
+// (与 Env 一致,约定 5),且不能留下悬空的 "--api-key"。
+func TestUpdateConfigExtraArgsMaskWithoutStoredValue(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.AgentSvc.UpdateConfig("claude-code", agent.AgentConfig{
+		ExtraArgs: []string{"--api-key", agent.MaskedValue},
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	stored := storedExtraArgs(t, a, "claude-code")
+	joined := strings.Join(stored, " ")
+	if strings.Contains(joined, agent.MaskedValue) {
+		t.Errorf("无原值的 *** 不应落库: %q", joined)
+	}
+	if strings.Contains(joined, "--api-key") {
+		t.Errorf("无原值的 *** 应丢弃整个选项(不能留悬空选项名): %q", joined)
+	}
+}
+
+// TestUpdateConfigExtraArgsNoCrossSlotLeak 关键不变式:凭据只能在
+// **同名**选项之间流动 —— 绝不能出现"把 A 的凭据写到 B 的参数位"。
+func TestUpdateConfigExtraArgsNoCrossSlotLeak(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.AgentSvc.UpdateConfig("claude-code", agent.AgentConfig{
+		ExtraArgs: []string{"--api-key", "sk-secret-A", "--token", "sk-secret-B"},
+	}); err != nil {
+		t.Fatalf("初次配置: %v", err)
+	}
+	// 用户删掉了 --api-key 那一对,只剩 --token ***(前端回传的掩码)
+	if err := a.AgentSvc.UpdateConfig("claude-code", agent.AgentConfig{
+		ExtraArgs: []string{"--token", agent.MaskedValue},
+	}); err != nil {
+		t.Fatalf("更新: %v", err)
+	}
+	stored := storedExtraArgs(t, a, "claude-code")
+	joined := strings.Join(stored, " ")
+	if strings.Contains(joined, "sk-secret-A") {
+		t.Errorf("A 的凭据被写到了别的参数位: %q", joined)
+	}
+	if !strings.Contains(joined, "sk-secret-B") {
+		t.Errorf("B 的凭据应沿用已存同名选项的值: %q", joined)
+	}
+	if strings.Contains(joined, agent.MaskedValue) {
+		t.Errorf("库里出现字面量 %s: %q", agent.MaskedValue, joined)
+	}
+}
+
+// TestUpdateConfigExtraArgsDropsLegacyLiteralMask 库里存着旧版本往返
+// bug 的产物("--api-key ***")时,下发到 CLI 的参数里不能有字面量 ***。
+func TestUpdateConfigExtraArgsDropsLegacyLiteralMask(t *testing.T) {
+	a := newTestApp(t)
+	// 绕过 UpdateConfig 直接写库,模拟历史脏数据
+	raw, err := json.Marshal(agent.AgentConfig{
+		ExtraArgs: []string{"--verbose", "--api-key", agent.MaskedValue},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Repo.SaveAgentConfig("claude-code", raw); err != nil {
+		t.Fatalf("写入脏数据: %v", err)
+	}
+	// 重新应用配置(启动路径):适配器拿到的参数里不能有字面量 ***
+	if err := a.AgentSvc.UpdateConfig("claude-code", agent.AgentConfig{
+		ExtraArgs: []string{"--verbose", "--api-key", agent.MaskedValue},
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	stored := storedExtraArgs(t, a, "claude-code")
+	joined := strings.Join(stored, " ")
+	if strings.Contains(joined, agent.MaskedValue) {
+		t.Errorf("字面量 %s 不得下发到 CLI: %q", agent.MaskedValue, joined)
+	}
+	if !strings.Contains(joined, "--verbose") {
+		t.Errorf("普通参数应保留: %q", joined)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 迭代 10(P0-2):制品(artifacts)出口脱敏
+//
+// 节点明细有 maskNode 脱敏,制品此前**完全没有** —— git diff 原文既
+// 落库又经 API 原样返回,同一个内容在两个出口口径不一致(约定 8)。
+// ---------------------------------------------------------------------------
+
+// TestArtifactsReadOutMasksCredentials 制品读出口(Get artifacts /
+// Export)不得返回凭据明文;代码标识符形态必须原样保留。
+func TestArtifactsReadOutMasksCredentials(t *testing.T) {
+	a := newTestApp(t)
+	wf := &model.Workflow{
+		ID: "wf-art", Name: "Art", Enabled: true,
+		Nodes: []model.Node{
+			{ID: "plan", Type: model.NodeTypeAgent, Config: map[string]any{
+				"agent": "mock-claude", "mode": "plan",
+			}},
+		},
+	}
+	if _, err := a.Workflows.Save(wf); err != nil {
+		t.Fatalf("保存工作流: %v", err)
+	}
+	exec, err := a.Executions.Run(context.Background(), wf.ID, "t", nil)
+	if err != nil {
+		t.Fatalf("运行: %v", err)
+	}
+	waitExecutionState(t, a, exec.ID, model.ExecutionCompleted)
+
+	// 直接写一条含凭据的制品(等价于 git diff 节点落库的产物)
+	artifact := &model.Artifact{
+		ID: "art-secret", ExecutionID: exec.ID, NodeID: "plan",
+		Name: "git-diff", ContentType: "text/x-diff",
+		Content: "diff --git a/.env b/.env\n" +
+			"+ANTHROPIC_API_KEY=" + secretValue + "\n" +
+			"+  const token = getToken();\n",
+		CreatedAt: time.Now().Format(time.RFC3339Nano),
+	}
+	if err := a.Repo.SaveArtifact(artifact); err != nil {
+		t.Fatalf("保存制品: %v", err)
+	}
+
+	// 读出口 1:/artifacts
+	arts, err := a.Executions.Artifacts(exec.ID)
+	if err != nil {
+		t.Fatalf("artifacts: %v", err)
+	}
+	if len(arts) == 0 {
+		t.Fatal("应至少有一条制品")
+	}
+	for _, art := range arts {
+		if strings.Contains(art.Content, secretValue) {
+			t.Errorf("制品读出口含凭据明文: %q", art.Content)
+		}
+		if !strings.Contains(art.Content, "ANTHROPIC_API_KEY=") {
+			t.Errorf("键名应保留(可读性): %q", art.Content)
+		}
+		if !strings.Contains(art.Content, "const token = getToken();") {
+			t.Errorf("代码标识符不应被破坏: %q", art.Content)
+		}
+	}
+
+	// 读出口 2:/export
+	data, err := a.Executions.Export(exec.ID)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if strings.Contains(mustJSON(data), secretValue) {
+		t.Errorf("导出内容含凭据明文: %s", mustJSON(data))
+	}
 }
 
 // containsSecret 判断任意结构里是否含凭据明文。

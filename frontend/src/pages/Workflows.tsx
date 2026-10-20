@@ -13,6 +13,8 @@ import {
   FileUp,
 } from "lucide-react";
 import { api, asArray, describeWarnings } from "@/lib/api";
+import { reportError } from "@/lib/errors";
+import { loadLastTask, purgeLegacyLastTasks, saveLastTask } from "@/lib/task-storage";
 import type { Workflow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -64,10 +66,15 @@ export default function Workflows() {
         asArray<never>(arr).forEach((s: { workflow_id: string; running: number; total: number }) => (m[s.workflow_id] = { running: s.running, total: s.total }));
         setStatsMap(m);
       })
-      .catch(() => {});
+      // 此前是 `.catch(() => {})`:统计加载失败时"执行次数"一列全是 "-",
+      // 用户以为从没跑过这个工作流。同一文件上面那条链已经用了
+      // toast.error —— 口径不一致,现在统一走 reportError。
+      .catch((e: unknown) => reportError(e, "加载统计"));
   }, []);
   useEffect(() => {
     refresh();
+    // 旧版本把任务明文留在 localStorage 里且永不清理 —— 升级后顺手删掉。
+    purgeLegacyLastTasks();
   }, [refresh]);
 
   const create = async () => {
@@ -105,7 +112,7 @@ export default function Workflows() {
 
   const openRun = (w: Workflow) => {
     setRunTarget(w);
-    setTask(localStorage.getItem(`last-task:${w.id}`) ?? "");
+    setTask(loadLastTask(w.id));
   };
 
   const run = async () => {
@@ -120,7 +127,9 @@ export default function Workflows() {
     try {
       const exec = await api.runWorkflow(runTarget.id, task || "默认任务", variables);
       toast.success("执行已启动: " + exec.id);
-      localStorage.setItem(`last-task:${runTarget.id}`, task);
+      // 任务文本里常有凭据:存 sessionStorage(标签页级)而不是 localStorage,
+      // 并且限长限量 —— 见 lib/task-storage.ts 的说明。
+      saveLastTask(runTarget.id, task);
       setRunTarget(null);
       setTask("");
       nav(`/executions/${exec.id}`);

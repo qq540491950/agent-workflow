@@ -47,6 +47,11 @@ type App struct {
 	GitSvc *git.Service
 
 	DataDir string
+	// defaultGitDir 是启动时的默认 Git 工作目录(进程当前目录)。
+	// 设置页把 git_working_dir 清空时回到这里 —— "清空"= 走默认目录,
+	// 而不是把 git 服务的目录置空(cmd.Dir="" 会让子进程落在不确定的
+	// 当前目录里)。
+	defaultGitDir string
 	// logLevel 同样不导出:设置页写、Info 读,跨 goroutine(见 logLevelMu)。
 	logLevel string
 	// skillsMu 保护 disabledSkills。此前是裸 map:执行协程在 runSkillNode
@@ -108,6 +113,7 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 		Perms:          perms,
 		GitSvc:         gitSvc,
 		DataDir:        dataDir,
+		defaultGitDir:  cwd,
 		logLevel:       "info",
 		disabledSkills: map[string]bool{},
 		eventHandlers:  map[int]func(event.UIEvent){},
@@ -194,6 +200,12 @@ func (a *App) loadAgentConfig(id string) (agent.AgentConfig, error) {
 
 // applyAgentConfig 按配置热重建适配器实例(注册表 Replace)。
 func (a *App) applyAgentConfig(id string, cfg agent.AgentConfig) error {
+	// 纵深防御:剔除凭据位上的字面量 "***"。掩码哨兵不是真值 ——
+	// 库里若存着旧版本 GET→PUT 往返的产物("--api-key ***"),直接下发
+	// 会让每次 CLI 调用都带 --api-key *** → 鉴权失败,而用户只看到
+	// "已保存"。合并(UpdateConfig)已保证新写入的配置干净,这里是给
+	// 历史脏数据与启动恢复路径兜底。
+	cfg.ExtraArgs = agent.SanitizeExtraArgs(cfg.ExtraArgs)
 	switch id {
 	case "claude-code":
 		return a.Agents.Replace(claude.New(claude.Config{
@@ -583,6 +595,35 @@ func (s *WorkflowService) SavePayload(rawJSON string) (*WorkflowResult, error) {
 	return &WorkflowResult{Workflow: saved, Warnings: warnings}, nil
 }
 
+// validateWorkflow 校验工作流:静态规则(引擎) + permissions 段的
+// "只能收紧"规则(应用层)。
+//
+// 为什么要分两处:引擎的校验是纯静态的(不依赖运行期状态),而
+// "permissions 段是否在放宽全局禁用"必须拿**当前全局策略**做基线 ——
+// 全局策略在 Agents 页可随时改,是运行期状态。基线用的是
+// s.app.Perms,与运行期(e.Perms)是**同一个**管理器,所以
+// "校验期判定"与"运行期实际"必然一致(约定 13)。
+//
+// 规则本身实现在 permission 包里(唯一来源):覆盖段只能收紧,
+// 有效权限 = 全局策略 ∧ 覆盖段。
+func (s *WorkflowService) validateWorkflow(wf *model.Workflow) *validator.Result {
+	res := s.app.Engine.Validate(wf)
+	if !res.Valid {
+		return res
+	}
+	// permissions 段想放宽全局禁用 → 校验期就报出来。
+	// 运行期这类写法会被**忽略**(有效权限仍按全局),用户却以为生效了
+	// (约定 14:用户以为生效了实际没有)。
+	if err := s.app.Perms.ValidateTightenOnly(wf.Permission); err != nil {
+		res.Valid = false
+		res.Errors = append(res.Errors, validator.ValidationError{
+			Code:    "PERMISSION_OVERRIDE_LOOSENS",
+			Message: err.Error(),
+		})
+	}
+	return res
+}
+
 // saveModel 校验并保存工作流模型:返回保存后的工作流与校验警告。
 //
 // 警告此前被整个丢掉(只回传 res.Errors):DEPRECATED_NODE_CONFIG 这类
@@ -593,7 +634,7 @@ func (s *WorkflowService) saveModel(wf *model.Workflow) (*model.Workflow, []vali
 		wf.ID = "wf-" + strings.ToLower(randHex(6))
 	}
 	// 保存前必须校验
-	res := s.app.Engine.Validate(wf)
+	res := s.validateWorkflow(wf)
 	logValidationWarnings("save", wf.ID, res)
 	if !res.Valid {
 		raw, _ := json.Marshal(res.Errors)
@@ -719,7 +760,7 @@ func (s *WorkflowService) ImportYAML(content string) (*WorkflowResult, error) {
 
 // Validate 返回结构化校验结果。
 func (s *WorkflowService) Validate(wf *model.Workflow) *validator.Result {
-	return s.app.Engine.Validate(wf)
+	return s.validateWorkflow(wf)
 }
 
 // VersionDSL 返回指定版本的 DSL 文本(从版本快照导出)。
@@ -837,11 +878,24 @@ func (s *ExecutionService) Events(id string) ([]map[string]any, error) {
 	return s.app.Repo.ListEvents(id, 0)
 }
 
+// Artifacts 返回某次执行的制品(内容已脱敏,约定 8)。
+//
+// 制品此前**完全没有**脱敏:git diff 节点把 diff 原文落库,这里原样
+// 返回 —— 而同一份内容在 /nodes 里是脱敏的,两个出口口径不一致。
+// 脱敏按"值的形态"判定(agent.MaskCredentialValues):凭据形态的值被
+// 替换,代码标识符原样保留(diff 的可读性与审计价值不退化)。
 func (s *ExecutionService) Artifacts(id string) ([]*model.Artifact, error) {
 	if _, err := s.app.Repo.GetExecution(id); err != nil {
 		return nil, err
 	}
-	return s.app.Repo.ListArtifacts(id)
+	arts, err := s.app.Repo.ListArtifacts(id)
+	if err != nil {
+		return nil, err
+	}
+	for _, art := range arts {
+		maskArtifact(art)
+	}
+	return arts, nil
 }
 
 // Stats 返回每工作流执行统计。
@@ -894,12 +948,33 @@ func (s *ExecutionService) Export(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 制品同样要脱敏(约定 8):导出是 API 出口,不是"备份导出"那个
+	// 允许明文的例外。备份导出(设置页)才是唯一例外。
+	for _, art := range artifacts {
+		maskArtifact(art)
+	}
 	return map[string]any{
 		"execution": exec,
 		"nodes":     nodes,
 		"events":    events,
 		"artifacts": artifacts,
 	}, nil
+}
+
+// maskArtifact 脱敏制品内容里的凭据形态值(约定 8)。
+//
+// 只改**返回给调用方的副本**,不改库里那份:库里那份是审计证据的原始
+// 留存(也可能来自本轮修复之前的历史数据),API 出口负责不让明文出去。
+//
+// 脱敏按"值的形态"判定而不是"键名敏感就整值替换"(后者会把代码里的
+// 标识符一并抹掉,毁掉 diff 的可读性 —— 第八轮为此把"artifact 不脱敏"
+// 钉死在测试里)。键名判定复用 agent.IsSensitiveEnvName(与 ExtraArgs
+// 的掩码同一份来源)。
+func maskArtifact(a *model.Artifact) {
+	if a == nil {
+		return
+	}
+	a.Content = agent.MaskCredentialValues(a.Content)
 }
 
 // maskNode 脱敏节点明细里的自由文本(output/error/result_json)。
@@ -1097,6 +1172,20 @@ func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
 	if err != nil {
 		return err
 	}
+	// default_working_dir 是**死设置**:运行期从不读取它
+	// (claude.Config / pi.Config 都没有该字段,applyAgentConfig 也不传;
+	// 节点级 config.working_dir 为空时回退到全局 Git 工作目录)。
+	//
+	// 此前 UI 有输入框、值存进库、界面提示"已保存",运行时 Agent 仍在
+	// 全局 Git 目录下读写文件 —— 用户以为生效了,实际没有(约定 14)。
+	//
+	// 现在:新值一律**明确拒绝**(而不是继续静默接受);
+	// 存量值原样回传放行(存量配置不能因此存不下去),清空也放行。
+	if cfg.DefaultWorkingDir != "" && cfg.DefaultWorkingDir != stored.DefaultWorkingDir {
+		return model.NewError(model.KindValidationError, "UNSUPPORTED_AGENT_SETTING",
+			"default_working_dir 不生效(运行期从不读取该设置):"+
+				"请改用节点级 config.working_dir,或清空该字段")
+	}
 	if cfg.Env != nil {
 		for k, v := range cfg.Env {
 			switch v {
@@ -1114,6 +1203,14 @@ func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
 			cfg.Env = nil
 		}
 	}
+	// ExtraArgs 的 *** 同样表示"保留原值"(约定 5),但它是有序的
+	// []string,不能按键合并 —— 必须按**选项名**对齐(agent.MergeExtraArgs):
+	// 按下标对齐会在用户增删参数后错位,把 A 选项的凭据写到 B 选项的
+	// 位置,比"明文覆盖"的原缺陷更糟。
+	//
+	// 前端把整份配置原样回传(Agents.tsx:打开配置拿到掩码 → 只改模型 →
+	// 保存),不回传就会把库里的真实凭据覆盖成字面量 "***"。
+	cfg.ExtraArgs = agent.MergeExtraArgs(cfg.ExtraArgs, stored.ExtraArgs)
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -1388,28 +1485,40 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 // 校验用 logx.ValidateLevel(不改变当前级别),应用用 logx.SetLevelChecked。
 
 func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNodes *bool) (*SettingsInfo, error) {
-	// 先落库再改内存:此前先改内存、持久化错误被忽略,界面提示"已保存"
-	// 但重启即丢失。
-	if gitWorkingDir != "" {
-		if err := s.Set("git_working_dir", gitWorkingDir); err != nil {
-			return nil, err
-		}
-		s.app.GitSvc.SetWorkingDir(gitWorkingDir)
-	}
+	// 顺序:**先全量校验 → 再统一落库/应用**。
+	//
+	// 此前先落库并应用 git_working_dir,之后才校验 log_level:
+	// 传"非法级别 + 合法目录"时接口返回 400,但目录**已经改了、也落库了** ——
+	// 用户看到"保存失败",实际有一半设置生效(约定 14:部分成功被当成失败)。
+	//
+	// 现在:校验不过则一个字段都不落库、内存态一个都不改。
+	// 落库与应用之间仍保持"先落库再改内存"(落库失败时内存态不动,
+	// 重启后也不会与界面回显不一致)。
+	//
+	// 级别语义的唯一来源是 logx(应用真正能应用的级别集合):
+	// 校验用 logx.ValidateLevel(不改变当前级别),应用用 logx.SetLevelChecked。
+	var level string
 	if logLevel != "" {
-		// 级别语义的唯一来源是 logx(应用真正能应用的级别集合):
-		// 此前这里另写了一份白名单,两份必然漂移 —— 漂移方向是
-		// "用户能选一个后端不认的值"(设置页显示已保存、实际跑另一个级别)。
-		//
-		// 顺序:先校验(不落库)→ 再落库 → 最后应用。
-		//   - 校验在落库之前:非法级别不许进库(库里躺着一个应用不了的
-		//     级别,重启后仍然无效);
-		//   - 应用在落库之后:与既有"先落库再改内存"的约定一致,
-		//     落库失败时内存与全局日志级别都不动。
 		if err := logx.ValidateLevel(logLevel); err != nil {
 			return nil, model.NewError(model.KindValidationError, "INVALID_LOG_LEVEL", err.Error())
 		}
-		level := strings.ToLower(strings.TrimSpace(logLevel))
+		level = strings.ToLower(strings.TrimSpace(logLevel))
+	}
+	// git_working_dir:**空串 = 清除**(落库空串 + 回到启动默认目录)。
+	//
+	// 此前 "" 被当作"不修改":用户在设置页清空输入框点保存,后端什么都不做,
+	// 但界面提示"已保存" —— 显示与实际不一致(约定 14 的同类问题)。
+	// 前端每次保存都回传当前值(Settings.tsx 的 save),所以 "" 只在用户
+	// 主动清空时出现。
+	if err := s.Set("git_working_dir", gitWorkingDir); err != nil {
+		return nil, err
+	}
+	if gitWorkingDir != "" {
+		s.app.GitSvc.SetWorkingDir(gitWorkingDir)
+	} else {
+		s.app.GitSvc.SetWorkingDir(s.app.defaultGitDir)
+	}
+	if level != "" {
 		if err := s.Set("log_level", level); err != nil {
 			return nil, err
 		}

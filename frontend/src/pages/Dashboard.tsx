@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
+import { reportError } from "@/lib/errors";
 import type { Execution, Workflow } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -41,14 +42,33 @@ export default function Dashboard() {
   const [executions, setExecutions] = useState<Execution[]>([]);
 
   useEffect(() => {
-    api.listWorkflows().then((x) => setWorkflows(asArray<Workflow>(x))).catch(() => {});
-    api.listExecutions("", 8).then((x) => setExecutions(asArray<Execution>(x))).catch(() => {});
-    api.stats().then((x) => setStats(asArray<WfStats>(x))).catch(() => {});
+    // 此前这三处是 `.catch(() => {})`:后端不可用时 Dashboard 渲染
+    // 「暂无工作流」,与"真的没有工作流"完全无法区分(用户以为没数据,
+    // 实际是加载失败)。reportError 把它变成一条可见提示,并对同一个错误
+    // 做 5 秒去重(下面的事件刷新会反复触发同一批请求)。
+    api
+      .listWorkflows()
+      .then((x) => setWorkflows(asArray<Workflow>(x)))
+      .catch((e: unknown) => reportError(e, "加载工作流列表"));
+    api
+      .listExecutions("", 8)
+      .then((x) => setExecutions(asArray<Execution>(x)))
+      .catch((e: unknown) => reportError(e, "加载执行记录"));
+    api
+      .stats()
+      .then((x) => setStats(asArray<WfStats>(x)))
+      .catch((e: unknown) => reportError(e, "加载统计"));
     // 实时事件防抖刷新(约定 7:一律 200ms):workflow.* 事件成串到达时
     // 合并为一次拉取,避免请求数与事件数一一对应。
     const trigger = createRefreshDebounce(() => {
-      api.listExecutions("", 8).then((x) => setExecutions(asArray<Execution>(x))).catch(() => {});
-      api.stats().then((x) => setStats(asArray<WfStats>(x))).catch(() => {});
+      api
+        .listExecutions("", 8)
+        .then((x) => setExecutions(asArray<Execution>(x)))
+        .catch((e: unknown) => reportError(e, "加载执行记录"));
+      api
+        .stats()
+        .then((x) => setStats(asArray<WfStats>(x)))
+        .catch((e: unknown) => reportError(e, "加载统计"));
     });
     const unsub = subscribeEvents((ev) => {
       if (ev.type.startsWith("workflow.")) trigger();

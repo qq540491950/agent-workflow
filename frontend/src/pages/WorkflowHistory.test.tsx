@@ -6,8 +6,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { toast } from "sonner";
 import WorkflowHistory from "./WorkflowHistory";
 import { advance, emit, makeEvent, settle } from "@/test/helpers";
+import { resetErrorDedup } from "@/lib/errors";
+
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), message: vi.fn() },
+}));
 
 const m = vi.hoisted(() => ({
   handlers: [] as Array<(ev: import("@/lib/types").UIEvent) => void>,
@@ -37,6 +43,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  resetErrorDedup();
   m.handlers = [];
   m.getWorkflow.mockReset().mockResolvedValue({
     id: "wf-1",
@@ -49,6 +56,7 @@ beforeEach(() => {
   });
   m.listExecutions.mockReset().mockResolvedValue([]);
   m.workflowVersions.mockReset().mockResolvedValue([1, 2]);
+  vi.mocked(toast.error).mockClear();
 });
 
 afterEach(() => {
@@ -96,5 +104,34 @@ describe("WorkflowHistory 列表防御", () => {
     renderHistory();
     await settle();
     expect(screen.getByText("该工作流还没有执行记录")).toBeTruthy();
+  });
+});
+
+describe("WorkflowHistory 失败必须可见", () => {
+  // 同文件里此前口径不一致:listExecutions 那条链用了 toast.error,
+  // 而 getWorkflow / workflowVersions 是 `.catch(() => {})` —— 加载失败
+  // 时静默渲染空态,用户以为"这个工作流没有版本、没有执行记录"。
+  it("工作流详情加载失败时弹出错误提示", async () => {
+    m.getWorkflow.mockRejectedValue(new Error("后端不可用"));
+    renderHistory();
+    await settle();
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("加载工作流详情");
+  });
+
+  it("版本列表加载失败时弹出错误提示", async () => {
+    m.workflowVersions.mockRejectedValue(new Error("后端不可用"));
+    renderHistory();
+    await settle();
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("加载版本列表");
+  });
+
+  it("执行列表加载失败时弹出错误提示(已有口径,加断言锁住)", async () => {
+    m.listExecutions.mockRejectedValue(new Error("后端不可用"));
+    renderHistory();
+    await settle();
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("加载执行记录");
   });
 });

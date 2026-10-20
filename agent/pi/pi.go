@@ -69,7 +69,15 @@ func (a *Agent) Name() string { return "Pi Agent" }
 
 // Execute 实现 agent.Agent。
 func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*coreagent.AgentResponse, error) {
-	// 权限前置检查:执行/修复类模式需要写权限
+	// 权限前置检查:执行/修复/提交类模式需要写权限。
+	//
+	// 这里查的是**全局**策略;工作流级 permissions 段(运行期作用域,
+	// 只能收紧)由运行期节点检查按**有效策略**(全局 ∧ 覆盖段)裁决 ——
+	// 有效策略恒为全局的子集,两处结论不会相反(单一来源,见
+	// permission 包的说明)。
+	//
+	// 本检查不是冗余:运行期节点检查目前只对 execute/fix 模式查写权限,
+	// submit 模式由这里兜住。
 	if req.Mode == "execute" || req.Mode == "fix" || req.Mode == "submit" {
 		if a.cfg.Perms != nil {
 			if err := a.cfg.Perms.Check(a.ID(), permission.FSWrite); err != nil {

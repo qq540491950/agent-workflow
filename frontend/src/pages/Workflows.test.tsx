@@ -83,6 +83,18 @@ function renderWorkflows() {
   );
 }
 
+describe("Workflows 失败必须可见", () => {
+  // 此前 refresh 里的 api.stats() 是 `.catch(() => {})`:统计加载失败时
+  // "执行次数"一列全是 "-",用户以为从没跑过这个工作流。
+  it("统计加载失败时弹出错误提示", async () => {
+    m.stats.mockRejectedValue(new Error("后端不可用"));
+    renderWorkflows();
+    await settle();
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("加载统计");
+  });
+});
+
 describe("Workflows 启用开关", () => {
   it("失败时提示错误(不得静默吞掉)", async () => {
     m.setEnabled.mockRejectedValue(new Error("权限不足"));
