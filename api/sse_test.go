@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,5 +126,104 @@ func TestSSESlowClientDoesNotBlockProducer(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Emit 长时间未返回:订阅回调仍在同步写客户端")
+	}
+}
+
+// failingWriter 是一个"写必失败"的 ResponseWriter(模拟客户端断开/TCP 错误)。
+// failAfter 之前的写入正常,之后全部失败。
+type failingWriter struct {
+	hdr       http.Header
+	writes    int
+	failAfter int
+}
+
+func (f *failingWriter) Header() http.Header { return f.hdr }
+func (f *failingWriter) WriteHeader(int)     {}
+func (f *failingWriter) Flush()              {}
+func (f *failingWriter) Write(p []byte) (int, error) {
+	f.writes++
+	if f.writes > f.failAfter {
+		return 0, errors.New("connection reset by peer")
+	}
+	return len(p), nil
+}
+
+// 回归:写失败必须关闭 SSE 流。
+// 此前写失败只记一条 Debug 日志就继续循环 —— 连接既不释放(订阅不注销、
+// goroutine 常驻、每 15s 继续写),客户端也永远等不到流结束。
+// 写失败意味着对端已不可达,继续写毫无意义,必须结束流并释放资源。
+func TestSSEWriteFailureClosesStream(t *testing.T) {
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+	s := NewServer(a)
+
+	// 第 1 次写(建连注释行)成功,之后全部失败
+	fw := &failingWriter{hdr: http.Header{}, failAfter: 1}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		s.handleSSE(fw, req)
+		close(done)
+	}()
+
+	// 等订阅建立后产生一个事件,触发失败写入
+	time.Sleep(150 * time.Millisecond)
+	a.Bus.Emit(event.New(event.NodeStarted, "exec-w", "n1", map[string]any{"k": "v"}))
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("写失败后 SSE 流未关闭(连接与订阅都没释放)")
+	}
+}
+
+// 回归:SSE 客户端断开后必须注销订阅(否则每次断开泄漏一个 handler,
+// 事件扇出列表无限增长)。
+func TestSSEDisconnectReleasesSubscription(t *testing.T) {
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+	s := NewServer(a)
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("SSE 连接: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	// 等订阅建立
+	deadline := time.Now().Add(3 * time.Second)
+	for a.EventSubscriberCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if a.EventSubscriberCount() == 0 {
+		t.Fatal("SSE 未建立订阅")
+	}
+
+	// 断开客户端
+	cancel()
+	_ = resp.Body.Close()
+
+	deadline = time.Now().Add(5 * time.Second)
+	for a.EventSubscriberCount() > 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := a.EventSubscriberCount(); n != 0 {
+		t.Errorf("断开后订阅未释放,残留 %d 个 handler", n)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	app "agentworkflow/app/application"
+	"agentworkflow/workflow/model"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -54,6 +55,7 @@ func TestNotFoundSemantics(t *testing.T) {
 		{http.MethodGet, "/api/executions/ghost", ""},
 		{http.MethodPost, "/api/executions/ghost/retry", "{}"},
 		{http.MethodPost, "/api/executions/ghost/input", "{}"},
+		{http.MethodPost, "/api/executions/ghost/cancel", ""},
 		{http.MethodPost, "/api/workflows/ghost/run", `{"task":"t"}`},
 	}
 	for _, c := range cases {
@@ -125,6 +127,24 @@ func TestAgentConfigEndpointMasking(t *testing.T) {
 	env, _ = body["env"].(map[string]any)
 	if env["TOK"] != "***" || env["NEW"] != "***" || body["model"] != "m2" {
 		t.Errorf("config after merge = %v", body)
+	}
+
+	// 空串 = 删除该项(前端传空串即删除,不得把空值落库)
+	code, _, _ = doReq(t, s, http.MethodPut, "/api/agents/claude-code/config",
+		`{"model":"m3","env":{"TOK":"","NEW":"***"}}`)
+	if code != http.StatusOK {
+		t.Fatalf("PUT config 3 → %d", code)
+	}
+	_, body, _ = doReq(t, s, http.MethodGet, "/api/agents/claude-code/config", "")
+	env, _ = body["env"].(map[string]any)
+	if _, exists := env["TOK"]; exists {
+		t.Errorf("空串未删除 env 项: %v", env)
+	}
+	if env["NEW"] != "***" {
+		t.Errorf("*** 未保留 env 项: %v", env)
+	}
+	if body["model"] != "m3" {
+		t.Errorf("model = %v,期望 m3", body["model"])
 	}
 }
 
@@ -1434,5 +1454,236 @@ func TestContract_RegistryErrorsAreStructured(t *testing.T) {
 	// 已知 ID 不受影响
 	if code, _, raw := doReq(t, s, http.MethodPost, "/api/agents/mock-claude/test", ""); code != http.StatusOK {
 		t.Errorf("已知 Agent test → %d (%s)", code, raw)
+	}
+}
+
+// TestErrorBodyAlwaysHasCodeAndKind:错误体形状必须统一。
+// 此前只有结构化错误(model.Error)带 code/kind,而 badRequest 这类
+// 普通错误只有 error 字段 —— 同一套 API 出现两种错误体形状,
+// 前端 ApiError.code 时而 undefined,无法按 code 分支处理
+// (约定 8 的"API 返回掩码/结构化"同理:错误也要结构化)。
+func TestErrorBodyAlwaysHasCodeAndKind(t *testing.T) {
+	s := newTestServer(t)
+
+	cases := []struct{ label, method, path, body string }{
+		{"结构化校验错误", http.MethodPost, "/api/workflows",
+			`{"id":"wf-bad","name":"Bad","nodes":[{"id":"a","type":"agent","config":{"agent":"no-such"}}],"edges":[]}`},
+		{"普通错误(非法 JSON)", http.MethodPost, "/api/workflows/validate", `not-json`},
+		{"普通错误(空 commit message)", http.MethodPost, "/api/git/commit", `{"message":""}`},
+		{"普通错误(缺 enabled)", http.MethodPost, "/api/skills/log/enable", `{}`},
+		{"资源缺失", http.MethodGet, "/api/workflows/ghost", ""},
+		{"方法不允许", http.MethodPut, "/api/workflows", `{}`},
+		{"未知路由", http.MethodGet, "/api/no-such-endpoint", ""},
+	}
+	for _, c := range cases {
+		code, body, raw := doReq(t, s, c.method, c.path, c.body)
+		if code < 400 || code >= 500 {
+			t.Errorf("%s: %s %s → %d,期望 4xx(%s)", c.label, c.method, c.path, code, raw)
+			continue
+		}
+		if msg, _ := body["error"].(string); msg == "" {
+			t.Errorf("%s: 错误体缺 error: %s", c.label, raw)
+		}
+		if cd, _ := body["code"].(string); cd == "" {
+			t.Errorf("%s: 错误体缺 code: %s", c.label, raw)
+		}
+		if kd, _ := body["kind"].(string); kd == "" {
+			t.Errorf("%s: 错误体缺 kind: %s", c.label, raw)
+		}
+	}
+}
+
+// TestMethodNotAllowedAndUnknownRouteReturnJSONError:方法不匹配(405)与
+// 未知路由(404)此前由 net/http ServeMux 直接写纯文本("Method Not
+// Allowed" / "404 page not found"),与本 API 的 JSON 错误体契约不一致:
+// 前端 http() 解析不出 error 字段,只能回退成 "HTTP 405"。
+func TestMethodNotAllowedAndUnknownRouteReturnJSONError(t *testing.T) {
+	s := newTestServer(t)
+
+	code, body, raw := doReq(t, s, http.MethodPut, "/api/workflows", `{}`)
+	if code != http.StatusMethodNotAllowed {
+		t.Errorf("PUT /api/workflows → %d,期望 405(%s)", code, raw)
+	}
+	assertErrorBody(t, "PUT /api/workflows", body, raw, "METHOD_NOT_ALLOWED")
+
+	code, body, raw = doReq(t, s, http.MethodGet, "/api/no-such-endpoint", "")
+	if code != http.StatusNotFound {
+		t.Errorf("GET /api/no-such-endpoint → %d,期望 404(%s)", code, raw)
+	}
+	assertErrorBody(t, "GET /api/no-such-endpoint", body, raw, "NOT_FOUND")
+}
+
+// TestSettingsRejectsInvalidLogLevel:非法日志级别此前被静默接受 ——
+// logx.SetLevel 对未知值回落 info,而 Settings 落库/回显的却是那个
+// 非法字符串,界面显示"debug"实际却是 info(静默丢弃校验错误)。
+func TestSettingsRejectsInvalidLogLevel(t *testing.T) {
+	s := newTestServer(t)
+
+	code, body, raw := doReq(t, s, http.MethodPost, "/api/settings", `{"log_level":"bogus"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("非法 log_level → %d,期望 400(%s)", code, raw)
+	}
+	assertErrorBody(t, "非法 log_level", body, raw, "")
+
+	// 非法值不得落库、不得改变当前级别
+	_, body, _ = doReq(t, s, http.MethodGet, "/api/settings", "")
+	if lv, _ := body["log_level"].(string); lv != "info" {
+		t.Errorf("log_level = %q,期望保持 info", lv)
+	}
+	// 合法值仍然可用
+	code, body, raw = doReq(t, s, http.MethodPost, "/api/settings", `{"log_level":"warn"}`)
+	if code != http.StatusOK {
+		t.Fatalf("合法 log_level → %d(%s)", code, raw)
+	}
+	if body["log_level"] != "warn" {
+		t.Errorf("log_level = %v,期望 warn", body["log_level"])
+	}
+}
+
+// TestQueryIntOverflowIsClamped:查询参数里的 limit 此前用 int 累加解析,
+// 超长数字会整数溢出成负数,而仓储层把 limit<=0 解释为"不限制" ——
+// 一个 limit=99999999999999999999 的请求变成"返回全表"。
+func TestQueryIntOverflowIsClamped(t *testing.T) {
+	mk := func(q string) *http.Request {
+		return httptest.NewRequest(http.MethodGet, "/"+q, nil)
+	}
+	if got := queryInt(mk("?limit=25"), "limit", 7); got != 25 {
+		t.Errorf("limit=25 → %d,期望 25", got)
+	}
+	if got := queryInt(mk("?limit="), "limit", 7); got != 7 {
+		t.Errorf("空 limit → %d,期望默认值 7", got)
+	}
+	if got := queryInt(mk("?limit=abc"), "limit", 7); got != 7 {
+		t.Errorf("非数字 limit → %d,期望默认值 7", got)
+	}
+	if got := queryInt(mk("?limit=99999999999999999999"), "limit", 7); got != maxQueryLimit {
+		t.Errorf("溢出 limit → %d,期望收敛到 %d(不得为负数或全表)", got, maxQueryLimit)
+	}
+	if got := queryInt(mk("?limit=999999"), "limit", 7); got != maxQueryLimit {
+		t.Errorf("超上限 limit → %d,期望收敛到 %d", got, maxQueryLimit)
+	}
+}
+
+// TestWorkflowVersionPathRejectsOverflow:版本号路径参数同样用 int 累加
+// 解析,溢出后会变成负数/垃圾值,再去查版本快照(必然 404 但错误码不对)。
+func TestWorkflowVersionPathRejectsOverflow(t *testing.T) {
+	s := newTestServer(t)
+	seedWorkflow(t, s, "wf-ver")
+
+	code, body, raw := doReq(t, s, http.MethodGet, "/api/workflows/wf-ver/versions/99999999999999999999", "")
+	if code != http.StatusBadRequest {
+		t.Fatalf("溢出版本号 → %d,期望 400(%s)", code, raw)
+	}
+	assertErrorBody(t, "溢出版本号", body, raw, "")
+
+	// 正常版本号仍可用
+	code, _, raw = doReq(t, s, http.MethodGet, "/api/workflows/wf-ver/versions/1", "")
+	if code != http.StatusOK {
+		t.Errorf("版本 1 → %d(%s)", code, raw)
+	}
+}
+
+// TestBackupResponseIsNotCacheable:备份导出是约定 8 唯一允许含明文
+// 凭据的出口,必须显式禁止缓存,否则浏览器/代理可能把明文 API Key
+// 留在磁盘缓存里。
+func TestBackupResponseIsNotCacheable(t *testing.T) {
+	s := newTestServer(t)
+
+	w := doServe(t, s, http.MethodGet, "/api/backup", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/backup → %d(%s)", w.Code, w.Body.String())
+	}
+	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Errorf("备份导出 Cache-Control = %q,期望含 no-store", cc)
+	}
+}
+
+// TestExecutionNodeOutputMaskedAtAPI:节点明细的 output/error 直接来自
+// Agent 的 stdout/stderr(常含 ANTHROPIC_API_KEY=sk-... 这类凭据)。
+// 事件流已在总线出口脱敏,但节点明细是直写 SQLite、原样返回 ——
+// API 读出口必须再脱敏一次(约定 8)。
+func TestExecutionNodeOutputMaskedAtAPI(t *testing.T) {
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+
+	const secret = "ANTHROPIC_API_KEY=sk-live-should-not-leak"
+	exec := &model.Execution{ID: "exec-mask", WorkflowID: "wf-x", State: model.ExecutionCompleted}
+	if err := a.Repo.SaveExecution(exec); err != nil {
+		t.Fatalf("save execution: %v", err)
+	}
+	if err := a.Repo.SaveExecutionNode(&model.ExecutionNode{
+		ID:          "exec-mask:n1:1",
+		ExecutionID: exec.ID,
+		NodeID:      "n1",
+		NodeType:    model.NodeTypeAgent,
+		State:       model.NodeSuccess,
+		Output:      "cli stderr: " + secret,
+		Error:       "failed: " + secret,
+	}); err != nil {
+		t.Fatalf("save node: %v", err)
+	}
+
+	s := NewServer(a)
+	_, _, raw := doReq(t, s, http.MethodGet, "/api/executions/exec-mask/nodes", "")
+	if strings.Contains(string(raw), "sk-live-should-not-leak") {
+		t.Errorf("节点明细接口泄漏明文凭据: %s", raw)
+	}
+	_, _, raw = doReq(t, s, http.MethodGet, "/api/executions/exec-mask/export", "")
+	if strings.Contains(string(raw), "sk-live-should-not-leak") {
+		t.Errorf("执行导出接口泄漏明文凭据: %s", raw)
+	}
+}
+
+// TestJSONBodyTooLargeReturns413:超限请求体此前一律 400 + 一句
+// "http: request body too large"(语义不对:这是 413 的场景),
+// 且各端点表现不一。现在统一 413 + code=PAYLOAD_TOO_LARGE。
+func TestJSONBodyTooLargeReturns413(t *testing.T) {
+	s := newTestServer(t)
+	huge := `{"task":"` + strings.Repeat("x", 2<<20) + `"}`
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/api/workflows"},
+		{http.MethodPost, "/api/backup/restore"},
+		{http.MethodPost, "/api/workflows/wf-x/run"},
+		{http.MethodPost, "/api/workflows/validate"},
+		{http.MethodPost, "/api/workflows/import"},
+	} {
+		req := httptest.NewRequest(c.method, c.path, strings.NewReader(huge))
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s %s → %d,期望 413(%s)", c.method, c.path, w.Code, w.Body.String())
+			continue
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Errorf("%s %s: 错误体不是 JSON: %s", c.method, c.path, w.Body.String())
+			continue
+		}
+		if body["code"] != "PAYLOAD_TOO_LARGE" {
+			t.Errorf("%s %s: code = %v,期望 PAYLOAD_TOO_LARGE", c.method, c.path, body["code"])
+		}
+	}
+}
+
+// TestInvalidJSONHasStructuredCode:非法 JSON 的错误体必须带结构化 code,
+// 消费方(前端 ApiError)才能按 code 分支而不是解析文本。
+func TestInvalidJSONHasStructuredCode(t *testing.T) {
+	s := newTestServer(t)
+
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodPost, "/api/workflows/validate", `not-json`},
+		{http.MethodPost, "/api/backup/restore", `{`},
+		{http.MethodPost, "/api/settings", `not-json`},
+	} {
+		code, body, raw := doReq(t, s, c.method, c.path, c.body)
+		if code != http.StatusBadRequest {
+			t.Errorf("%s %s → %d,期望 400(%s)", c.method, c.path, code, raw)
+			continue
+		}
+		assertErrorBody(t, c.path, body, raw, "INVALID_JSON")
 	}
 }

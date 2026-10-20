@@ -768,3 +768,166 @@ func TestRestoreBackupRejectsBrokenAgentConfig(t *testing.T) {
 		t.Error("非法配置不应落库")
 	}
 }
+
+// 回归:Git 工作目录必须先落库再改内存。
+// GitService.SetWorkingDir 此前反过来(先改内存再落库):落库失败时
+// 接口返回错误,但内存态已经被改掉 —— 界面提示"失败",Git 面板却已经
+// 指向新目录;重启后又回到旧目录。与 SettingsService.Update 的
+// "先落库"约定不一致。
+func TestGitSetWorkingDirPersistsBeforeMemory(t *testing.T) {
+	a := newTestApp(t)
+	before := a.GitSvc.WorkingDir()
+	_ = a.Repo.Close() // 之后所有写入都会失败
+
+	if err := a.GitAPI.SetWorkingDir("/tmp/should-not-apply"); err == nil {
+		t.Fatal("持久化失败应上抛")
+	}
+	if a.GitSvc.WorkingDir() != before {
+		t.Errorf("落库失败时内存态不应改变: %q → %q", before, a.GitSvc.WorkingDir())
+	}
+}
+
+// 回归:SetPermission 是"读整表 → 改一项 → 写整表"的读-改-写。
+// 并发调用(多 Agent 分别授权)会互相覆盖:后写者拿着旧快照写回,
+// 先写者的策略被整条抹掉 —— 用户看到"某个 Agent 的权限莫名恢复默认"。
+//
+// 检测方式:每次写入后回读全表,若某个"曾经确认存在"的键消失,
+// 即为丢更新(只看最终状态会漏检:丢更新是瞬态的,后续写入会补回)。
+func TestSetPermissionConcurrentNoLostUpdate(t *testing.T) {
+	a := newTestApp(t)
+	ids := []string{"claude-code", "pi-agent", "mock-claude", "mock-pi"}
+
+	var mu sync.Mutex
+	written := map[string]bool{} // 已完成写入的键
+	present := map[string]bool{} // 回读时确认存在过的键
+	lost := []string{}           // 曾经存在、随后消失的键
+
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			for i := 0; i < 30; i++ {
+				if err := a.AgentSvc.SetPermission(id, permission.Policy{
+					FilesystemRead: true,
+					GitRead:        i%2 == 0,
+				}); err != nil {
+					t.Errorf("SetPermission(%s): %v", id, err)
+					return
+				}
+				var policies map[string]map[string]any
+				if err := a.Repo.GetSetting("agent_policies", &policies); err != nil {
+					t.Errorf("读取权限表失败: %v", err)
+					return
+				}
+				mu.Lock()
+				written[id] = true
+				for k := range written {
+					if _, ok := policies[k]; ok {
+						present[k] = true
+					} else if present[k] {
+						lost = append(lost, k)
+					}
+				}
+				mu.Unlock()
+			}
+		}(id)
+	}
+	wg.Wait()
+
+	if len(lost) > 0 {
+		t.Errorf("并发写入丢失了权限策略: %v", lost)
+	}
+	var policies map[string]map[string]any
+	if err := a.Repo.GetSetting("agent_policies", &policies); err != nil {
+		t.Fatalf("读取权限表失败: %v", err)
+	}
+	for _, id := range ids {
+		if _, ok := policies[id]; !ok {
+			t.Errorf("最终权限表缺少 %s: %v", id, policies)
+		}
+	}
+}
+
+// 回归:备份里出现本机不存在的 Agent 时,配置既无法生效(applyAgentConfig
+// 对未知 ID 静默跳过)也不该被计入"已恢复" —— 此前计数为已恢复,
+// 用户以为凭据恢复了,实际库里躺着一行永远不会被读取的配置。
+func TestRestoreBackupSkipsUnknownAgent(t *testing.T) {
+	a := newTestApp(t)
+
+	backup := map[string]any{
+		"version":   1,
+		"workflows": []any{},
+		"agent_configs": map[string]any{
+			"claude-code": map[string]any{"model": "m", "env": map[string]any{"TOK": "sk"}},
+			"ghost-agent": map[string]any{"model": "m2"},
+		},
+	}
+	res, err := a.Settings.RestoreBackup(backup)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if n, _ := res["agent_configs_restored"].(int); n != 1 {
+		t.Errorf("agent_configs_restored = %v,期望 1", res["agent_configs_restored"])
+	}
+	if n, _ := res["agent_configs_invalid"].(int); n != 1 {
+		t.Errorf("agent_configs_invalid = %v,期望 1(未知 Agent 不该算已恢复)", res["agent_configs_invalid"])
+	}
+	raw, err := a.Repo.GetAgentConfig("ghost-agent")
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if raw != nil {
+		t.Errorf("未知 Agent 的配置不应落库: %s", raw)
+	}
+	// 已知 Agent 的配置仍然落库且生效
+	cfg, err := a.AgentSvc.GetConfig("claude-code")
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if cfg.Env["TOK"] != agent.MaskedValue {
+		t.Errorf("已知 Agent 的配置未恢复: %v", cfg.Env)
+	}
+}
+
+// 回归:节点明细的 output/error 直接来自 Agent 的 stdout/stderr,
+// 常含 ANTHROPIC_API_KEY=sk-... 这类凭据。事件流在总线出口已脱敏,
+// 但节点明细是直写 SQLite、原样返回 —— API 读出口必须再脱敏一次。
+func TestExecutionNodesOutputIsMasked(t *testing.T) {
+	a := newTestApp(t)
+
+	const secret = "ANTHROPIC_API_KEY=sk-live-should-not-leak"
+	exec := &model.Execution{ID: "exec-mask", WorkflowID: "wf-x", State: model.ExecutionCompleted}
+	if err := a.Repo.SaveExecution(exec); err != nil {
+		t.Fatalf("save execution: %v", err)
+	}
+	if err := a.Repo.SaveExecutionNode(&model.ExecutionNode{
+		ID:          "exec-mask:n1:1",
+		ExecutionID: exec.ID,
+		NodeID:      "n1",
+		NodeType:    model.NodeTypeAgent,
+		State:       model.NodeSuccess,
+		Output:      "cli stderr: " + secret,
+		Error:       "failed: " + secret,
+	}); err != nil {
+		t.Fatalf("save node: %v", err)
+	}
+
+	nodes, err := a.Executions.Nodes(exec.ID)
+	if err != nil {
+		t.Fatalf("nodes: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("nodes = %d 条,期望 1", len(nodes))
+	}
+	if strings.Contains(nodes[0].Output, "sk-live-should-not-leak") {
+		t.Errorf("节点输出泄漏明文凭据: %q", nodes[0].Output)
+	}
+	if strings.Contains(nodes[0].Error, "sk-live-should-not-leak") {
+		t.Errorf("节点错误泄漏明文凭据: %q", nodes[0].Error)
+	}
+	// 非敏感的正常输出不受影响
+	if !strings.Contains(nodes[0].Output, "cli stderr:") {
+		t.Errorf("正常输出被误伤: %q", nodes[0].Output)
+	}
+}

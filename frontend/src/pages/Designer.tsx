@@ -35,8 +35,8 @@ import {
   ShieldCheck,
   LayoutGrid,
 } from "lucide-react";
-import { api } from "@/lib/api";
-import type { ValidationError, Workflow, WFNode } from "@/lib/types";
+import { api, asArray } from "@/lib/api";
+import type { AgentInfo, ValidationError, Workflow, WFNode } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -159,7 +159,14 @@ function DesignerInner() {
   const { fitView } = useReactFlow();
 
   useEffect(() => {
-    api.listAgents().then((as) => setAgents(as.map((a) => a.id))).catch(() => {});
+    // asArray 而非直接 .map:桌面 IPC 与 SPA fallback 异常路径下
+    // api.listAgents() 可能返回 null 或 HTML 兜底页对象,
+    // 直接 .map 抛 TypeError 且被下面的 catch 吞掉 —— 界面只剩一个空的
+    // Agent 下拉框,没有任何提示。
+    api
+      .listAgents()
+      .then((as) => setAgents(asArray<AgentInfo>(as).map((a) => a.id)))
+      .catch(() => {});
   }, []);
 
   // Cmd/Ctrl+S 快捷保存

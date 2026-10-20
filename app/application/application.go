@@ -318,10 +318,18 @@ func (a *App) reloadAgents() {
 	if saved, err := a.Repo.ListAgentConfigs(); err == nil {
 		for id, raw := range saved {
 			cfg := agent.AgentConfig{}
-			if json.Unmarshal(raw, &cfg) == nil {
-				_ = a.applyAgentConfig(id, cfg)
+			if err := json.Unmarshal(raw, &cfg); err != nil {
+				// 损坏的配置此前被静默跳过:配置在库里却不生效,排查时
+				// 看不出是哪一步坏的。至少留一条告警。
+				logx.Warn("Agent 配置解析失败,已跳过", "agent", id, "error", err.Error())
+				continue
+			}
+			if err := a.applyAgentConfig(id, cfg); err != nil {
+				logx.Warn("Agent 配置应用失败", "agent", id, "error", err.Error())
 			}
 		}
+	} else {
+		logx.Warn("读取 Agent 配置失败", "error", err.Error())
 	}
 }
 
@@ -417,6 +425,14 @@ func (a *App) Subscribe(h func(event.UIEvent)) func() {
 		defer a.eventsMu.Unlock()
 		delete(a.eventHandlers, id)
 	}
+}
+
+// EventSubscriberCount 返回当前注册的 UI 事件订阅者数量。
+// 用于观察 SSE 连接断开后订阅是否释放(连接泄漏的可观测点)。
+func (a *App) EventSubscriberCount() int {
+	a.eventsMu.RLock()
+	defer a.eventsMu.RUnlock()
+	return len(a.eventHandlers)
 }
 
 // ConnectEvents 把总线事件桥接到 UI 处理器。
@@ -620,7 +636,14 @@ func (s *ExecutionService) Nodes(id string) ([]*model.ExecutionNode, error) {
 	if _, err := s.app.Repo.GetExecution(id); err != nil {
 		return nil, err
 	}
-	return s.app.Repo.ListExecutionNodes(id)
+	nodes, err := s.app.Repo.ListExecutionNodes(id)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range nodes {
+		maskNode(n)
+	}
+	return nodes, nil
 }
 
 func (s *ExecutionService) Events(id string) ([]map[string]any, error) {
@@ -667,6 +690,9 @@ func (s *ExecutionService) Export(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, n := range nodes {
+		maskNode(n)
+	}
 	events, err := s.app.Repo.ListEvents(id, 0)
 	if err != nil {
 		return nil, err
@@ -681,6 +707,40 @@ func (s *ExecutionService) Export(id string) (map[string]any, error) {
 		"events":    events,
 		"artifacts": artifacts,
 	}, nil
+}
+
+// maskNode 脱敏节点明细里的自由文本(output/error/result_json)。
+// 这些字段直接来自 Agent 的 stdout/stderr,常含 "ANTHROPIC_API_KEY=sk-..."
+// 这类凭据:事件流已在总线出口脱敏,但节点明细是直写 SQLite、原样返回 ——
+// API 读出口必须再脱敏一次(约定 8:API 返回掩码)。
+func maskNode(n *model.ExecutionNode) {
+	if n == nil {
+		return
+	}
+	n.Output = logx.Mask(n.Output)
+	n.Error = logx.Mask(n.Error)
+	n.ResultJSON = maskResultJSON(n.ResultJSON)
+}
+
+// maskResultJSON 对 result_json 做结构化脱敏(解析 → 脱敏 → 重新序列化)。
+// 直接对 JSON 文本做正则替换可能破坏转义引号,产出非法 JSON。
+func maskResultJSON(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	var obj any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return logx.Mask(raw)
+	}
+	masked, ok := logx.MaskValue(obj).(map[string]any)
+	if !ok {
+		return logx.Mask(raw)
+	}
+	out, err := json.Marshal(masked)
+	if err != nil {
+		return logx.Mask(raw)
+	}
+	return string(out)
 }
 
 // Delete 删除执行记录(级联删除节点/事件/制品)。
@@ -698,6 +758,11 @@ func (s *ExecutionService) RetryNode(id string, skip bool) (*model.Execution, er
 // AgentService Agent 管理与权限配置。
 type AgentService struct {
 	app *App
+	// permMu 保护 agent_policies 设置项的"读整表 → 改一项 → 写整表"。
+	// 此前是裸读-改-写:并发授权(多 Agent 分别设置权限)会互相覆盖,
+	// 后写者拿着旧快照写回,先写者的策略整条丢失 —— 权限面板上表现为
+	// "某个 Agent 的权限莫名恢复默认"。
+	permMu sync.Mutex
 }
 
 func (s *AgentService) List() []map[string]any {
@@ -724,6 +789,9 @@ func (s *AgentService) SetPermission(id string, policy permission.Policy) error 
 	if err := s.app.requireAgent(id); err != nil {
 		return err
 	}
+	// 整表读-改-写必须串行化(见 permMu):并发调用会丢更新。
+	s.permMu.Lock()
+	defer s.permMu.Unlock()
 	// 注意:读失败必须上抛。此前吞掉错误后 configs 为 nil → 重建空 map,
 	// 随后的整表写会把其他 Agent 已配置的权限策略全部清空。
 	var configs map[string]map[string]any
@@ -916,9 +984,14 @@ func (s *GitService) Commit(ctx context.Context, message string) (string, error)
 }
 
 // SetWorkingDir 更新 Git 工作目录。
+// 先落库再改内存:此前反过来,落库失败时接口返回错误但内存态已被改掉
+// (界面提示失败,Git 面板却已指向新目录;重启后又回到旧目录)。
 func (s *GitService) SetWorkingDir(dir string) error {
+	if err := s.app.Repo.SaveSetting("git_working_dir", dir); err != nil {
+		return err
+	}
 	s.app.GitSvc.SetWorkingDir(dir)
-	return s.app.Repo.SaveSetting("git_working_dir", dir)
+	return nil
 }
 
 // ---- SettingsService ----
@@ -1032,12 +1105,21 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 	}
 	restoredCfg := 0
 	invalidCfg := 0
+	unknownCfgIDs := []string{}
 	for id, raw := range norm.AgentConfigs {
 		cfg := agent.AgentConfig{}
 		// 配置解不出结构就不能落库:此前无条件写入,解不出时静默跳过应用,
 		// 结果是"库里有配置但运行不生效",排查时看不出是哪一步坏的。
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			invalidCfg++
+			continue
+		}
+		// 未知 Agent:配置永远不会被应用(applyAgentConfig 对未知 ID
+		// 静默跳过),落库只是留一行死数据,还会让"已恢复 N 个"变成假成功
+		// —— 用户以为凭据恢复了,实际运行时根本没带上。
+		if _, err := s.app.Agents.Get(id); err != nil {
+			invalidCfg++
+			unknownCfgIDs = append(unknownCfgIDs, id)
 			continue
 		}
 		if err := s.app.Repo.SaveAgentConfig(id, raw); err != nil {
@@ -1053,7 +1135,23 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 		"workflows_invalid_ids":  invalidIDs,
 		"agent_configs_restored": restoredCfg,
 		"agent_configs_invalid":  invalidCfg,
+		// 本机不存在的 Agent(配置无法生效,未落库)
+		"agent_configs_unknown_ids": unknownCfgIDs,
 	}, nil
+}
+
+// validLogLevels 是允许的日志级别。
+// logx.SetLevel 对未知值静默回落 info,若不在此拒绝,界面显示的级别
+// 与实际生效的级别会不一致(显示 debug、实际 info),属于静默丢弃
+// 校验错误。
+var validLogLevels = map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
+
+// validateLogLevel 校验日志级别(大小写不敏感)。
+func validateLogLevel(level string) error {
+	if !validLogLevels[strings.ToLower(level)] {
+		return fmt.Errorf("日志级别非法: %q(可选 debug|info|warn|error)", level)
+	}
+	return nil
 }
 
 func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNodes *bool) (*SettingsInfo, error) {
@@ -1066,11 +1164,15 @@ func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNode
 		s.app.GitSvc.SetWorkingDir(gitWorkingDir)
 	}
 	if logLevel != "" {
-		if err := s.Set("log_level", logLevel); err != nil {
+		if err := validateLogLevel(logLevel); err != nil {
 			return nil, err
 		}
-		s.app.setLogLevel(logLevel)
-		logx.SetLevel(logLevel)
+		level := strings.ToLower(logLevel)
+		if err := s.Set("log_level", level); err != nil {
+			return nil, err
+		}
+		s.app.setLogLevel(level)
+		logx.SetLevel(level)
 	}
 	if allowScriptNodes != nil {
 		if err := s.Set("allow_script_nodes", *allowScriptNodes); err != nil {

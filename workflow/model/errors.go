@@ -30,7 +30,14 @@ type Error struct {
 	Node    string    `json:"node,omitempty"`
 	Message string    `json:"message"`
 	Detail  string    `json:"detail,omitempty"`
+	// cause 保存被包装的原始错误(AsError 兜底分支填入)。
+	// 不导出 → 不进 JSON(前端只看到 kind/code/node/message/detail),
+	// 但保留原始错误链,errors.Is / errors.As 能一路挖到根因。
+	cause error
 }
+
+// Unwrap 暴露被包装的原始错误,使 errors.Is / errors.As 能穿透到根因。
+func (e *Error) Unwrap() error { return e.cause }
 
 func (e *Error) Error() string {
 	if e.Node != "" {
@@ -53,7 +60,9 @@ func AsError(err error) *Error {
 	if errors.As(err, &se) {
 		return se
 	}
-	return &Error{Kind: KindWorkflowError, Code: "INTERNAL", Message: err.Error()}
+	// 兜底:保留原始错误(cause),调用方既能拿到统一结构,
+	// 又能 errors.Is(err, 原始错误) 找回根因。
+	return &Error{Kind: KindWorkflowError, Code: "INTERNAL", Message: err.Error(), cause: err}
 }
 
 // IsKind 判断错误链中是否包含指定分类的错误。

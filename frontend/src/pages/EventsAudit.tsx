@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { api, asArray, subscribeEvents } from "@/lib/api";
+import { createRefreshDebounce } from "@/lib/debounce";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,14 +49,16 @@ export default function EventsAudit() {
   useEffect(() => {
     refresh();
     // 实时事件防抖刷新:agent.output 等高频事件不应逐条触发全量拉取
-    let timer: number | undefined;
+    // (约定 7:一律 200ms)
+    const trigger = createRefreshDebounce(() => {
+      void refresh();
+    });
     const unsub = subscribeEvents(() => {
-      if (timer) window.clearTimeout(timer);
-      timer = window.setTimeout(() => refresh(), 200);
+      trigger();
     });
     return () => {
       unsub();
-      if (timer) window.clearTimeout(timer);
+      trigger.cancel();
     };
   }, [refresh]);
 

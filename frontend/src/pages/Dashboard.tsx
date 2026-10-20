@@ -9,6 +9,7 @@ import {
   ArrowRight,
 } from "lucide-react";
 import { api, asArray, subscribeEvents } from "@/lib/api";
+import { createRefreshDebounce } from "@/lib/debounce";
 import type { Execution, Workflow } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -43,11 +44,19 @@ export default function Dashboard() {
     api.listWorkflows().then((x) => setWorkflows(asArray<Workflow>(x))).catch(() => {});
     api.listExecutions("", 8).then((x) => setExecutions(asArray<Execution>(x))).catch(() => {});
     api.stats().then((x) => setStats(asArray<WfStats>(x))).catch(() => {});
-    const unsub = subscribeRefresh(() => {
+    // 实时事件防抖刷新(约定 7:一律 200ms):workflow.* 事件成串到达时
+    // 合并为一次拉取,避免请求数与事件数一一对应。
+    const trigger = createRefreshDebounce(() => {
       api.listExecutions("", 8).then((x) => setExecutions(asArray<Execution>(x))).catch(() => {});
       api.stats().then((x) => setStats(asArray<WfStats>(x))).catch(() => {});
     });
-    return unsub;
+    const unsub = subscribeEvents((ev) => {
+      if (ev.type.startsWith("workflow.")) trigger();
+    });
+    return () => {
+      unsub();
+      trigger.cancel();
+    };
   }, []);
 
   // 状态卡片取全量聚合(stats 端点):仅按最近 8 条统计会漏掉
@@ -234,12 +243,6 @@ export default function Dashboard() {
       </div>
     </div>
   );
-}
-
-function subscribeRefresh(fn: () => void): () => void {
-  return subscribeEvents((ev) => {
-    if (ev.type.startsWith("workflow.")) fn();
-  });
 }
 
 function StatCard({

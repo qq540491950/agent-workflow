@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CheckCircle2, XCircle, Circle, PauseCircle, Ban } from "lucide-react";
 import { api, asArray, subscribeEvents } from "@/lib/api";
+import { createRefreshDebounce } from "@/lib/debounce";
 import type { Artifact, Execution, ExecutionNode, UIEvent } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -131,18 +132,20 @@ export default function ExecutionMonitor() {
 
   useEffect(() => {
     refresh();
-    // 实时事件:匹配当前执行则刷新
-    const pending: UIEvent[] = [];
-    let timer: number | undefined;
+    // 实时事件:匹配当前执行则刷新。
+    // 防抖窗口统一走 createRefreshDebounce(约定 7:一律 200ms)——
+    // 此处此前是 120ms,与 Layout/EventsAudit 不一致,高频 node.* 事件下
+    // 会打出比预期更密的刷新。
+    const trigger = createRefreshDebounce(() => {
+      void refresh();
+    });
     const unsub = subscribeEvents((ev) => {
       if (ev.execution_id !== id) return;
-      pending.push(ev);
-      if (timer) window.clearTimeout(timer);
-      timer = window.setTimeout(refresh, 120);
+      trigger();
     });
     return () => {
       unsub();
-      if (timer) window.clearTimeout(timer);
+      trigger.cancel();
     };
   }, [id, refresh]);
 

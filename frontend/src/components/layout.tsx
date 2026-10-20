@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, asArray, detectMode, subscribeEvents } from "@/lib/api";
+import { createRefreshDebounce } from "@/lib/debounce";
 import type { Execution } from "@/lib/types";
 
 const nav = [
@@ -53,21 +54,20 @@ export default function Layout() {
         .catch(() => {});
     };
     refresh();
-    // 防抖:node.* 等高频事件不应逐条触发执行列表拉取
-    let timer: number | undefined;
+    // 防抖:node.* 等高频事件不应逐条触发执行列表拉取(约定 7:一律 200ms)
+    const trigger = createRefreshDebounce(refresh);
     const unsub = subscribeEvents((ev) => {
       if (
         ev.type.startsWith("workflow.") ||
         ev.type.startsWith("node.") ||
         ev.type === "human.input_required"
       ) {
-        if (timer) window.clearTimeout(timer);
-        timer = window.setTimeout(refresh, 200);
+        trigger();
       }
     });
     return () => {
       unsub();
-      if (timer) window.clearTimeout(timer);
+      trigger.cancel();
     };
   }, [location.pathname]);
 

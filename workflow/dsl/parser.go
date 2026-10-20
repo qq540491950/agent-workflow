@@ -60,14 +60,18 @@ func trimSpaceStart(b []byte) []byte {
 
 // ToModel 将 DSL 文档转换为领域模型 Workflow(不含持久化元数据)。
 // 转换过程只做结构映射,不做语义校验(校验由 validator 负责)。
+//
+// 转换是**纯函数**:不修改文档本身,也不与文档共享 map。
+// 此前直接复用 n.Rest 并从中 delete 结构化字段,等于把调用方的
+// 文档改掉了(且模型与文档共享同一张 map,改一边另一边跟着变)。
 func (d *Document) ToModel() *model.Workflow {
 	wf := &model.Workflow{
 		ID:          d.Workflow.ID,
 		Name:        d.Workflow.Name,
 		Description: d.Workflow.Description,
 		Enabled:     d.Workflow.Enabled == nil || *d.Workflow.Enabled,
-		Variables:   d.Variables,
-		Permission:  d.Permission,
+		Variables:   copyMap(d.Variables),
+		Permission:  copyMap(d.Permission),
 		Settings: model.WorkflowSettings{
 			MaxIterations:  d.Settings.MaxIterations,
 			OnLoopLimit:    d.Settings.OnLoopLimit,
@@ -79,8 +83,14 @@ func (d *Document) ToModel() *model.Workflow {
 	if wf.Variables == nil {
 		wf.Variables = map[string]any{}
 	}
+	// 数值类型在这里钉死一次:YAML 的整数是 uint64、JSON 的整数是 float64,
+	// 归一成 int 后模型里的数值语义稳定 —— 运行期的读取点(cfgInt /
+	// retryPolicyOf)只认 int 与 float64,uint64 会被当成 0
+	// (节点级 timeout_seconds / retry.max_attempts 静默失效)。
+	model.NormalizeStateJSON(wf.Variables)
+	model.NormalizeStateJSON(wf.Permission)
 	for _, n := range d.Nodes {
-		cfg := n.Rest
+		cfg := copyMap(n.Rest)
 		if cfg == nil {
 			cfg = map[string]any{}
 		}
@@ -88,6 +98,7 @@ func (d *Document) ToModel() *model.Workflow {
 		for _, k := range []string{"x", "y", "id", "name", "type"} {
 			delete(cfg, k)
 		}
+		model.NormalizeStateJSON(cfg)
 		mn := model.Node{
 			ID:     n.ID,
 			Name:   n.Name,
@@ -111,14 +122,42 @@ func (d *Document) ToModel() *model.Workflow {
 	return wf
 }
 
+// copyMap 深复制一张 map(nil → nil),避免文档与模型共享可变状态。
+func copyMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	out := make(map[string]any, len(src))
+	for k, v := range src {
+		out[k] = copyValue(v)
+	}
+	return out
+}
+
+// copyValue 深复制 map / slice 里的值(其余类型按值语义复制)。
+func copyValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return copyMap(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, item := range t {
+			out[i] = copyValue(item)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
 // FromModel 将领域模型 Workflow 序列化回 DSL Document(用于导出 YAML)。
 func FromModel(wf *model.Workflow) *Document {
 	enabled := wf.Enabled
 	doc := &Document{
 		Version:    "1",
 		Workflow:   WorkflowMeta{ID: wf.ID, Name: wf.Name, Description: wf.Description, Enabled: &enabled},
-		Variables:  wf.Variables,
-		Permission: wf.Permission,
+		Variables:  copyMap(wf.Variables),
+		Permission: copyMap(wf.Permission),
 		Settings: Settings{
 			MaxIterations:  wf.Settings.MaxIterations,
 			OnLoopLimit:    wf.Settings.OnLoopLimit,

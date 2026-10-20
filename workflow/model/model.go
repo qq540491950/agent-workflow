@@ -2,7 +2,10 @@
 // 这些模型是平台无关的:既不依赖 UI,也不依赖具体的 Workflow Runtime(ADK)。
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // NodeType 标识 Node 的类型。类型是可注册扩展的,不写死在 UI 或 Engine 中。
 type NodeType string
@@ -18,6 +21,26 @@ const (
 	NodeTypeGit         NodeType = "git"
 	NodeTypeSubWorkflow NodeType = "subworkflow"
 )
+
+// AllNodeTypes 返回当前注册的全部节点类型。
+//
+// 节点类型清单只有这一份(model 是常量定义的所在处);validator 与
+// compiler 都引用这些常量。新增节点类型时把常量加进来即可,枚举函数
+// 与测试(validator 接受的类型集合 == 本集合)随之更新,不会出现
+// "运行期支持但校验期判非法"的第二份清单(AGENTS.md 硬性约定 #13)。
+func AllNodeTypes() []NodeType {
+	return []NodeType{
+		NodeTypeAgent,
+		NodeTypeSkill,
+		NodeTypeCondition,
+		NodeTypeParallel,
+		NodeTypeMerge,
+		NodeTypeHuman,
+		NodeTypeScript,
+		NodeTypeGit,
+		NodeTypeSubWorkflow,
+	}
+}
 
 // Position 是节点在画布上的坐标。
 type Position struct {
@@ -213,7 +236,7 @@ func (w *Workflow) IncomingEdges(nodeID string) []Edge {
 	return out
 }
 
-// NormalizeStateJSON 在**读取边界**把 state_json 还原出的数值统一成 int。
+// NormalizeStateJSON 在**读取边界**把无类型数值统一成 int。
 //
 // 背景(轮次 29):`StateData` 来自 ADK 会话状态快照,执行期内存里是 int,
 // 经 SQLite `state_json` 持久化往返后 encoding/json 把它解成 float64。
@@ -227,30 +250,71 @@ func (w *Workflow) IncomingEdges(nodeID string) []Edge {
 //   - 数值语义(计数、attempt、下标)在整个生命周期内稳定;
 //   - 未来新增读取点不会再踩同一个坑。
 //
-// 只转换"JSON 数字且无小数部分"的值 —— 带小数的确实是浮点语义
+// 只转换"整数语义"的值 —— 带小数的确实是浮点语义
 // (如有),保持 float64 不动。无法识别的值原样保留。
+//
+// 除 JSON 往返(float64)外,YAML inline map 里的整数(goccy/go-yaml
+// 解成 uint64)也一并归一,避免同一字段出现第三种数值类型。
 func NormalizeStateJSON(data map[string]any) map[string]any {
 	if data == nil {
 		return nil
 	}
 	for k, v := range data {
-		switch n := v.(type) {
-		case float64:
-			// JSON 无 int/float 之分,所有数字都解成 float64。
-			// 整数值的转成 int,让类型在往返前后一致。
-			if n == float64(int64(n)) {
-				data[k] = int(n)
-			}
-		case []any:
-			// 嵌套数组(如 guard 的 history)同样归一
-			for i, item := range n {
-				if f, ok := item.(float64); ok && f == float64(int64(f)) {
-					n[i] = int(f)
-				}
-			}
-		case map[string]any:
-			NormalizeStateJSON(n)
-		}
+		data[k] = normalizeJSONNumbers(v)
 	}
 	return data
+}
+
+// normalizeJSONNumbers 递归地把无类型数值统一成 int。
+//
+// 两类来源:
+//   - float64:JSON 往返后所有数字都是 float64(约定 2);
+//   - uint64 :YAML inline map 里的整数(goccy/go-yaml 的默认行为)。
+//
+// 两者不统一就会出现"同一字段三种类型"(int / float64 / uint64):
+// 运行期的读取点(cfgInt / retryPolicyOf)只认 int 与 float64,
+// uint64 会被静默当成 0 —— 节点级 timeout_seconds / retry.max_attempts
+// 直接失效。
+//
+// 递归覆盖数组里的 map / 数组:此前只处理"数组里的裸 float64",
+// 形如 []any{map[string]any{"n": 1.0}} 的嵌套结构会漏掉 ——
+// 解码边界就该一次性把类型钉死,漏一处就是一个静默的类型不一致。
+func normalizeJSONNumbers(v any) any {
+	switch n := v.(type) {
+	case float64:
+		// JSON 无 int/float 之分,所有数字都解成 float64。
+		// 整数值的转成 int,让类型在往返前后一致。
+		if isWholeJSONNumber(n) {
+			return int(n)
+		}
+		return n
+	case uint64:
+		if n <= math.MaxInt64 {
+			return int(n)
+		}
+		return n
+	case []any:
+		for i, item := range n {
+			n[i] = normalizeJSONNumbers(item)
+		}
+		return n
+	case map[string]any:
+		NormalizeStateJSON(n)
+		return n
+	}
+	return v
+}
+
+// isWholeJSONNumber 判断一个 float64 是否是 int64 范围内的整数。
+// 超出 int64 范围(如 1e20)、NaN、Inf 一律视为浮点语义,保持 float64。
+func isWholeJSONNumber(n float64) bool {
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		return false
+	}
+	if n != math.Trunc(n) {
+		return false
+	}
+	// math.MaxInt64 转 float64 后是 2^63(不可表示为 int64),
+	// 因此用 >= 排除该边界值。
+	return n >= math.MinInt64 && n < math.MaxInt64
 }

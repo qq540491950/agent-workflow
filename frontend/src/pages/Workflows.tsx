@@ -214,7 +214,14 @@ export default function Workflows() {
                   <Switch
                     checked={w.enabled}
                     onCheckedChange={async (v) => {
-                      await api.setEnabled(w.id, v);
+                      // 此前是裸 await:失败时是 unhandled rejection,
+                      // 界面毫无反馈,用户以为开关坏了。
+                      try {
+                        await api.setEnabled(w.id, v);
+                      } catch (e) {
+                        toast.error((e as Error).message);
+                        return;
+                      }
                       refresh();
                     }}
                   />
@@ -249,33 +256,45 @@ export default function Workflows() {
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem
                           onClick={async () => {
-                            await api.duplicateWorkflow(w.id);
-                            toast.success("已复制");
-                            refresh();
+                            try {
+                              await api.duplicateWorkflow(w.id);
+                              toast.success("已复制");
+                              refresh();
+                            } catch (e) {
+                              toast.error((e as Error).message);
+                            }
                           }}
                         >
                           <Copy className="mr-2 h-4 w-4" /> 复制
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           onClick={async () => {
-                            const yml = await api.exportYAML(w.id);
-                            const blob = new Blob([yml], { type: "text/yaml" });
-                            const a = document.createElement("a");
-                            a.href = URL.createObjectURL(blob);
-                            a.download = `${w.id}.yaml`;
-                            a.click();
+                            try {
+                              const yml = await api.exportYAML(w.id);
+                              const blob = new Blob([yml], { type: "text/yaml" });
+                              const a = document.createElement("a");
+                              a.href = URL.createObjectURL(blob);
+                              a.download = `${w.id}.yaml`;
+                              a.click();
+                            } catch (e) {
+                              toast.error((e as Error).message);
+                            }
                           }}
                         >
                           <FileDown className="mr-2 h-4 w-4" /> 下载 YAML
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           onClick={async () => {
-                            const yml = await api.copyYAML(w.id);
                             try {
-                              await navigator.clipboard.writeText(yml);
-                              toast.success("YAML 已复制到剪贴板");
-                            } catch {
-                              toast.error("剪贴板不可用");
+                              const yml = await api.copyYAML(w.id);
+                              try {
+                                await navigator.clipboard.writeText(yml);
+                                toast.success("YAML 已复制到剪贴板");
+                              } catch {
+                                toast.error("剪贴板不可用");
+                              }
+                            } catch (e) {
+                              toast.error((e as Error).message);
                             }
                           }}
                         >
@@ -290,9 +309,13 @@ export default function Workflows() {
                           className="text-red-500"
                           onClick={async () => {
                             if (!confirm(`确定删除工作流 ${w.name}?`)) return;
-                            await api.deleteWorkflow(w.id);
-                            toast.success("已删除");
-                            refresh();
+                            try {
+                              await api.deleteWorkflow(w.id);
+                              toast.success("已删除");
+                              refresh();
+                            } catch (e) {
+                              toast.error((e as Error).message);
+                            }
                           }}
                         >
                           <Trash2 className="mr-2 h-4 w-4" /> 删除

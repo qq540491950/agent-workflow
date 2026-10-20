@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, asArray, subscribeEvents } from "@/lib/api";
+import { createRefreshDebounce } from "@/lib/debounce";
 import type { Execution } from "@/lib/types";
 import { StateBadge } from "@/components/state-badge";
 import {
@@ -27,9 +28,15 @@ export default function Executions() {
 
   useEffect(() => {
     refresh();
-    return subscribeEvents((ev) => {
-      if (ev.type.startsWith("workflow.")) refresh();
+    // 实时事件防抖刷新(约定 7:一律 200ms)
+    const trigger = createRefreshDebounce(refresh);
+    const unsub = subscribeEvents((ev) => {
+      if (ev.type.startsWith("workflow.")) trigger();
     });
+    return () => {
+      unsub();
+      trigger.cancel();
+    };
   }, [refresh]);
 
   const shown = stateFilter ? execs.filter((e) => e.state === stateFilter) : execs;

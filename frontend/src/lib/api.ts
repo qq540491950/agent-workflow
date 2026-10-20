@@ -403,10 +403,18 @@ export const api = {
   backupURL(): string {
     return "/api/backup";
   },
-  /** 桌面模式:通过 IPC 导出备份 JSON 文本 */
+  /**
+   * 导出备份 JSON 文本。
+   * 桌面模式:通过 IPC 取备份对象;浏览器(服务器)模式:走同源 /api/backup。
+   * 此前只有桌面分支:浏览器模式下仍去调 Wails 绑定,绑定不可用 → 导出必然失败,
+   * 而 Settings 页面的注释却写着"浏览器模式走同源下载链接"(约定 10 双分支一致)。
+   */
   async exportBackupText(): Promise<string> {
-    const data = await (await wailsBindings()).st.ExportBackup();
-    return JSON.stringify(data, null, 2);
+    if ((await detectMode()) === "desktop") {
+      const data = await (await wailsBindings()).st.ExportBackup();
+      return JSON.stringify(data, null, 2);
+    }
+    return httpText("/api/backup");
   },
   async restoreBackup(backup: Record<string, unknown>): Promise<{
     workflows_restored: number;

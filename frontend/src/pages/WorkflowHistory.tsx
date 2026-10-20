@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, asArray, subscribeEvents } from "@/lib/api";
+import { createRefreshDebounce } from "@/lib/debounce";
 import type { Execution, Workflow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -48,9 +49,15 @@ export default function WorkflowHistory() {
 
   useEffect(() => {
     refresh();
-    return subscribeEvents((ev) => {
-      if (ev.type.startsWith("workflow.")) refresh();
+    // 实时事件防抖刷新(约定 7:一律 200ms):一次事件会带起三次全量拉取
+    const trigger = createRefreshDebounce(refresh);
+    const unsub = subscribeEvents((ev) => {
+      if (ev.type.startsWith("workflow.")) trigger();
     });
+    return () => {
+      unsub();
+      trigger.cancel();
+    };
   }, [refresh]);
 
   const viewVersion = async (v: number) => {

@@ -51,7 +51,10 @@ func NewServer(app *application.App) *Server {
 }
 
 // Handler 返回 http.Handler。
-func (s *Server) Handler() http.Handler { return s.mux }
+// 额外挂一层错误体拦截:net/http ServeMux 对"方法不匹配"(405)与
+// "路由不存在"(404)直接写纯文本,与本 API 的 JSON 错误体契约不一致
+// (前端 http() 解析不出 error 字段,只能回退成 "HTTP 405")。
+func (s *Server) Handler() http.Handler { return jsonErrorHandler(s.mux) }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +79,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/workflows", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var wf map[string]any
 		if err := decodeJSON(r, &wf); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		parsed, err := parseWorkflow(wf)
 		if err != nil {
@@ -112,7 +115,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/workflows/validate", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var wf map[string]any
 		if err := decodeJSON(r, &wf); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		parsed, err := parseWorkflow(wf)
 		if err != nil {
@@ -125,12 +128,9 @@ func (s *Server) routes() {
 		return writeJSON(w, vers, err)
 	}))
 	s.mux.HandleFunc("GET /api/workflows/{id}/versions/{version}", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		v := 0
-		for _, c := range r.PathValue("version") {
-			if c < '0' || c > '9' {
-				return badRequest("版本号非法")
-			}
-			v = v*10 + int(c-'0')
+		v, err := parseVersion(r.PathValue("version"))
+		if err != nil {
+			return badRequest(err.Error())
 		}
 		out, err := s.app.Workflows.VersionDSL(r.PathValue("id"), v)
 		if err != nil {
@@ -141,9 +141,15 @@ func (s *Server) routes() {
 		return nil
 	}))
 	s.mux.HandleFunc("POST /api/workflows/import", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB 上限
+		// 上限与 JSON 端点一致(1MB);多读 1 字节用于识别超限,
+		// 否则超长内容会被静默截断,报出与真实原因无关的 YAML 解析错误。
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBody+1))
 		if err != nil {
 			return badRequest(err.Error())
+		}
+		if len(body) > maxJSONBody {
+			return model.NewError(model.KindValidationError, "PAYLOAD_TOO_LARGE",
+				fmt.Sprintf("导入内容超过 %d MB 上限", maxJSONBody>>20))
 		}
 		wf, err := s.app.Workflows.ImportYAML(string(body))
 		return writeJSON(w, wf, err)
@@ -182,6 +188,8 @@ func (s *Server) routes() {
 		if err != nil {
 			return err
 		}
+		// 导出内容含执行明细:同样禁止缓存(与备份导出一致)。
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Disposition", `attachment; filename="execution-`+r.PathValue("id")+`.json"`)
 		return writeJSON(w, data, nil)
 	}))
@@ -196,7 +204,7 @@ func (s *Server) routes() {
 		}
 		// 空 body 合法(等价于空任务 + 无变量),非空则必须能解析
 		if err := decodeOptionalJSON(r, &body); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		exec, err := s.app.Executions.Run(r.Context(), r.PathValue("id"), body.Task, body.Variables)
 		return writeJSON(w, exec, err)
@@ -204,7 +212,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/executions/{id}/input", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var response map[string]any
 		if err := decodeJSON(r, &response); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		exec, err := s.app.Executions.ProvideInput(r.Context(), r.PathValue("id"), response)
 		return writeJSON(w, exec, err)
@@ -218,13 +226,16 @@ func (s *Server) routes() {
 		if err != nil {
 			return err
 		}
+		// 备份是约定 8 唯一允许含明文凭据(Agent 环境变量)的出口:
+		// 显式禁止缓存,避免明文 API Key 留在浏览器/代理的磁盘缓存里。
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Disposition", `attachment; filename="agent-workflow-backup.json"`)
 		return writeJSON(w, data, nil)
 	}))
 	s.mux.HandleFunc("POST /api/backup/restore", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var backup map[string]any
 		if err := decodeJSON(r, &backup); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		result, err := s.app.Settings.RestoreBackup(backup)
 		return writeJSON(w, result, err)
@@ -244,7 +255,7 @@ func (s *Server) routes() {
 			Skip *bool `json:"skip"`
 		}
 		if err := decodeOptionalJSON(r, &body); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		skip := body.Skip != nil && *body.Skip
 		exec, err := s.app.Executions.RetryNode(r.PathValue("id"), skip)
@@ -264,7 +275,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/agents/{id}/permission", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var p map[string]any
 		if err := decodeJSON(r, &p); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		err := s.app.AgentSvc.SetPermission(r.PathValue("id"), policyOf(p))
 		return writeJSON(w, map[string]any{"ok": err == nil}, err)
@@ -276,7 +287,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/agents/{id}/config", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var raw map[string]any
 		if err := decodeJSON(r, &raw); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		rawJSON, _ := json.Marshal(raw)
 		var cfg agent.AgentConfig
@@ -307,7 +318,10 @@ func (s *Server) routes() {
 		var body struct {
 			Enabled *bool `json:"enabled"`
 		}
-		if err := decodeJSON(r, &body); err != nil || body.Enabled == nil {
+		if err := decodeJSON(r, &body); err != nil {
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
+		}
+		if body.Enabled == nil {
 			return badRequest("需要 enabled 字段")
 		}
 		if err := s.app.SkillSvc.SetEnabled(r.PathValue("id"), *body.Enabled); err != nil {
@@ -332,7 +346,7 @@ func (s *Server) routes() {
 			Message string `json:"message"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		if strings.TrimSpace(body.Message) == "" {
 			return badRequest("commit message 不能为空")
@@ -357,7 +371,7 @@ func (s *Server) routes() {
 			AllowScriptNodes *bool `json:"allow_script_nodes"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
-			return badRequest(err.Error())
+			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		info, err := s.app.Settings.Update(body.GitWorkingDir, body.LogLevel, body.AllowScriptNodes)
 		return writeJSON(w, info, err)
@@ -374,9 +388,17 @@ func (s *Server) wrap(h func(http.ResponseWriter, *http.Request) error) http.Han
 		if err := h(w, r); err != nil {
 			logx.Warn("http error", "path", r.URL.Path, "error", err)
 			// 结构化错误映射为语义化 HTTP 状态码(资源缺失 404、权限 403,
-			// 其余含校验错误 400);body 保留 error 文本并附带 code/kind
+			// 其余含校验错误 400);body 保留 error 文本并附带 code/kind。
+			//
+			// 普通错误(参数校验失败等)此前只有 error 字段,同一套 API
+			// 出现两种错误体形状,前端 ApiError.code 时而 undefined ——
+			// 统一补上 code/kind,消费方才能稳定按 code 分支。
 			status := http.StatusBadRequest
-			body := map[string]any{"error": err.Error()}
+			body := map[string]any{
+				"error": err.Error(),
+				"code":  "BAD_REQUEST",
+				"kind":  string(model.KindValidationError),
+			}
 			var se *model.Error
 			if errors.As(err, &se) {
 				body["code"] = se.Code
@@ -384,6 +406,8 @@ func (s *Server) wrap(h func(http.ResponseWriter, *http.Request) error) http.Han
 				switch {
 				case se.Code == "NOT_FOUND":
 					status = http.StatusNotFound
+				case se.Code == "PAYLOAD_TOO_LARGE":
+					status = http.StatusRequestEntityTooLarge
 				case se.Kind == model.KindPermissionError:
 					status = http.StatusForbidden
 				}
@@ -393,6 +417,66 @@ func (s *Server) wrap(h func(http.ResponseWriter, *http.Request) error) http.Han
 		}
 	}
 }
+
+// jsonErrorHandler 把 ServeMux 自己产生的 404/405 纯文本响应换成与
+// wrap 一致的 JSON 错误体。已经由 wrap 写出的 JSON 错误体
+// (Content-Type: application/json)原样放行,不会被覆盖。
+func jsonErrorHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&jsonErrorWriter{ResponseWriter: w}, r)
+	})
+}
+
+// jsonErrorWriter 只拦截 404/405 的响应体,其余行为完全透传。
+type jsonErrorWriter struct {
+	http.ResponseWriter
+	replaced bool
+}
+
+func (w *jsonErrorWriter) WriteHeader(code int) {
+	if w.replaced {
+		return
+	}
+	if (code == http.StatusNotFound || code == http.StatusMethodNotAllowed) &&
+		!strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		w.replaced = true
+		h := w.Header()
+		h.Del("Content-Length")
+		h.Set("Content-Type", "application/json")
+		w.ResponseWriter.WriteHeader(code)
+		body := map[string]any{
+			"error": "接口不存在",
+			"code":  "NOT_FOUND",
+			"kind":  string(model.KindValidationError),
+		}
+		if code == http.StatusMethodNotAllowed {
+			body["error"] = "HTTP 方法不被允许"
+			body["code"] = "METHOD_NOT_ALLOWED"
+		}
+		_ = json.NewEncoder(w.ResponseWriter).Encode(body)
+		return
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Write 丢弃被替换掉的 ServeMux 纯文本正文(状态码与正文已在
+// WriteHeader 里写过,再写一次会污染响应)。
+func (w *jsonErrorWriter) Write(b []byte) (int, error) {
+	if w.replaced {
+		return len(b), nil
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush 透传:JSON 错误拦截不能破坏 SSE(依赖 http.Flusher)。
+func (w *jsonErrorWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap 让 http.NewResponseController 能拿到底层 writer(写超时设置)。
+func (w *jsonErrorWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // handleSSE 推送实时 UIEvent。
 // 连接建立立即下发响应头 + SSE 注释行:否则 EventSource 在首个事件前
@@ -413,7 +497,10 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, ": connected\n\n")
+	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+		// 建连即失败:对端不可达,不必再订阅(否则白留一个 handler)。
+		return
+	}
 	flusher.Flush()
 
 	const queueSize = 256
@@ -422,15 +509,18 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// 写超时:客户端停止读取时,写操作最多阻塞到该期限,避免写协程永久挂起
 	rc := http.NewResponseController(w)
-	write := func(payload string) {
+	// write 返回 false 表示写入失败(对端已断开):调用方必须结束流,
+	// 否则连接不释放(订阅不注销、goroutine 常驻、keepalive 继续写)。
+	write := func(payload string) bool {
 		if err := rc.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 			logx.Debug("SSE 设置写超时失败(连接可能已关闭)", "error", err.Error())
 		}
 		if _, err := io.WriteString(w, payload); err != nil {
 			logx.Debug("SSE 写入失败(客户端已断开)", "error", err.Error())
-			return
+			return false
 		}
 		flusher.Flush()
+		return true
 	}
 
 	unsub := s.app.Subscribe(func(ev event.UIEvent) {
@@ -456,9 +546,13 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			write("data: " + string(raw) + "\n\n")
+			if !write("data: " + string(raw) + "\n\n") {
+				return // 写失败:对端已不可达,关闭流并释放订阅
+			}
 		case <-keepalive.C:
-			write(": keepalive\n\n")
+			if !write(": keepalive\n\n") {
+				return
+			}
 		}
 	}
 }
@@ -486,22 +580,44 @@ func (h *AssetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 全量读进内存,一个大 body 即可把应用 OOM 掉。
 const maxJSONBody = 1 << 20 // 1MB
 
-// decodeJSON 解析受上限保护的 JSON 请求体(超限返回 413 语义的错误)。
+// decodeJSON 解析受上限保护的 JSON 请求体。
+// 解析失败一律返回**结构化**错误(错误体形状统一,见 wrap):
+// 超限 → 413(PAYLOAD_TOO_LARGE),非法 JSON → 400(INVALID_JSON)。
 func decodeJSON(r *http.Request, out any) error {
+	err := decodeJSONRaw(r, out)
+	if err == nil {
+		return nil
+	}
+	return wrapDecodeError(err)
+}
+
+// decodeJSONRaw 只做受限读取与解析,错误原样返回(供可选 body 判空)。
+func decodeJSONRaw(r *http.Request, out any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
 	return json.NewDecoder(r.Body).Decode(out)
 }
 
+// wrapDecodeError 把解码错误映射为结构化错误。
+func wrapDecodeError(err error) error {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		return model.NewError(model.KindValidationError, "PAYLOAD_TOO_LARGE",
+			fmt.Sprintf("请求体超过 %d MB 上限", maxJSONBody>>20))
+	}
+	return model.NewError(model.KindValidationError, "INVALID_JSON",
+		"请求体不是合法 JSON: "+err.Error())
+}
+
 // decodeOptionalJSON 允许空 body(等价于零值),但 body 非空且非法时报错。
 func decodeOptionalJSON(r *http.Request, out any) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
-	if err := decodeJSON(r, out); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil // 空 body:用零值
-		}
-		return err
+	err := decodeJSONRaw(r, out)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if errors.Is(err, io.EOF) {
+		return nil // 空 body:用零值
+	}
+	return wrapDecodeError(err)
 }
 
 func writeJSON(w http.ResponseWriter, data any, err error) error {
@@ -516,6 +632,12 @@ func writeJSON(w http.ResponseWriter, data any, err error) error {
 
 func badRequest(msg string) error { return fmt.Errorf("%s", msg) }
 
+// maxQueryLimit 是显式 limit 参数的上限。
+// 此前用 int 累加解析,超长数字会整数溢出成负数,而仓储层把 limit<=0
+// 解释为"不限制" —— 一个 limit=99999999999999999999 的请求会变成
+// "返回全表"(内存与响应体都不可控)。
+const maxQueryLimit = 1000
+
 func queryInt(r *http.Request, key string, def int) int {
 	v := r.URL.Query().Get(key)
 	if v == "" {
@@ -527,8 +649,30 @@ func queryInt(r *http.Request, key string, def int) int {
 			return def
 		}
 		n = n*10 + int(c-'0')
+		if n > maxQueryLimit {
+			return maxQueryLimit // 收敛到上限,杜绝溢出成负数
+		}
 	}
 	return n
+}
+
+// parseVersion 解析版本号路径参数:只接受十进制数字,且必须落在合理
+// 范围内。此前 int 累加会整数溢出成负数/垃圾值,再去查版本快照。
+func parseVersion(s string) (int, error) {
+	if s == "" {
+		return 0, errors.New("版本号非法")
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, errors.New("版本号非法")
+		}
+		n = n*10 + int(c-'0')
+		if n > maxQueryLimit*1000 {
+			return 0, errors.New("版本号非法")
+		}
+	}
+	return n, nil
 }
 
 // parseWorkflow 把请求体(map)转为 Workflow。

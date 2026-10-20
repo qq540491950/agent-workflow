@@ -8,9 +8,12 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,50 +39,175 @@ var assets embed.FS
 var examplesFS embed.FS
 
 func main() {
-	serverMode := flag.Bool("server", false, "以 HTTP 服务器模式运行(无 GUI)")
-	addr := flag.String("addr", "127.0.0.1:8080", "HTTP 监听地址")
-	dataDir := flag.String("data", "", "数据目录(默认用户配置目录)")
-	gitDir := flag.String("git-dir", "", "Git 工作目录(默认当前目录)")
-	logLevel := flag.String("log", "info", "日志级别 debug|info|warn|error")
-	flag.Parse()
+	// 退出码由 run() 返回:os.Exit 不执行 defer,
+	// 直接在 main 里 os.Exit 会跳过数据库关闭(连接泄漏 + WAL 不落盘)。
+	os.Exit(run())
+}
 
-	logx.SetLevel(*logLevel)
+// options 是解析后的启动参数。
+type options struct {
+	Server   bool
+	Addr     string
+	DataDir  string
+	GitDir   string
+	LogLevel string
+}
 
-	dir := *dataDir
-	if dir == "" {
-		base, err := os.UserConfigDir()
-		if err != nil {
-			base = "."
+// validLogLevels 是 --log 的合法取值。
+var validLogLevels = []string{"debug", "info", "warn", "error"}
+
+// flagValues 保存各启动参数的取值指针。
+type flagValues struct {
+	server   *bool
+	addr     *string
+	data     *string
+	gitDir   *string
+	logLevel *string
+}
+
+// newFlagSet 构造启动参数解析器。输出交给调用方决定:测试里丢到
+// io.Discard 保持安静,真正运行时写 stderr。
+func newFlagSet(out io.Writer) (*flag.FlagSet, flagValues) {
+	fs := flag.NewFlagSet("agent-workflow", flag.ContinueOnError)
+	fs.SetOutput(out)
+	v := flagValues{
+		server:   fs.Bool("server", false, "以 HTTP 服务器模式运行(无 GUI)"),
+		addr:     fs.String("addr", "127.0.0.1:8080", "HTTP 监听地址"),
+		data:     fs.String("data", "", "数据目录(默认用户配置目录)"),
+		gitDir:   fs.String("git-dir", "", "Git 工作目录(默认当前目录)"),
+		logLevel: fs.String("log", "info", "日志级别 debug|info|warn|error"),
+	}
+	return fs, v
+}
+
+// parseArgs 解析并校验命令行参数。纯函数:不打印、不退出,便于单测。
+func parseArgs(args []string) (options, error) {
+	fs, v := newFlagSet(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return options{}, err
+	}
+	opts := options{
+		Server:   *v.server,
+		Addr:     *v.addr,
+		DataDir:  *v.data,
+		GitDir:   *v.gitDir,
+		LogLevel: *v.logLevel,
+	}
+	if err := opts.validate(); err != nil {
+		return options{}, err
+	}
+	return opts, nil
+}
+
+// validate 校验启动参数:参数非法要**当场报**,而不是默默按默认值跑
+// (约定 14:该失败却成功等同 P0)。
+func (o options) validate() error {
+	if !isValidLogLevel(o.LogLevel) {
+		return fmt.Errorf("日志级别 %q 非法(允许: %s)", o.LogLevel, strings.Join(validLogLevels, "|"))
+	}
+	if o.Server {
+		if o.Addr == "" {
+			return errors.New("服务器模式必须指定监听地址(--addr)")
 		}
-		dir = filepath.Join(base, "agent-workflow")
+		if _, _, err := net.SplitHostPort(o.Addr); err != nil {
+			return fmt.Errorf("监听地址 %q 非法: %w", o.Addr, err)
+		}
+	}
+	return nil
+}
+
+// isValidLogLevel 判断日志级别是否合法(与 logx.SetLevel 支持的值一致)。
+func isValidLogLevel(level string) bool {
+	for _, l := range validLogLevels {
+		if strings.EqualFold(level, l) {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultDataDir 返回默认数据目录:用户配置目录下的 agent-workflow。
+// userConfigDir 为空(取不到用户配置目录)时退化为当前目录。
+func defaultDataDir(userConfigDir string) string {
+	if userConfigDir == "" {
+		userConfigDir = "."
+	}
+	return filepath.Join(userConfigDir, "agent-workflow")
+}
+
+// usage 打印命令行用法。
+func usage(out io.Writer) {
+	fs, _ := newFlagSet(out)
+	fs.Usage()
+}
+
+// run 是真正的入口逻辑,返回进程退出码。
+// 拆出来是为了让 defer(关闭 SQLite)在退出路径上真的执行。
+func run() int {
+	opts, err := parseArgs(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage(os.Stderr)
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "启动参数错误: %v\n\n", err)
+		usage(os.Stderr)
+		return 2
 	}
 
-	app, err := app.NewApp(dir, examplesFS)
+	logx.SetLevel(opts.LogLevel)
+
+	dir := opts.DataDir
+	if dir == "" {
+		base, cfgErr := os.UserConfigDir()
+		if cfgErr != nil {
+			logx.Warn("获取用户配置目录失败,改用当前目录", "error", cfgErr)
+		}
+		dir = defaultDataDir(base)
+	}
+
+	application, err := app.NewApp(dir, examplesFS)
 	if err != nil {
 		logx.Error("应用初始化失败", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	// 退出前关闭 SQLite:释放连接并让 WAL 落盘。
+	defer func() {
+		if cerr := application.Repo.Close(); cerr != nil {
+			logx.Warn("关闭数据库失败", "error", cerr)
+		}
+	}()
+
 	// 启动参数优先:Git 工作目录(默认进程当前目录,亦可在设置页修改)
-	if *gitDir != "" {
-		_ = app.GitAPI.SetWorkingDir(*gitDir)
+	if opts.GitDir != "" {
+		_ = application.GitAPI.SetWorkingDir(opts.GitDir)
 	}
 
-	if *serverMode {
-		runServer(app, *addr)
-		return
+	if opts.Server {
+		if err := runServer(application, opts.Addr); err != nil {
+			logx.Error("HTTP 服务退出", "error", err)
+			return 1
+		}
+		return 0
 	}
-	runDesktop(app)
+	if err := runDesktop(application); err != nil {
+		logx.Error("应用退出异常", "error", err)
+		return 1
+	}
+	return 0
 }
 
 // runServer HTTP 服务器模式:REST API + SSE + 静态前端资源。
 // 非 API 且无扩展名的路径回退到 index.html(SPA 前端路由)。
-func runServer(app *app.App, addr string) {
+//
+// 返回错误而不是自行 os.Exit:退出码由 run() 统一决定,
+// 这样 defer(关闭 SQLite)一定会执行。
+func runServer(app *app.App, addr string) error {
 	apiHandler := api.NewServer(app)
 
 	dist, err := fs.Sub(assets, "frontend/dist")
 	if err != nil {
-		logx.Error("嵌入资源加载失败", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("嵌入资源加载失败: %w", err)
 	}
 	static := http.FileServer(http.FS(dist))
 
@@ -106,26 +234,28 @@ func runServer(app *app.App, addr string) {
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sig)
 		<-sig
 		logx.Info("收到退出信号,正在关闭…")
-		_ = srv.Shutdown(context.Background())
+		// 关闭也要有上限:挂死的请求不能把关机无限拖住
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
 		// 给运行中的执行最多 5 秒收尾(状态落库为 CANCELLED)
 		if left := app.Engine.WaitIdle(5 * time.Second); left > 0 {
 			logx.Warn("仍有执行未收尾", "count", left)
 		}
 	}()
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		if err != http.ErrServerClosed {
-			logx.Error("HTTP 服务退出", "error", err)
-			os.Exit(1)
-		}
-		// 等待执行协程收尾后再退出
-		_ = app.Engine.WaitIdle(5 * time.Second)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("HTTP 服务退出: %w", err)
 	}
+	// 等待执行协程收尾后再退出
+	_ = app.Engine.WaitIdle(5 * time.Second)
+	return nil
 }
 
 // runDesktop Wails 桌面模式。
-func runDesktop(app *app.App) {
+func runDesktop(app *app.App) error {
 	// REST API 处理器:桌面模式下经 AssetHandler 挂载到 AssetServer 的 /api
 	// 前缀,导出/备份等下载链接与服务器模式同源可用
 	apiHandler := api.NewServer(app)
@@ -203,9 +333,9 @@ func runDesktop(app *app.App) {
 	}
 
 	if err := wailsApp.Run(); err != nil {
-		logx.Error("应用退出异常", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("Wails 应用退出异常: %w", err)
 	}
+	return nil
 }
 
 // bridgeNotifications 将执行生命周期事件桥接为系统原生通知。

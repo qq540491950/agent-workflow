@@ -7,6 +7,7 @@ package persistence
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -163,13 +164,36 @@ func (d *DB) migrate() error {
 			return fmt.Errorf("persistence: migrate: %w", err)
 		}
 	}
-	// 轻量列迁移:老库升级(列已存在时忽略错误)
+	// 轻量列迁移:老库升级
+	return d.migrateColumns()
+}
+
+// migrateColumns 做轻量列迁移(老库升级)。
+//
+// 只容忍"列已存在"(老库升级的正常路径,SQLite 报 duplicate column name);
+// 其余错误必须上抛 —— 此前所有 ALTER 的错误都被 `_, _ =` 吞掉,升级失败的
+// 应用带着半残 schema 启动,后续查询报出的是莫名其妙的"no such column",
+// 真正的原因(迁移失败)被彻底掩盖。
+func (d *DB) migrateColumns() error {
 	alters := []string{
 		`ALTER TABLE workflows ADD COLUMN permission_json TEXT DEFAULT '{}'`,
 		`ALTER TABLE executions ADD COLUMN state_json TEXT DEFAULT '{}'`,
 	}
 	for _, a := range alters {
-		_, _ = d.sql.Exec(a)
+		if _, err := d.sql.Exec(a); err != nil {
+			if isDuplicateColumn(err) {
+				continue
+			}
+			return fmt.Errorf("persistence: migrate: %w", err)
+		}
 	}
 	return nil
+}
+
+// isDuplicateColumn 判断错误是否为"列已存在"(SQLite: duplicate column name)。
+func isDuplicateColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }

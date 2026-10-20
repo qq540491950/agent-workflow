@@ -10,6 +10,7 @@ vi.mock("@wailsio/runtime", () => ({
 
 const wfList = vi.fn();
 const exAllEvents = vi.fn();
+const stExportBackup = vi.fn();
 vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () => ({
   List: (...a: unknown[]) => wfList(...a),
 }));
@@ -28,6 +29,7 @@ vi.mock("@bindings/agentworkflow/app/application/executionservice.js", () => ({
 function bindingStub(
   name: string,
   exports: string[],
+  overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   const known = new Set(exports);
   // Promise.all 会把每个桩当 thenable 处理并读 .then,这类协议属性
@@ -44,6 +46,9 @@ function bindingStub(
             `绑定 ${name} 不存在导出 ${prop}(可用: ${[...known].join(", ")})`,
           );
         }
+        // 需要断言调用参数的绑定走 overrides(仍是已知导出,不破坏形状守卫)
+        const ov = overrides[prop as string];
+        if (ov) return ov;
         return vi.fn();
       },
       has: () => true,
@@ -74,14 +79,18 @@ vi.mock("@bindings/agentworkflow/app/application/gitservice.js", () =>
   ]),
 );
 vi.mock("@bindings/agentworkflow/app/application/settingsservice.js", () =>
-  bindingStub("SettingsService", [
-    "Info",
-    "Update",
-    "Get",
-    "Set",
-    "ExportBackup",
-    "RestoreBackup",
-  ]),
+  bindingStub(
+    "SettingsService",
+    [
+      "Info",
+      "Update",
+      "Get",
+      "Set",
+      "ExportBackup",
+      "RestoreBackup",
+    ],
+    { ExportBackup: (...a: unknown[]) => stExportBackup(...a) },
+  ),
 );
 
 // 每个用例重新加载被测模块,清除 detectMode 的模式缓存。
@@ -94,6 +103,7 @@ beforeEach(() => {
   callByID.mockReset();
   wfList.mockReset();
   exAllEvents.mockReset();
+  stExportBackup.mockReset();
   vi.unstubAllGlobals();
 });
 
@@ -265,6 +275,50 @@ describe("version(双模式)", () => {
     );
     const { api } = await freshApi();
     await expect(api.version()).resolves.toEqual({});
+  });
+});
+
+// ---- C4:备份导出的双分支契约 ----
+// exportBackupText 此前只有桌面分支:浏览器(服务器)模式下仍去调 Wails 绑定,
+// 绑定不可用 → 导出备份必然失败,而 Settings 页面的注释却写着
+// "浏览器模式走同源下载链接"。约定 10 要求两个分支返回结构一致。
+describe("exportBackupText(双模式)", () => {
+  it("浏览器模式走同源 /api/backup", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    const body = JSON.stringify({ workflows: [], agent_configs: {} });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, text: async () => body });
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    await expect(api.exportBackupText()).resolves.toBe(body);
+    expect(fetchMock).toHaveBeenCalledWith("/api/backup");
+  });
+
+  it("浏览器模式后端报错时抛错(不得把错误体当备份导出)", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: async () => JSON.stringify({ error: "导出失败" }),
+      }),
+    );
+    const { api } = await freshApi();
+    await expect(api.exportBackupText()).rejects.toThrow("导出失败");
+  });
+
+  it("桌面模式走 bindings.ExportBackup 且不发 HTTP", async () => {
+    callByID.mockResolvedValue([]); // desktop
+    stExportBackup.mockResolvedValue({ workflows: [] });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    const text = await api.exportBackupText();
+    expect(JSON.parse(text)).toEqual({ workflows: [] });
+    expect(stExportBackup).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

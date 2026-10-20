@@ -185,6 +185,9 @@ func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 	}
 	wf.Enabled = enabled == 1
 	_ = json.Unmarshal([]byte(variables), &wf.Variables)
+	// 变量里的整数值在 JSON 往返后退化成 float64(约定 #2):与执行侧
+	// 同一套归一,保证工作流保存/读回后类型不变。
+	wf.Variables = model.NormalizeStateJSON(wf.Variables)
 	_ = json.Unmarshal([]byte(permData), &wf.Permission)
 	_ = json.Unmarshal([]byte(nodes), &wf.Nodes)
 	_ = json.Unmarshal([]byte(edges), &wf.Edges)
@@ -209,6 +212,12 @@ func (d *DB) TouchExecutionNode(executionID, nodeID string) error {
 // SaveExecution 插入或更新执行状态(实时保存)。
 // 单条原子 upsert:不可变字段(workflow 绑定/task/变量/created_at)只在
 // 插入时写入,更新时不覆盖。
+//
+// state 列走**终态守卫**(见 execStateGuard):整行 upsert 天然会覆盖
+// state,一个拿着过期副本的写者能把刚由 CAS 落定的状态改回去 ——
+// "失败/取消"的裁决尤其致命:用户明明看到 FAILED/CANCELLED,过期写却把
+// 执行改回"运行中"甚至"已完成"(约定 #14 的"该失败却成功"同族问题)。
+// 守卫让这两个终态只能经 CasExecutionState 离开(显式重试/取消裁决)。
 func (d *DB) SaveExecution(e *model.Execution) error {
 	variables, _ := json.Marshal(orEmpty(e.Variables))
 	iterations := anyMapInt(e.Iterations)
@@ -222,15 +231,50 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 		(id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
-			state=excluded.state, current_node_id=excluded.current_node_id,
+			state=`+execStateGuardSQL+`, current_node_id=excluded.current_node_id,
 			iterations_json=excluded.iterations_json, started_at=excluded.started_at,
 			finished_at=excluded.finished_at, error=excluded.error,
 			node_states_json=excluded.node_states_json, snapshot_json=excluded.snapshot_json,
 			state_json=excluded.state_json`,
-		e.ID, e.WorkflowID, e.WorkflowVersion, e.WorkflowName, string(e.State), e.Task,
-		string(variables), e.CurrentNodeID, string(iterations), e.CreatedAt,
-		e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), string(stateData))
+		append([]any{
+			e.ID, e.WorkflowID, e.WorkflowVersion, e.WorkflowName, string(e.State), e.Task,
+			string(variables), e.CurrentNodeID, string(iterations), e.CreatedAt,
+			e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), string(stateData),
+		}, execStateGuardArgs...)...)
 	return wrap(err)
+}
+
+// execStateGuardSQL / execStateGuardArgs 是 state 列的守卫表达式(参数化)。
+//
+// 语义:FAILED / CANCELLED 是"负面终态" —— 它们的裁决只能由
+// CasExecutionState 推翻(用户显式重试);整行 upsert 不得把状态改走,
+// 否则过期副本能把已失败的执行改回"运行中/已完成"。
+//
+// 已知边界(未闭合,需引擎侧配合):
+//   - COMPLETED 未纳入保护:workflow/runtime 的崩溃恢复用例靠
+//     "COMPLETED → RUNNING"模拟"执行中途崩溃",纳入即破坏该用例;
+//     真实运行期没有把已完成执行改回运行中的路径。
+//   - 守卫挡不住"往合法后继方向"的过期写(例如库中 PAUSED、过期副本写
+//     RUNNING —— PAUSED→RUNNING 本身合法)。彻底堵住需要调用方携带
+//     "我基于哪个版本"的令牌(CAS 返回 claim token、保存时校验),
+//     属于引擎侧改动,不在持久化层可解范围内。
+var execStateGuardSQL, execStateGuardArgs = buildExecStateGuard()
+
+// execGuardedStates 是受保护的负面终态。
+var execGuardedStates = []model.ExecutionState{
+	model.ExecutionFailed,
+	model.ExecutionCancelled,
+}
+
+func buildExecStateGuard() (string, []any) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(execGuardedStates)), ",")
+	args := make([]any, 0, len(execGuardedStates))
+	for _, s := range execGuardedStates {
+		args = append(args, string(s))
+	}
+	sql := "CASE WHEN executions.state IN (" + placeholders + ") AND excluded.state<>executions.state" +
+		" THEN executions.state ELSE excluded.state END"
+	return sql, args
 }
 
 // GetExecution 读取执行记录。
@@ -251,7 +295,10 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 	// 见 model.NormalizeStateJSON。
 	_ = json.Unmarshal([]byte(stateData), &e.StateData)
 	e.StateData = model.NormalizeStateJSON(e.StateData)
+	// variables_json 同理:变量里的 int 经一次往返也会退化成 float64
+	//(约定 #2)。此前只有 state_json 被归一,变量这条路径漏了。
 	_ = json.Unmarshal([]byte(variables), &e.Variables)
+	e.Variables = model.NormalizeStateJSON(e.Variables)
 	_ = json.Unmarshal([]byte(iterations), &e.Iterations)
 	_ = json.Unmarshal([]byte(nodeStates), &e.NodeStates)
 	if snapshot != "" {
@@ -294,7 +341,9 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 		// 见 model.NormalizeStateJSON。
 		_ = json.Unmarshal([]byte(stateData), &e.StateData)
 		e.StateData = model.NormalizeStateJSON(e.StateData)
+		// variables_json 同理(约定 #2):整数值不得在往返后退化成 float64。
 		_ = json.Unmarshal([]byte(variables), &e.Variables)
+		e.Variables = model.NormalizeStateJSON(e.Variables)
 		_ = json.Unmarshal([]byte(iterations), &e.Iterations)
 		_ = json.Unmarshal([]byte(nodeStates), &e.NodeStates)
 		out = append(out, &e)
@@ -316,6 +365,16 @@ func (d *DB) ListRunningExecutions() ([]*model.Execution, error) {
 			return nil, wrap(err)
 		}
 		ids = append(ids, id)
+	}
+	// 必须先关掉 rows 再逐条查询:单连接模式(SetMaxOpenConns(1))下,
+	// 持有未关闭的 rows 会占住唯一连接,后面的 GetExecution 将永久等待
+	// 自己 → 死锁。(rows.Next 返回 false 时 database/sql 已自动关闭,
+	// 这里显式关闭是为了不依赖该隐式行为 —— 将来循环里加个 break 就会踩中。)
+	if err := rows.Err(); err != nil {
+		return nil, wrap(err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, wrap(err)
 	}
 	var out []*model.Execution
 	for _, id := range ids {
@@ -589,7 +648,12 @@ func (d *DB) GetSetting(key string, out any) error {
 		// "尚未设置"与"读取失败"(此前一律 DB_ERROR,掩盖真实故障)
 		return wrapNotFound(err, "设置项", key)
 	}
-	return json.Unmarshal([]byte(raw), out)
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		// 值损坏也是持久化层的问题:包成结构化错误,别让裸 json 错误
+		// 逃到 API 层(那里按 kind/code 映射状态码)。
+		return wrap(err)
+	}
+	return nil
 }
 
 func (d *DB) SaveSetting(key string, value any) error {
@@ -640,11 +704,43 @@ func anyMapAny(m map[string]any) string {
 
 func nowStr() string { return time.Now().Format(time.RFC3339Nano) }
 
+// wrap 把底层错误包成结构化的持久化错误。
+//
+// 原始错误链必须保留:此前这里直接 new 一个 model.Error,底层错误(如
+// sql.ErrNoRows、context.Canceled)被彻底丢弃 —— 调用方无法再用
+// errors.Is/As 区分"行不存在"与"磁盘故障",错误语义止步于一句 DB_ERROR。
+//
+// dbError 同时满足两边:
+//   - Error():与此前完全一致的消息(API 响应文案不变);
+//   - As():让 errors.As 能命中 *model.Error(API 按 code/kind 映射状态码);
+//   - Unwrap():保留底层错误,errors.Is 仍能命中根因。
+type dbError struct {
+	me    *model.Error
+	cause error
+}
+
+func (e *dbError) Error() string { return e.me.Error() }
+
+func (e *dbError) Unwrap() error { return e.cause }
+
+func (e *dbError) As(target any) bool {
+	// errors.As 传入的是"指向目标类型的指针"(var se *model.Error → **model.Error)。
+	p, ok := target.(**model.Error)
+	if !ok {
+		return false
+	}
+	*p = e.me
+	return true
+}
+
 func wrap(err error) error {
 	if err == nil {
 		return nil
 	}
-	return model.NewError(model.KindPersistenceError, "DB_ERROR", err.Error())
+	return &dbError{
+		me:    model.NewError(model.KindPersistenceError, "DB_ERROR", err.Error()),
+		cause: err,
+	}
 }
 
 // wrapNotFound 将 sql.ErrNoRows 转为友好的结构化 NOT_FOUND 错误。
