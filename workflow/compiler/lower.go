@@ -51,6 +51,20 @@ func StatusKey(nodeID string) string { return "node:" + nodeID + ":status" }
 func AnsweredKey(nodeID string) string { return "node:" + nodeID + ":answered" }
 func ResultKey(nodeID string) string   { return "node:" + nodeID + ":result" }
 
+// RouteBranchKey 生成"路由出口分支选择"的状态键。
+//
+// 值是出口分支的**下标**(枚举,不是自由文本):路由一旦选定出口,
+// 这个选择就是本次执行的既成事实。恢复执行必须**回放**它,而不是
+// 拿脱敏后的 output 重新求值 —— 重新求值的输入已经不是当初那一份
+// (output 在 state_json 里是脱敏副本),条件可能翻面,于是"人批准 A
+// 分支,恢复后走 B 分支"(约定 #14:走错分支比崩溃更危险)。
+//
+// 见 routeAgent 的 selectExitBranch 与 runtime/state_mask.go 的
+// "output 键的双重身份"一节。
+func RouteBranchKey(decisionNodeID string) string {
+	return "route:" + decisionNodeID + ":branch"
+}
+
 // NodeRunner 由 runtime 实现:真正执行一个节点的业务逻辑。
 // compiler 只负责编排,不感知 Agent/Skill/Git 的实现细节。
 type NodeRunner interface {
@@ -607,10 +621,8 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 					return
 				}
 				// 恢复跳过:已成功的节点在 resume 重放时直接跳过
-				if s, ok := st.Get(StatusKey(node.ID)); ok {
-					if s == string(model.NodeSuccess) || s == string(model.NodeSkipped) {
-						return
-					}
+				if nodeAlreadyDone(st, node.ID) {
+					return
 				}
 				// 人工/等待节点恢复:收到用户输入后重新执行。
 				// 标记 _answered:该节点此前已返回过 WAIT_USER 并把 prompt
@@ -832,6 +844,13 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 				}
 
 				// 1. 执行决策节点(nodeAgent 自带跳过/恢复逻辑)
+				//
+				// 决策节点是否会被"恢复跳过"跳过,必须在执行**之前**判定:
+				// 跳过 = 本轮没有重新产出 output/decision → 条件求值的输入
+				// 与当初选定分支时的那一份**不是同一份**(output 在
+				// state_json 里是脱敏副本,见 runtime/state_mask.go),
+				// 重新求值可能走另一条边(约定 #14:走错分支比崩溃更危险)。
+				decisionSkipped := nodeAlreadyDone(st, decisionNode.ID)
 				for ev, err := range firstNode.Run(ctx) {
 					if !yield(ev, err) {
 						return
@@ -843,7 +862,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 				}
 
 				// 2. 评估出口分支
-				if idx, ok := l.matchBranch(exitBranches, st); ok {
+				if idx, ok := l.selectExitBranch(exitBranches, st, decisionNode.ID, decisionSkipped); ok {
 					for ev, err := range exitAgents[idx].Run(ctx) {
 						if !yield(ev, err) {
 							return
@@ -866,7 +885,12 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 					stuck, _ := st.Get(KeyLoopStuck)
 					if exited == true {
 						// loop guard 已确认出口条件成立
-						if idx, ok := l.matchBranch(exitBranches, st); ok {
+						//
+						// 这里**必须重新求值**,不能回放:循环体里的 revisit
+						// 节点重新执行过决策节点,output/decision 是本轮的新值,
+						// 与循环开始前的那一份不同。求值结果照样记进状态,
+						// 供后续恢复回放(见 selectExitBranch)。
+						if idx, ok := l.selectExitBranch(exitBranches, st, decisionNode.ID, false); ok {
 							for ev, err := range exitAgents[idx].Run(ctx) {
 								if !yield(ev, err) {
 									return
@@ -1118,6 +1142,70 @@ func (l *lowerer) matchBranch(branches []RouteBranch, st StateAccess) (int, bool
 		return fallback, true
 	}
 	return -1, false
+}
+
+// selectExitBranch 选定出口分支,并把选择记录到状态里。
+//
+// 两条路径:
+//
+//   - **回放**:该路由此前已选定过出口(状态里有记录),且本轮决策节点
+//     被"恢复跳过"跳过(状态已是 success/skipped —— 本轮没有重新产出
+//     output/decision)→ 回放上一轮的选择,**不重新求值**。
+//     理由:条件求值的输入在恢复路径上已经不是当初那一份 —— output 在
+//     state_json 里是**脱敏副本**(落库前脱敏,见 runtime/state_mask.go),
+//     且它可能被后续节点覆盖成别的值。重新求值可能走另一条边:审批流里
+//     就是"人批准 A 分支,恢复后走 B 分支"(约定 #14:走错分支比崩溃更
+//     危险 —— 用户看不到任何异常)。
+//   - **求值**:没有记录,或决策节点本轮重新执行过(输入变了)
+//     → 按条件求值,并把选中的下标记下来(供后续恢复回放)。
+//
+// 记录的是**分支下标**(枚举),不含任何自由文本:不落凭据(约定 #8),
+// 又足以在恢复时精确回到同一条分支。
+func (l *lowerer) selectExitBranch(branches []RouteBranch, st StateAccess,
+	decisionNodeID string, decisionSkipped bool) (int, bool) {
+	if decisionSkipped {
+		if idx, ok := recordedExitBranch(st, decisionNodeID); ok && idx >= 0 && idx < len(branches) {
+			return idx, true
+		}
+	}
+	idx, ok := l.matchBranch(branches, st)
+	if !ok {
+		return idx, false
+	}
+	// 记录路由依据:结构化枚举(分支下标),不落凭据。
+	_ = st.Set(RouteBranchKey(decisionNodeID), idx)
+	return idx, true
+}
+
+// recordedExitBranch 读出状态里记录的出口分支下标。
+//
+// 值经 JSON 往返会变成 float64(约定:JSON 往返类型),故用 IntOfOk 读。
+func recordedExitBranch(st StateAccess, decisionNodeID string) (int, bool) {
+	v, ok := st.Get(RouteBranchKey(decisionNodeID))
+	if !ok || v == nil {
+		return 0, false
+	}
+	idx, ok := IntOfOk(v)
+	if !ok {
+		return 0, false
+	}
+	return idx, true
+}
+
+// nodeAlreadyDone 判断节点是否已完成(恢复重放时会被直接跳过)。
+//
+// 与 nodeAgent 的跳过规则**同源**(两处各写一份必然漂移 —— 约定 #13
+// 的同源精神):状态是 success / skipped 即视为已完成。
+func nodeAlreadyDone(st StateAccess, nodeID string) bool {
+	s, ok := st.Get(StatusKey(nodeID))
+	if !ok || s == nil {
+		return false
+	}
+	switch fmt.Sprint(s) {
+	case string(model.NodeSuccess), string(model.NodeSkipped):
+		return true
+	}
+	return false
 }
 
 // EvalCondition 用 expr 引擎对状态求值条件表达式。

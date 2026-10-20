@@ -37,7 +37,21 @@ const LIST_METHODS = [
   "gitLog",
 ];
 
-const CALL_RE = new RegExp(`\\bapi\\.(${LIST_METHODS.join("|")})\\s*\\(`, "g");
+// CALL_RE 匹配列表接口调用点。
+//
+// api 与方法名之间**允许空白/换行**:真实代码里存在
+//
+//   api
+//     .listAgents()
+//
+// 这种换行写法(实测:pages/Designer.tsx、pages/Workflows.tsx、
+// components/layout.tsx 各有一处)。原正则要求 "api." 紧挨着,
+// 于是这三处调用点对守卫**完全不可见** —— 调用点级判定(直接 .map、
+// 先赋值再 .map)对它们一律失效,只剩文件级判定兜着。
+const CALL_RE = new RegExp(
+  `\\bapi\\s*\\.\\s*(${LIST_METHODS.join("|")})\\s*\\(`,
+  "g",
+);
 
 // LIST_MEMBERS 是"把值当列表用"的成员。
 //
@@ -159,7 +173,10 @@ function arrayElements(src: string, open: number): string[] {
 
 /** 文本里第一个列表接口调用(返回接口名,没有则 null) */
 function listCallIn(text: string): string | null {
-  const re = new RegExp(`\\bapi\\.(${LIST_METHODS.join("|")})\\s*\\(`, "g");
+  const re = new RegExp(
+    `\\bapi\\s*\\.\\s*(${LIST_METHODS.join("|")})\\s*\\(`,
+    "g",
+  );
   const m = re.exec(text);
   return m ? m[1] : null;
 }
@@ -243,8 +260,16 @@ function collectListBindings(src: string): ListBinding[] {
     }
 
     // 回调形参:api.listX().then((x) => …)
+    //
+    // 形参可能带类型标注(.then((execs: Execution[] | null) => …)):
+    // 原正则要求形参后面紧跟 ")",带标注的写法匹配不上 → 该绑定
+    // 不可见 → 守卫看不见这条调用点的防御情况(实测:components/layout.tsx
+    // 的 listExecutions 调用点正是这种写法)。
     const tail = src.slice(callEnd);
-    const cb = /^\s*\.\s*then\s*\(\s*(?:async\s*)?\(\s*([A-Za-z_$][\w$]*)\s*\)/.exec(tail);
+    const cb =
+      /^\s*\.\s*then\s*\(\s*(?:async\s*)?\(\s*([A-Za-z_$][\w$]*)\s*(?::[^)]*)?\)/.exec(
+        tail,
+      );
     if (cb) {
       add({ name: cb[1], method, offset: callEnd, guarded: false });
     }
@@ -410,5 +435,59 @@ describe("约定 7:列表接口先过 asArray 再 .map", () => {
     // 防空转:扫描器的识别逻辑退化时(接口改名/赋值形式变化),绑定会扫不到,
     // 上面的"没有违规"就会恒真通过。绑定数下限把它变成红灯。
     expect(bindingCount).toBeGreaterThan(3);
+  });
+
+  // 守卫自身的盲区回归(不是产品代码的缺陷,是**判定逻辑**的缺陷):
+  //
+  // 1. 原 CALL_RE 要求 "api." 紧挨着方法名,于是换行写法
+  //      api
+  //        .listAgents()
+  //    对调用点级判定**完全不可见** —— 实测仓库里有三处这种写法
+  //    (pages/Designer.tsx、pages/Workflows.tsx、components/layout.tsx),
+  //    它们只被文件级判定兜着。
+  // 2. 回调形参带类型标注时(.then((execs: Execution[] | null) => …)),
+  //    原正则匹配不上 → 该绑定不可见。
+  //
+  // 下面用**合成源码**验证判定逻辑本身:换行调用点必须被看见,
+  // 且去掉防御后必须被判违规(否则守卫对这三处是瞎的)。
+  it("换行写法的列表调用点必须被识别,且失去防御时必须判违规", () => {
+    const guarded = [
+      "useEffect(() => {",
+      "  api",
+      "    .listAgents()",
+      "    .then((as) => setAgents(asArray<AgentInfo>(as).map((a) => a.id)))",
+      "    .catch(() => {});",
+      "}, []);",
+    ].join("\n");
+    const unguarded = [
+      "useEffect(() => {",
+      "  api",
+      "    .listAgents()",
+      "    .then((as) => setAgents(as.map((a) => a.id)))",
+      "    .catch(() => {});",
+      "}, []);",
+    ].join("\n");
+
+    // 换行调用点必须被看见(防空转:看不见的话下面两条断言都恒真)。
+    expect([...guarded.matchAll(CALL_RE)].length).toBe(1);
+    expect([...unguarded.matchAll(CALL_RE)].length).toBe(1);
+
+    // 带类型标注的回调形参必须被识别成绑定。
+    const typed = [
+      "api",
+      "  .listExecutions(\"\", 50)",
+      "  .then((execs: Execution[] | null) => {",
+      "    const list = asArray<Execution>(execs);",
+      "    setRunning(list.filter((e) => e.state === \"RUNNING\").length);",
+      "  });",
+    ].join("\n");
+    const typedBindings = collectListBindings(typed);
+    expect(typedBindings.map((b) => b.name)).toContain("execs");
+
+    // 去掉防御后必须判违规(换行 + 带类型标注两种形态都要覆盖)。
+    for (const src of [unguarded, typed.replace("asArray<Execution>(execs)", "execs")]) {
+      const violations = findUnguardedListUses(src, collectListBindings(src));
+      expect(violations.length).toBeGreaterThan(0);
+    }
   });
 });

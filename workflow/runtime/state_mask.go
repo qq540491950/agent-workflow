@@ -89,6 +89,14 @@ const (
 	nodeSuffixAnswered = ":answered"
 )
 
+// 路由级状态键的前缀与后缀(route:<id>:<suffix>)。
+const (
+	// routePrefix 路由级状态键前缀。
+	routePrefix = "route:"
+	// routeSuffixBranch 出口分支下标:结构化(枚举,原样保留)。
+	routeSuffixBranch = ":branch"
+)
+
 // structuredStateKey 判定键是否为"结构化键"(值必须原样保留)。
 func structuredStateKey(key string) bool {
 	if structuredStateKeys[key] {
@@ -96,6 +104,16 @@ func structuredStateKey(key string) bool {
 	}
 	switch nodeScopedSuffix(key) {
 	case nodeSuffixStatus, nodeSuffixAttempt:
+		return true
+	}
+	// route:<id>:branch —— 路由选定的出口分支下标。
+	//
+	// 它是**路由依据**:恢复执行靠它回放上一次选定的分支(见
+	// compiler/lower.go 的 selectExitBranch)。若被脱敏改写,恢复时
+	// 回放的是另一个分支 —— "人批准 A 分支,恢复后走 B 分支"。
+	// 值是 int,脱敏对它没有意义,但必须显式登记:漏登记 = 将来某天
+	// 有人把它改成字符串(比如存条件表达式)时,明文/改写会静默发生。
+	if strings.HasPrefix(key, routePrefix) && strings.HasSuffix(key, routeSuffixBranch) {
 		return true
 	}
 	return false
@@ -116,7 +134,7 @@ func nodeScopedSuffix(key string) string {
 	return key[i:]
 }
 
-// ---- output 键的双重身份:恢复路径的口径差(已知,刻意保留) ----
+// ---- output 键的双重身份:恢复路径的口径差(已收口,残余见下) ----
 //
 // output(compiler.KeyOutput)同时是:
 //
@@ -132,26 +150,54 @@ func nodeScopedSuffix(key string) string {
 //     state_json(已脱敏)重新灌进会话(engine.go 的 resume 分支),
 //     output 因此是脱敏副本。
 //
-// 影响面(窄):只有当 Agent 输出里**含凭据形态的子串**、且条件表达式
-// 恰好检查那一段时,两条路径才给出不同的求值结果。例如
-// `output contains "ANTHROPIC_API_KEY=sk-"`:实时运行为真,恢复运行为假
-// (脱敏后是 "ANTHROPIC_API_KEY=***")。此时执行会走另一条边 ——
-// 差异是"可观察的分支不同",不是静默成功(约定 #14 的"该失败却成功"
-// 不适用:条件求值本身由用户的显式表达式决定)。
+// **这条差不是"窄到无所谓"**(第六轮的错误判断,终审复审已实测证伪):
+// 它能让**恢复后走另一条分支**。实测链路:skill 节点输出
+// "ANTHROPIC_API_KEY=sk-xyz" + 边条件 `output contains "sk-"`
+// → 首次运行走 secret_path → HITL 答复触发 resume → 条件在脱敏副本
+// ("ANTHROPIC_API_KEY=***")上重新求值 → 改走 normal_path。
+// 在审批流里 = **人批准 A 分支,恢复后走 B 分支**(约定 #14 同族:
+// 走错分支比崩溃更危险 —— 用户看不到任何异常,只看到"流程跑完了")。
 //
-// 为什么保留这条差(而不是消除它):
+// 触发条件(精确边界,不止"凭据形态"):
 //
-//   - 办法一:把 output 从脱敏键里排除 → 凭据明文落库,违反约定 #8;
-//   - 办法二:另存一份未脱敏的 output 专供恢复 → 同样是明文落库;
-//   - 办法三:把 output 从条件变量集合里去掉 → 破坏
+//   1. 路由在**恢复时**重新求值出口条件(而不是回放已选定的分支);
+//   2. 该条件读 output(其余条件变量 decision/status/iteration 都是
+//      结构化键,原样保留;variables 走 exec.Variables,不经本文件);
+//   3. 落库的 output 与实时求值时用的 output **不是同一份**:
+//      a. 脱敏改写了它(含凭据形态的 key=value → 值被替换成 ***);
+//      b. 或它被**后续节点覆盖**了(output 键的语义是"最近一次成功
+//         节点的输出",暂停前跑过的节点会改写它)。
+//
+// 三条里只要 1+2+3 同时成立,分支就可能与实时不同。
+//
+// **收口方式(本轮)**:路由一旦选定出口分支,这个选择就是本次执行的
+// 既成事实 —— 把它记进**结构化**状态键 route:<决策节点>:branch
+// (值是分支下标,枚举,不含自由文本,不落凭据),恢复时**回放**它,
+// 不再拿脱敏副本重新求值。实现见 compiler/lower.go 的 selectExitBranch。
+//
+// 为什么不用别的办法:
+//
+//   - 把 output 从脱敏键里排除 → 凭据明文落库,违反约定 #8;
+//   - 另存一份未脱敏的 output 专供恢复 → 同样是明文落库;
+//   - 把 output 从条件变量集合里去掉 → 破坏
 //     compiler/conditionenv.go 的唯一定义,用户现有的条件表达式会被
 //     校验期判成 "unknown name" 而拒绝保存(约定 #13:校验期与运行期同源)。
 //
-// 三条路都要么泄漏凭据、要么改掉用户可见的条件变量语义。在"凭据不落库"
-// 与"条件变量集合不变"两个约束下,这条差**无法完美消除**,只能写明。
+// 三条路都要么泄漏凭据、要么改掉用户可见的条件变量语义。
+// "回放已选定的分支"是唯一不落明文、也不改条件变量集合的路。
 //
-// 规避建议(给写条件表达式的人):不要用 output 里的凭据形态子串做判断;
-// 需要稳定的分支依据时,用 decision / status(结构化键,原样保留)。
+// **残余**(收口后仍然存在的口径差,边界明确):
+//
+//   - 路由在**暂停前从未选定过分支**时(例如循环达到上限后暂停,
+//     恢复时人的答复合法地改变了 decision → 条件必须重新求值),
+//     这次求值用的仍是落库的 output 副本;
+//   - 多回边循环里的 switchAgent(选本轮走哪条回边)每轮重新求值,
+//     它读到的"上一轮 output"在恢复时是脱敏副本;
+//   - 这两处要彻底消除,只能把原文留在盘上(违反约定 #8)或取消 output
+//     作为条件变量(违反约定 #13)—— 属于三个硬约束真正互斥的角落。
+//
+// 规避建议(给写条件表达式的人):需要稳定的分支依据时,用
+// decision / status(结构化键,原样保留),别用 output 里的自由文本。
 
 // outcomeJSONKey 判断键是否是"outcome JSON"形态
 // (node:<id>:result / node:<id>:answered):值是 compiler.NodeOutcome 的 JSON 文本。

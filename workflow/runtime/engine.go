@@ -584,13 +584,18 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 	if mode == "resume" {
 		// 回放的是**已脱敏**的状态快照(state_json 落库前按键分类脱敏,
 		// 见 state_mask.go):自由文本键(output / node:<id>:result …)在这里
-		// 是脱敏副本,结构化键(decision / node:<id>:status …)原样保留。
+		// 是脱敏副本,结构化键(decision / node:<id>:status / route:<id>:branch …)
+		// 原样保留。
 		//
 		// 口径差:output 同时是条件变量,于是**恢复时**的条件在脱敏文本上
-		// 求值,而**实时运行**时在原文上求值。影响面窄(仅当输出含凭据
-		// 形态子串且条件恰好检查那一段),成因与取舍见 state_mask.go 的
-		// "output 键的双重身份"一节 —— 两条路要么泄漏凭据、要么改掉
-		// 条件变量集合,无法完美消除,只能写明。
+		// 求值,而**实时运行**时在原文上求值。这**不是"影响面窄"**
+		// (第六轮的低估,终审复审已实测证伪):它能让恢复后走另一条分支
+		// ——"人批准 A 分支,恢复后走 B 分支"(约定 #14 同族)。
+		//
+		// 收口:路由选定的出口分支以**结构化**状态键 route:<节点>:branch
+		// 落库(值是分支下标,枚举,不含自由文本),恢复时由 compiler 的
+		// selectExitBranch **回放**,不再拿脱敏副本重新求值。详见
+		// state_mask.go 的"output 键的双重身份"一节(含残余边界)。
 		for k, v := range exec.StateData {
 			initialState[k] = v
 		}

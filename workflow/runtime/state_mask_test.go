@@ -342,10 +342,11 @@ func TestRetryNodeWritesNodeStatusViaStateEntry(t *testing.T) {
 //
 // 形态里的 * 表示该段由运行期变量决定(节点 ID 等)。
 var stateKeyFuncs = map[string]string{
-	"StatusKey":   "node:*:status",
-	"ResultKey":   "node:*:result",
-	"AnsweredKey": "node:*:answered",
-	"attemptKey":  "node:*:attempt",
+	"StatusKey":      "node:*:status",
+	"ResultKey":      "node:*:result",
+	"AnsweredKey":    "node:*:answered",
+	"attemptKey":     "node:*:attempt",
+	"RouteBranchKey": "route:*:branch",
 }
 
 // expectedStateKeyClass 是每个状态键的期望分类。
@@ -366,6 +367,7 @@ var expectedStateKeyClass = map[string]string{
 	"_loop_decision": "structured",
 	"node:*:status":  "structured",
 	"node:*:attempt": "structured",
+	"route:*:branch": "structured",
 	// 自由文本:凭据的载体,必须脱敏
 	"output":            "free",
 	"task":              "free",
