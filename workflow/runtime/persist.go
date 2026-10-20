@@ -128,6 +128,11 @@ func execMetaArgs(exec *model.Execution) []any {
 // 的问题。但 ID 冲突必须显式挡住 —— SaveExecution 是 upsert,直接写会把
 // 已存在的行(可能是已完成/已取消)覆盖成运行中。ID 是 8 字节随机数,
 // 冲突概率约 2^-64,但"约等于零"不等于"等于零":撞上就换一个 ID。
+//
+// 落库的是**脱敏副本**(见 maskedInsertExec):SaveExecution 是整行 upsert,
+// state_json / error 都是**原样**写的,而更新路径(saveMeta / casStateAndSave)
+// 走 execMetaArgs,那里的 error 与 state_json 都已脱敏 —— 两条路径口径
+// 不一致就意味着"落库副本已脱敏"这条不变式只在一条路径上成立。
 func (e *Engine) insertExecution(exec *model.Execution) error {
 	for attempt := 0; attempt < 5; attempt++ {
 		exists, err := e.executionExists(exec.ID)
@@ -138,12 +143,44 @@ func (e *Engine) insertExecution(exec *model.Execution) error {
 			exec.ID = newID("exec")
 			continue
 		}
-		if err := e.Repo.SaveExecution(exec); err != nil {
+		if err := e.Repo.SaveExecution(maskedInsertExec(exec)); err != nil {
 			return err
 		}
 		return nil
 	}
 	return fmt.Errorf("runtime: 生成执行 ID 反复冲突(已重试 5 次)")
+}
+
+// maskedInsertExec 返回"落库用"的执行记录副本:凭据载体字段已脱敏。
+//
+// 脱敏只作用于**副本**:内存里的 exec 保持原样 —— 运行期还要读它做路由
+// 与决策,API 读出口另有掩码(app/application 的 maskExecution)。
+//
+// 脱敏的字段:
+//
+//   - error:节点失败原因常带 CLI stderr,而 stderr 里常有
+//     "ANTHROPIC_API_KEY=sk-..." 这类凭据(与 execMetaArgs 同源);
+//   - state_json:会话状态快照,按键分类脱敏(见 state_mask.go)。
+//     今天 insert 时 StateData 为 nil 所以不漏,但只要有人复用这条路径
+//     (带状态的插入、备份恢复),明文就直接进库 —— 这正是本函数存在的理由。
+//
+// 刻意**不**脱敏的字段:task 与 variables。
+//
+// 它们是**恢复输入**:恢复路径(loadExec → engine.execute 的 resume 分支)
+// 把 exec.Task / exec.Variables 重新灌进会话,task 进模型消息、variables
+// 进条件表达式求值(env.Vars)。落库副本一旦被改写,恢复后的执行语义就变了
+// (条件走错边 = 约定 #14 的"该失败却成功"同族)—— 比明文落库的伤害更直接,
+// 且明文在**读出口**已经掩码(app/application 的 maskExecution 对 task 与
+// variables 都做了掩码)。这条取舍与 output 键的口径差同源,见
+// state_mask.go 的说明。
+func maskedInsertExec(exec *model.Execution) *model.Execution {
+	if exec == nil {
+		return nil
+	}
+	out := *exec
+	out.Error = logx.Mask(exec.Error)
+	out.StateData = MaskStateData(exec.StateData)
+	return &out
 }
 
 // executionExists 判断执行行是否已存在。

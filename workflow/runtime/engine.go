@@ -379,6 +379,32 @@ func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 	return nil
 }
 
+// setExecState 写执行记录的状态快照 —— **状态写入的统一入口**。
+//
+// 为什么必须有统一入口:
+//
+//  1. 落库脱敏按**键分类**进行(见 state_mask.go):新增状态键若漏登记,
+//     会按"默认拒绝"被当自由文本脱敏 → 运行期读到的值被改写
+//     (约定 #14 同族:执行语义悄悄变掉)。把状态写入收敛到一处,
+//     "改了状态键"这件事才可审计(TestStateWritesAreClassified 也据此
+//     扫得到每一个写入点)。
+//  2. 直接对 exec.StateData 下标赋值在 map 为 nil 时会 panic
+//     ("assignment to entry in nil map"):内存里新建的执行记录
+//     (Start 路径、备份恢复、测试构造)的 StateData 就是 nil。
+//     RetryNode 跑在**调用方** goroutine 里(不在 execute 的兜底
+//     recover 覆盖范围内),panic 会一路上抛(约定 #12)。
+//     (从库里读回的记录不会是 nil,但统一入口不能依赖"调用方恰好
+//     先读过一遍库"。)
+func setExecState(exec *model.Execution, key string, val any) {
+	if exec == nil {
+		return
+	}
+	if exec.StateData == nil {
+		exec.StateData = map[string]any{}
+	}
+	exec.StateData[key] = val
+}
+
 // RetryNode 对失败执行发起恢复:重试失败节点(skip=false)或跳过它(skip=true)。
 // 已成功的节点在重放时自动跳过;FAILED→RUNNING 是用户显式重试的合法转换。
 func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (*model.Execution, error) {
@@ -410,7 +436,7 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	}
 	exec.State = model.ExecutionRunning
 	if skip {
-		exec.StateData[compiler.StatusKey(nodeID)] = string(model.NodeSkipped)
+		setExecState(exec, compiler.StatusKey(nodeID), string(model.NodeSkipped))
 	} else {
 		delete(exec.StateData, compiler.StatusKey(nodeID))
 	}
@@ -556,6 +582,15 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 		"variables":      exec.Variables,
 	}
 	if mode == "resume" {
+		// 回放的是**已脱敏**的状态快照(state_json 落库前按键分类脱敏,
+		// 见 state_mask.go):自由文本键(output / node:<id>:result …)在这里
+		// 是脱敏副本,结构化键(decision / node:<id>:status …)原样保留。
+		//
+		// 口径差:output 同时是条件变量,于是**恢复时**的条件在脱敏文本上
+		// 求值,而**实时运行**时在原文上求值。影响面窄(仅当输出含凭据
+		// 形态子串且条件恰好检查那一段),成因与取舍见 state_mask.go 的
+		// "output 键的双重身份"一节 —— 两条路要么泄漏凭据、要么改掉
+		// 条件变量集合,无法完美消除,只能写明。
 		for k, v := range exec.StateData {
 			initialState[k] = v
 		}

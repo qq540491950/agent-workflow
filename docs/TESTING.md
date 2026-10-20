@@ -2,6 +2,11 @@
 
 > 共 8 轮测试验证(超过最低 5 轮要求),其中轮次 2-8 为浏览器视觉测试(GUI 黑盒)。
 > 每次功能完成与 Bug 修复均有独立 git 提交(见提交号)。
+>
+> **当前状态(轮次 41-52 之后)**:Go 测试文件 **90** 个 / 有测试的包 **21** 个;
+> 前端测试文件 **16** 个 / 用例 **135** 条。完整清单与逐文件说明见
+> "轮次 41-44 / 45-48 / 49-52"三节;"某条测试在什么改动下会变红"的实测
+> 记录见"改坏实现 → 测试变红"专节;门禁自身的盲区见"门禁盲区"一节。
 
 ## 环境
 
@@ -1020,15 +1025,25 @@ stderr 线索。
 >
 > **测试规模变化**:
 >
-> | 维度 | 之前 | 之后 |
-> | --- | --- | --- |
-> | 有测试的 Go 包 | 19 个 | **21 个**(新增 `workflow/model`、根包 `agentworkflow`) |
-> | Go 测试文件 | 41 个 | **66 个** |
-> | 前端测试文件 | 4 个 | **12 个** |
-> | 前端用例 | 46 条 | **89 条** |
+> | 维度 | 轮次 33 前 | 轮次 33-40 后 | **当前(轮次 41-52 后)** |
+> | --- | --- | --- | --- |
+> | 有测试的 Go 包 | 19 个 | 21 个(新增 `workflow/model`、根包 `agentworkflow`) | **21 个** |
+> | Go 测试文件 | 41 个 | 66 个 | **90 个** |
+> | 前端测试文件 | 4 个 | 12 个 | **16 个** |
+> | 前端用例 | 46 条 | 89 条 | **135 条** |
 >
-> 前端 12 文件 / 89 用例是**第一轮结束时**的数;第二轮另有并发轮次继续加测
-> (当前工作树已超过这个数),以 `npx vitest run` 的实时输出为准。
+> 当前值的复算命令(轮次 41-52 之后实测):
+>
+> ```bash
+> git ls-files '*_test.go' | wc -l            # 90 个 Go 测试文件
+> git ls-files '*_test.go' | xargs -n1 dirname | sort -u | wc -l   # 21 个有测试的包
+> cd frontend && find src -name '*.test.ts*' | wc -l   # 16 个前端测试文件
+> cd frontend && npx vitest run              # 135 条用例
+> ```
+>
+> 前端 12 文件 / 89 用例是**第一轮结束时的**数;第二轮(轮次 37-40)另有
+> 并发轮次继续加测,第三、四、五轮继续加测 —— 完整清单见本文
+> "轮次 41-44 / 45-48 / 49-52"三节。
 
 ### 轮次 33:前端(约定 7 / 8 / 10)
 
@@ -1143,10 +1158,192 @@ stderr 线索。
 必然漂移;把它写成**探针**(扫描实现、比对契约表)之后,漂移会立刻让门禁变红。
 本轮新增的两处探针是这个方向的开始,后续同源约定(条件变量集合)应照此办理。
 
+## 轮次 41-44:第三轮(跨文件收口 / 前端契约同步 / 门禁重写,commit `8520115`)
+
+> 4 个子代理并行:跨文件收口 / 前端契约同步 / 门禁脚本重写 / 文档同步。
+> 缺陷号 #142-#162,见 `docs/OPTIMIZATION.md` 第六节。
+
+### 轮次 41:跨文件收口(后端)—— 新增测试文件
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/dsl/no_config_structs_test.go`(1 例) | `TestDSLPackageDeclaresNoConfigStructs`:**dsl 包不得再声明节点配置结构体**(AST 扫描)。9 个零引用结构体删掉后,靠这条防止"第二份契约"重新长出来(约定 13) |
+| `workflow/runtime/enabled_contract_test.go`(2 例) | `TestEnabledConclusionMatchesValidator`:**真实调用** `validator.Validate` 与运行期的 `nodeEnabled`,断言两边结论逐项相同(布尔 / 字符串 / 缺失 / 非法值);`TestEnabledInvalidFailsClosed` |
+| `workflow/runtime/persist_contract_test.go`(2 例) | `TestExecMetaColumnsMatchPersistenceUpsert`(运行期直写 SQL 的列集合 == 持久层 upsert 列集合)、`TestExecMetaColumnsExistInTable`(列真的存在于表里) |
+| `workflow/runtime/skill_status_test.go`(4 例) | `TestSkillStatusNormalized`(`"wait_user"` / `"Failed"` / `" wait_user "` 都归一)、`TestSkillStatusUnknownFailsNode`(契约外状态 → 失败)、`TestSkillStatusEmptyFailsNode`(空状态 → 失败)、`TestSkillStatusFailedKeepsReason`(失败带原因)。**注**:本文件由第三轮创建,其中"契约外状态"那条用例在**第五轮被改写**(见下节) |
+| `workflow/validator/permission_test.go`(3 例) | `TestInvalidPermissionOverrideRejected`(非法 `permissions` 结构在校验期被拒)、`TestValidPermissionOverrideAccepted`、`TestEmptyPermissionOverrideAccepted` |
+| `workflow/runtime/permission_test.go`(3 例) | `TestIllegalPermissionFailsExecutionWithReason`(运行期**明确失败**且原因写明"权限覆盖非法",而不是"无权执行 fs:write")、`TestStartRejectsIllegalPermissionWithReason`、`TestLegalPermissionOverrideStillApplies` |
+| `logx/level_test.go`(3 例) | `TestValidateLevelMatchesSetLevelChecked`(校验入口与应用入口对同一批取值给**同一结论**)、`TestLevelsReturnsSupportedSet`(白名单内容与顺序固定)、`TestValidateLevelDoesNotChangeCurrentLevel`(校验不改变当前级别) |
+| `app/application/loglevel_test.go`(3 例) | `TestLogLevelAcceptedSetMatchesLogx`(设置层接受集合 == logx)、`TestInvalidLogLevelNotPersisted`(非法级别不落库)、`TestValidLogLevelAppliedAndPersisted` |
+| `main_loglevel_test.go`(1 例) | `TestIsValidLogLevelMatchesLogx`(启动参数校验与 logx 同一份白名单) |
+| `app/application/masking_test.go`(+159 行) | API 读出口的 `state_data` / `task` 脱敏 |
+
+### 轮次 42:前端契约同步 —— 新增测试文件
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `frontend/src/lib/api.test.ts`(+236 行) | 统一错误体解析:`Kind(CODE): ` 前缀被剥掉、只有 `code` 没有 `error` 时按码表给中文提示、未知 code 不落 Object 原型链 |
+| `frontend/src/pages/Agents.test.tsx`(3 例) | 空键行:新增行未填名称时不再允许插同名空行;保存时过滤未命名行并**如实告知**;没有空键时原样提交(掩码值 `***` 不被丢掉) |
+| `frontend/src/pages/Skills.test.tsx`(3 例) | 开关 in-flight 锁:请求未完成时连点只发一次请求;点击后立即乐观更新;失败时回滚并提示 |
+| `frontend/src/pages/GitPanel.test.tsx`(3 例) | 三查询**独立成败**:status 失败时显示原因且不影响 Diff;Log 失败不影响状态面板;全部成功时不报错 |
+| `frontend/src/pages/Settings.test.tsx`(6 例) | script 节点开关**二次确认**(拒绝则保持关闭且不提交);备份恢复的拒绝计数写明"结构非法**或**本机无此 Agent";日志级别非法在前端就拦下(不发给后端) |
+| `frontend/src/pages/ExecutionMonitor.test.tsx`(+52 行) | 输出含 `***` 时给出脱敏说明;未脱敏的输出不显示该说明 |
+
+### 轮次 43:门禁脚本重写 —— 门禁本身的回归
+
+门禁不是"跑一次绿了就算数",本轮给它补了三类**自检**:
+
+| 检查 | 防的是 |
+| --- | --- |
+| 关键包的**用例存在性**检查 | 测试文件存在但用例被注释 / 全 skip → 门禁照样绿,覆盖率悄悄归零 |
+| `go build` 步骤 | `vet` 发现不了的**链接期**错误(缺 main、符号冲突、平台专属代码) |
+| 冒烟脚本的**端口预检** | 端口被上一次残留进程占用时,9 项断言全部打到旧进程上却照样打印 `SMOKE OK` |
+
+`gofmt` 由"传目录"改为"传文件清单":gofmt 遇目录参数会递归整棵树,传模块根
+目录会把 Wails 脚手架(`build/ios`)一起卷进来。
+
+**实测**:重写后 `verify.sh` 8 步全通过,实测 65s。
+
+## 轮次 45-48:第四轮(state_json 脱敏 / CAS 可观测 / 恒真测试清理 / DSL 严格化,commit `4e979eb`)
+
+> 3 个子代理并行。缺陷号 #163-#174,见 `docs/OPTIMIZATION.md` 第七节。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/runtime/state_mask_test.go`(5 例) | `TestMaskStateDataKeepsStructuredKeys`(decision / status / `_abort` / `node:<id>:status` **原样保留** —— 脱敏它们等于改写执行语义)、`TestMaskStateDataMasksFreeTextKeys`(output / `_error` / `git_diff` 等自由文本**必须脱敏**)、`TestMaskStateDataKeepsOutcomeJSONValid`(脱敏后**仍是合法 JSON** —— 恢复路径要 Unmarshal)、`TestMaskStateDataDoesNotMutateInput`(不改运行期在用的 map)、`TestStateWritesAreClassified`(源码扫描:新增状态键未登记分类即红) |
+| `workflow/runtime/cas_conflict_test.go`(4 例) | `TestTerminalCommitConflictDoesNotEmitCompletedEvent`(**状态没落库就不发终态事件**)、`TestCancelCommitConflictIsExpectedRace`(取消路径的冲突是预期竞态)、`TestFailExecutionConflictDoesNotEmitFailedEvent`、`TestNormalTerminalCommitStillEmitsEvent`(正常路径仍发事件 —— 防止"一律不发") |
+| `workflow/runtime/masking_api_test.go`(1 例) | `TestExecutionAPIResponseMasksStateJSON`:**API 响应体**里没有明文(与落库侧是两条独立路径,各测各的) |
+| `workflow/dsl/schema_test.go`(9 例) | `TestParseRejectsMisplacedPermissions` / `...JSON`(YAML 与 JSON **同源**)、`TestParseRejectsUnknownTopLevelKeyJSON`、`TestParseTopLevelStrictnessSameForYAMLAndJSON`、未知**嵌套**键只忽略但记入 `IgnoredKeys`(`TestParseIgnoresButReportsUnknownNestedKey` / `...SettingsKey`)、`TestParseAcceptsRepoExamples`(**仓库自己的示例必须仍能导入**)、`TestParseAcceptsPermissionsAtRoot`、`TestRoundTripExportImportHasNoIgnoredKeys`(导出→导入不得凭空多出一批 WARN) |
+| `workflow/model/permission_alias_test.go`(4 例) | `TestWorkflowUnmarshalAcceptsDSLPermissionsSection`(读侧认 `permissions` 别名)、`...LegacyPermissionSection`、`...RejectsBothPermissionSections`(两个键同时出现报错,不是静默挑一个)、`TestWorkflowMarshalKeepsLegacyKey`(**输出侧键名不动** —— 既有 API 响应与历史快照不受影响) |
+| `skill/builtin/builtin_args2_test.go`(5 例) | `message` 是标量 → 归一;是结构体 → **报错**(此前静默变空串);`LogSkill` 同构 |
+| `skill/builtin/builtin_bool_test.go`(3 例) | `fail: "treu"`(拼错)→ 报错(此前一律当 false → "注入失败"静默失效) |
+| `template/template_missing_test.go`(7 例) | 缺失变量的口径:**键在数据里 = 可解析**(值为 nil 渲染成空串,不算缺失);键不在数据里 = 缺失。另含自引用不递归、模板不得越界访问数据 |
+| `agent/output_depth_test.go`(+168 行) | 改掉**逻辑上恒假的断言**,换成真实不变量(线性扫描的实测行为) |
+| `workflow/compiler/adk_contract_test.go`(+104 行) | 三处只 `t.Log` 不 `t.Error` 的"契约测试"改成**真断言** |
+| `agent/redact_test.go`(+102 行) | 脱敏补齐部分包含 / JSON / 多行 / 边界四类形态 |
+
+## 轮次 49-52:第五轮(runtime 交接 / 前端与校验期 / API 严格化,commit `59ef7d7`)
+
+> 3 个子代理 + 1 个独立 verifier。缺陷号 #175-#188,见
+> `docs/OPTIMIZATION.md` 第八节。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/runtime/template_render_test.go`(3 例) | `TestTemplateRenderFailureFailsNode`(渲染失败 → **节点失败**,Agent 不被调用)、`TestTemplateRenderFailureInInstructionsFailsNode`、`TestTemplateRenderOKNoWarning` |
+| `workflow/runtime/agent_status_test.go`(4 例) | `TestAgentStatusNormalized`(`"failed"` / `"wait_user"` 归一)、`TestAgentStatusUnknownFails`(契约外状态 → 失败)、`TestAgentStatusEmptyFails`、`TestAgentNotCalledAfterRenderFailure`(**Agent 不得被调用** —— 渲染失败时不能带着原文去干活) |
+| `workflow/runtime/skill_args_test.go`(5 例) | `TestSkillArgsWrongTypeFails`(args 不是 map → 失败)、`TestSkillArgsMapReachesSkill`(正确的 map 确实送达)、`TestSkillArgsAbsentOK` / `TestSkillArgsNilOK`(缺省合法)、`TestGitArgsWrongTypeFails` |
+| `workflow/runtime/node_config_guard_test.go`(4 例) | `TestAgentPromptObjectWithoutTemplateFails`(prompt 对象缺 template → 失败,不再发空提示词)、`...WithTemplateOK`、`TestSubworkflowInputWrongTypeFails`、`TestSubworkflowInputMapReachesChild` |
+| `workflow/validator/unknown_config_test.go`(5 例) | `TestUnknownNodeConfigKeyIsReportedAsWarning`(未知配置键 → **警告**)、`TestUnknownNodeConfigKeyDoesNotBlockSave`(**不阻断保存** —— 存量工作流里有拼错的键)、`TestDeprecatedConfigKeyIsNotReportedAsUnknown`(已废弃的键只报废弃)、`TestDeclaredConfigKeysAreAllKnown`、`TestRepoExampleWorkflowsStayValid` |
+| `api/workflow_payload_test.go`(7 例) | `TestFrontendSavePayloadsAreAccepted`(前端设计器的 payload **必须**被接受 —— 严格化不能打破保存路径)、`TestPostWorkflowAcceptsEveryKnownTopLevelKey`、`TestPostWorkflowAcceptsPermissionsAlias`、`TestPostWorkflowRejectsUnknownTopLevelKey`(**400 `UNKNOWN_FIELD`**)、`TestValidateWorkflowRejectsUnknownTopLevelKey`、`TestImportResponseCarriesIgnoredKeys`(导入响应带 `ignored_keys`)、`TestImportResponseWithoutIgnoredKeysHasNoField`(没有键被忽略时**不出现**该字段) |
+| `frontend/src/pages/designer.test.ts`(+41 行) | `toModel` 抽成纯函数后:保存时**保留**从服务端读到的 `permission`;没有权限覆盖时 payload 不带这个键 |
+| `frontend/src/pages/Workflows.test.tsx`(迭代 21 补) | 导入响应带 `ignored_keys` 时提示"N 个键被忽略"并列出键名;桌面模式没有该字段时 `?? []` 兜底不崩 |
+
+## "改坏实现 → 测试变红":实测记录
+
+> 回归史里最有价值的一类信息不是"测了什么",而是**"某条测试在什么改动下
+> 会变红"**。恒真的测试比没有测试更危险(虚假安全感)—— 轮次 31 已清过一批,
+> 轮次 47 又清出一批。
+>
+> **本表的读法**:每行给出的是**该测试所断言的不变量的反面** ——"把实现
+> 改成什么样,这条断言就不成立"。这正是"改坏实现 → 变红"的等价表述:
+> 断言不成立 = 测试变红。标注 **【实测】** 的条目是修复当时真的做过
+> "回退修复 → 跑测试 → 确认变红 → 还原 → 确认变绿"的闭环验证
+> (见各轮 commit message 与 `docs/OPTIMIZATION.md` 的"实测有效性"记述);
+> 未标注的条目是**从断言反推出来的可验证方向**,可直接照做一次回退实验。
+>
+> **做法**:把修复回退(或按缺陷描述改坏实现)→ 跑该测试 → 确认变红 →
+> 还原修复 → 确认变绿。全程不提交中间状态。
+
+### 第三轮(实测过的几条)
+
+| 测试 | 改坏什么会变红 |
+| --- | --- |
+| `TestDSLPackageDeclaresNoConfigStructs` | 在 `workflow/dsl` 里重新加一个节点配置结构体 → 立刻红,并指出"该去哪里改" |
+| `TestEnabledConclusionMatchesValidator` | 让校验期放行字符串 `"false"`、或让运行期按字符串解析 → 两侧结论不一致 → 红 |
+| `TestExecMetaColumnsMatchPersistenceUpsert` | 持久层加一列而运行期不写 → 列集合不等 → 红 |
+| `TestSkillStatusNormalized` | 运行期恢复"精确匹配大小写"→ `"wait_user"` / `" wait_user "` 落空 → 红 |
+| `TestIllegalPermissionFailsExecutionWithReason` | 把运行期改回"全拒 + 继续跑" → 失败原因不再是"权限覆盖非法" → 红 |
+| `TestValidateLevelMatchesSetLevelChecked` | 让 `SetLevelChecked` 对某个非法值不报错(而 `ValidateLevel` 报错)→ 红 |
+| `TestInvalidLogLevelNotPersisted` | 把落库挪到校验之前 → 非法级别落库 → 红 |
+| Skills in-flight 锁用例 | 去掉锁 → 连点发出两次请求 → 红 |
+| GitPanel 独立成败用例 | 把三查询改回 `Promise.all` → status 失败时 Diff 也没了 → 红 |
+| Settings script 确认用例 | 去掉 `window.confirm` → 开关直接打开 → 红 |
+
+### 第四轮(实测过的几条)
+
+| 测试 | 改坏什么会变红 |
+| --- | --- |
+| `TestMaskStateDataKeepsStructuredKeys` | 把 `decision` / `node:<id>:status` 也纳入脱敏 → 结构化键被改写 → 红(这条正是"无差别脱敏"方案的拦路石) |
+| `TestMaskStateDataMasksFreeTextKeys` | 让 `output` / `_error` 免脱敏 → 红 |
+| `TestMaskStateDataKeepsOutcomeJSONValid` | 对 `node:<id>:result` 直接做正则替换 → 产出非法 JSON → 红 |
+| `TestTerminalCommitConflictDoesNotEmitCompletedEvent` | 恢复"冲突也照发终态事件"→ 事件流说完成、库里还是运行中 → 红 |
+| `TestCancelCommitConflictIsExpectedRace` | 把取消路径的冲突也记 ERROR → 噪音升级 → 红 |
+| `TestParseRejectsMisplacedPermissions` | 去掉 `permissions` 错层级的报错 → 权限收紧静默失效 → 红 |
+| `TestParseTopLevelStrictnessSameForYAMLAndJSON` | 只给 YAML 路径加顶层检查、JSON 路径不查 → 两条路径不一致 → 红 |
+| `TestParseAcceptsRepoExamples` | 让键检查变严到阻断导入 → 仓库自己的示例导不进来 → 红 |
+| `TestRoundTripExportImportHasNoIgnoredKeys` | 往导出文本里写进被忽略的键 → 往返后凭空多出一批 WARN → 红 |
+| `TestWorkflowUnmarshalAcceptsDSLPermissionsSection` | 去掉 `permissions` 别名 → 权限段被静默丢弃 → 红 |
+| `TestWorkflowMarshalKeepsLegacyKey` | 把输出侧也改成 `permissions` → 历史快照与既有 API 响应全变 → 红 |
+| `TestRunTestSkillRejectsUnrecognizedBoolArg` | 让 truthy 对不认识的字符串返回 false → 拼错的 `fail: "treu"` 静默失效 → 红 |
+| `TestRenderNilValueIsResolvableButNotMissing` | 把口径改回"值为 nil 即缺失" → 未产出槽位全刷告警 → 红 |
+| `agent/output_depth_test.go` | 恢复原先**逻辑上恒假**的断言 → 改坏实现仍然绿(所以本轮直接换掉了) |
+| `adk_contract_test.go` 三处 | 恢复成只 `t.Log` → ADK 契约回归不会让 CI 变红 → 绿(所以本轮改成真断言) |
+
+> **一处"测试反过来钉住了错误口径"的实例**(值得单列):
+> 第三轮把"契约外的 Skill 状态按成功处理(不猜)"当成**刻意口径**写进了
+> 用例(`TestSkillStatusUnknownIsSuccess`),并在注释里写明"本用例把该口径
+> 钉住,避免以后有人把未知状态改成 FAILED 造成行为漂移"。第五轮发现这个
+> 口径本身违反约定 14("不猜某个具体状态值"被误写成"猜它是成功"),
+> 遂**改写**该用例为 `TestSkillStatusUnknownFailsNode`。
+>
+> 教训:把当前行为写进测试**不等于**该行为正确 —— 钉住口径之前要先问
+> "这个口径对吗"。否则测试会忠实地保护一个错误决定。
+
+### 第五轮(实测过的几条)
+
+| 测试 | 改坏什么会变红 |
+| --- | --- |
+| `TestTemplateRenderFailureFailsNode` | 让渲染层恢复"吞掉 error 并回退原始模板" → Agent 带着 `{{revwie}}` 原文去干活并成功 → 红 |
+| `TestAgentNotCalledAfterRenderFailure` | 渲染失败后仍调用 Agent → 调用计数不为 0 → 红 |
+| `TestSkillStatusUnknownFailsNode` | 让运行期把契约外状态当成功 → 红(**这条是改写第三轮那条用例得来的**,见上面的"钉住错误口径"实例) |
+| `TestSkillStatusEmptyFailsNode` | 让空状态按成功处理 → 红 |
+| `TestAgentStatusUnknownFails` / `...EmptyFails` | 让契约外状态 / 空状态按成功处理 → 红 |
+| `TestSkillArgsWrongTypeFails` | 恢复 `args, _ := ...(map[string]any)` 的静默丢弃 → 红 |
+| `TestAgentPromptObjectWithoutTemplateFails` | 恢复"prompt 变空串" → 红 |
+| `TestSubworkflowInputWrongTypeFails` | 恢复"input 变 nil" → 红 |
+| `TestUnknownNodeConfigKeyIsReportedAsWarning` | 去掉未知配置键的告警 → 拼错的键再次无声 → 红 |
+| `TestUnknownNodeConfigKeyDoesNotBlockSave` | 把告警升级成错误 → 存量工作流打不开 → 红 |
+| `TestDeprecatedConfigKeyIsNotReportedAsUnknown` | 让废弃键同时报"未知" → 用户看到两条互相矛盾的提示 → 红 |
+| `TestPostWorkflowRejectsUnknownTopLevelKey` | 去掉 `UNKNOWN_FIELD` 检查 → 多余键再次静默丢弃 → 红 |
+| `TestFrontendSavePayloadsAreAccepted` | 严格化时误伤前端 payload → 门禁里的**保存路径**直接断 → 红 |
+| `TestImportResponseCarriesIgnoredKeys` | 去掉响应里的 `ignored_keys` → 用户再次看不到"N 个键被忽略" → 红 |
+| `TestImportResponseWithoutIgnoredKeysHasNoField` | 无条件带上该字段 → 前端把"没有 ignored_keys"误当成"没解析到" → 红 |
+| `TestValidLogLevelAppliedAndPersisted` | 让设置层不落库 / 不改内存级别 → 红(**注**:该用例只断言 app 层字段与库里的值,`logx` 的**实际级别**没有被验证 —— 见"门禁盲区") |
+
+### 迭代 21 补做的两条实测
+
+| 测试 | 改坏什么会变红 |
+| --- | --- |
+| `frontend/src/pages/Workflows.test.tsx` 的"被忽略的键必须可见" **【实测】** | 删掉 `toast.warning` 那一段 → 提示不再出现 → 红(实测报 `expected '' to contain '2 个键被忽略'`) |
+| `frontend/src/lib/api.test.ts` 的 `CODE_HINTS` 参数化用例 **【实测】** | 从 `CODE_HINTS` 删掉任一新码 → 回落成"HTTP 400: 请求参数不合法" → 红(实测报 `Expected: "未知顶层键" / Received: "HTTP 400: 请求参数不合法"`) |
+
+## 门禁盲区(本轮登记)
+
+| 盲区 | 现状 | 后果 |
+| --- | --- | --- |
+| **gofmt 漏掉平台专属文件** | `scripts/verify.sh` 的 gofmt 文件清单由 `go list` 的 `.GoFiles` 推导 —— `go list` **只返回当前平台的文件**。实测:`agent/process_windows.go`(`//go:build windows`)**不在** darwin 的检查清单里 | 在 macOS 上改坏 `process_windows.go`,`gofmt -l` 仍然是空、门禁全绿;Windows 构建才会暴露。**第六轮修复中** |
+| **`state_mask` 分类守卫覆盖面不足** | 守卫只扫 `workflow/compiler/lower.go` 与 `workflow/runtime/executor.go` 两个文件,且只认 `.Set()` 调用式(receiver 名必须是 `st` / `state`)。`engine.go` 里的 `exec.StateData[compiler.StatusKey(nodeID)] = …` 这种**直接写 map** 的形式完全不可见 | 新加的状态键若走直接 map 写,守卫不会报警,落库脱敏会按"自由文本"处理 —— 结构化键被改写 = 执行语义变(见 `docs/OPTIMIZATION.md` 第九节第 14 条) |
+| **日志级别"即时生效"缺真正的断言** | `app/application/loglevel_test.go` 断言了 app 层字段与库里的值,但 `logx` **没有导出**"当前级别"的读取接口 | 改坏 `logx.SetLevelChecked` 不会让门禁变红(测试名与实际覆盖范围不符) |
+| **顶层键严格化只在服务器模式生效** | `UNKNOWN_FIELD` 的检查在 `api/server.go` 的 `parseWorkflow` 里 | 桌面模式(走 Wails 绑定 → app 层 → `model.Workflow.UnmarshalJSON`)仍是宽松的 `json.Unmarshal`,未知顶层键照旧静默丢弃 |
+| **契约探针只覆盖"配置键"维度** | `nodeconfig_contract_test.go` 有 AST 探针,`compiler/conditionenv.go` 只有普通单测 | 校验期与运行期若再次分叉条件变量集合,没有机制会报警 |
+| **`asArray` 守卫是源码扫描** | `frontend/src/test/list-guard.test.ts` 能抓"调用点后面直接 `.map`" | "先赋值给变量再 `.map`"的写法扫不到 |
+| **SSE 订阅释放无端到端断言** | 单测覆盖了写失败即关流 | 冒烟脚本没有"断开后订阅数归零"的断言,端到端层面仍可能回归 |
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 41-52 | **三轮并行复审(10 个子代理 + 1 个独立 verifier)**:跨文件收口 / 前端契约同步 / 门禁重写 / `state_json` 脱敏 / CAS 可观测 / 恒真测试清理 / DSL 严格化 / runtime 静默丢弃三处 / API 严格化 / 累积退化复审 | ✅ | #142-#188 共 **47 条**:当轮修复 43 条,转下一轮 4 条(#185 `state_mask` 守卫覆盖面、#186 日志级别无实际断言、#187 `execStateGuardSQL` 作用范围注释、#188 gofmt 平台文件盲区;其中 #187 / #188 在第六轮处理中);新增**源码扫描守卫** 4 处(dsl 禁声明配置结构体 / 运行期与持久层列集合一致 / 状态键必须登记分类 / 前端未知顶层键);门禁重写为 **8 步**(补 `go build`、关键包用例存在性、gofmt 按文件清单、冒烟端口预检);Go 测试文件 66→**90**、有测试包 21 个、前端 12→**16** 文件 / 89→**135** 用例;新增专节"改坏实现 → 测试变红"(实测记录 40+ 条)与"门禁盲区" |
 | 33-40 | **两轮并行审计(8 个子代理)**:前端 / DSL+模型 / 持久化+事件 / API+应用层 / 运行时 / 编译器+校验器 / 适配层 / 支撑包 | ✅ | #95-#122(第一轮 28 条)+ #123-#141(第二轮 19 条),共 47 条全部修复;新增**探针式测试** 2 处(AST 契约扫描 + 前端源码扫描);Go 有测试包 19→21、测试文件 41→66,前端 4→12 文件 / 46→89 用例;门禁自身修 3 处(排除 build/ 与 node_modules/、补 `go build`、前端构建输出不再被吞) |
 | 32 | 可视化/端到端验证(Browser + 真实 .app) | ✅ | Dashboard 桌面模式像素级验证通过(mode: desktop / IPC 绑定 / 5 统计卡 / 3 工作流表);另修裸二进制启动即退出的真实缺陷(缺 bundle identifier → notifications 服务启动失败 → os.Exit);Browser 的 EventSource 冻结属工具限制,已用 API 冒烟覆盖 10 项端到端 |
 | 31 | 复审最近三轮:修自己引入的缺陷 + 约定违反 + 恒真测试清理 | ✅ | #86 检查点节流是死代码 #87 Approve 不重映射决策 #88 并行不收敛违反约定 #14 #89 nil 测试恒真 #90 契约测试不断言 #91 死代码半成品 #92 mock runs 无界增长 #93 自造 itoa #94 结构体 Agent panic 兜底(纵深防御) |

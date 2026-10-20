@@ -36,15 +36,25 @@ func execState(t *testing.T, db *DB, id string) model.ExecutionState {
 }
 
 // ---- 约定 #4:执行状态转换必须走 CAS,整行 upsert 不得绕过它 ----
+//
+// **本组用例的定位(别误读)**:它们直接调用 SaveExecution(导出 API),
+// 验证的是"ON CONFLICT 分支不改走终态"这条 **API 契约**。
+// 当前**生产路径不经过这个分支** —— 唯一的生产调用点
+// workflow/runtime.insertExecution 只做首次写入(行尚不存在,插入前先查重、
+// 撞 ID 就换 ID)。所以这些用例证明的是"SaveExecution 的语义",
+// 而不是"运行期状态机有保护"。运行期状态机的防线是约定 #4 的
+// CasExecutionState,由 workflow/runtime 自己的用例覆盖。
+//
+// 保留这些用例的意义:SaveExecution 是导出 API,契约不能只靠注释声明 ——
+// 改坏守卫时必须有测试变红(而不是靠"反正生产不走这里"放行)。
 
 // TestSaveExecutionDoesNotRevertCastedNegativeTerminal 锁定 CAS 落定的
 // 负面终态(FAILED/CANCELLED)。
 //
-// 背景:SaveExecution 是整行 upsert,`state=excluded.state` 无条件覆盖 ——
-// 一个拿着过期副本的写者(并发 Resume/Retry 的落败一路、崩溃恢复后的迟到写)
-// 能把刚由 CAS 落定的状态改回去。"失败/取消"的裁决被改回"运行中/已完成"
-// 尤其致命:用户明明看到 FAILED,执行却复活成成功(约定 #14 的
-// "该失败却成功"同族问题)。
+// 背景:SaveExecution 是整行 upsert,若冲突分支无条件覆盖 state,
+// 一个拿着过期副本的写者就能把刚由 CAS 落定的状态改回去。"失败/取消"的
+// 裁决被改回"运行中/已完成"尤其致命:用户明明看到 FAILED,执行却复活成
+// 成功(约定 #14 的"该失败却成功"同族问题)。
 //
 // 期望:FAILED/CANCELLED 只能由 CasExecutionState 推翻(显式重试),整行
 // upsert 不得改走它们。
@@ -93,8 +103,15 @@ func TestSaveExecutionDoesNotRevertCastedNegativeTerminal(t *testing.T) {
 }
 
 // TestSaveExecutionRejectsIllegalStateJump 锁定"负面终态不得被改走"。
-// 状态机(model.CanTransitionExecution)是唯一来源:离开 FAILED/CANCELLED
-// 只能走 CAS(显式重试),整行 upsert 不得越权。
+//
+// 事实澄清:守卫(execGuardedStates)是持久层自己的一份**独立清单**,
+// 并**不**由 model.CanTransitionExecution 推导 —— 守卫比状态机更严:
+// 状态机允许 FAILED→RUNNING(用户显式重试),守卫连这条也挡(整行 upsert
+// 不得替用户做重试裁决)。
+//
+// 两份清单的关系由 TestExecStateGuardAgreesWithStateMachine 钉死
+// (persistence/exec_state_guard_test.go):状态机新增终态状态时,守卫必须
+// 同步跟上,否则那里会红。
 func TestSaveExecutionRejectsIllegalStateJump(t *testing.T) {
 	db := openTestDB(t)
 	seedExec(t, db, "jump", model.ExecutionFailed)
@@ -342,13 +359,15 @@ func TestWorkflowVariablesKeepIntTypeAfterRoundTrip(t *testing.T) {
 // upsert 改回运行中"。
 //
 // 背景:终态守卫此前只含 FAILED/CANCELLED(负面终态)。COMPLETED 不在守卫里,
-// 于是"绕过 runtime 的直写"(备份恢复工具、运维脚本、误用 SaveExecution
-// 的代码)可以把一条已完成的执行改回 RUNNING —— 用户在列表里看到
-// "运行中",实际上它早就跑完了(约定 #14 的"该失败却成功"同族问题:
-// 状态与事实不符)。
+// 于是任何"用已存在的执行 ID 再插一次"的调用(直接调 SaveExecution 的代码)
+// 可以把一条已完成的执行改回 RUNNING —— 用户在列表里看到"运行中",
+// 实际上它早就跑完了(约定 #14 的"该失败却成功"同族问题:状态与事实不符)。
 //
 // COMPLETED 纳入守卫后:离开它只能走 CasExecutionState(与 FAILED/CANCELLED
 // 同一套裁决机制)。
+//
+// 注意:这是 SaveExecution 这个导出 API 的契约(生产路径当前不经过该分支,
+// 见本文件开头的说明),不是"运行期有保护"的证据。
 //
 // 已知边界:守卫挡不住"往合法后继方向"的过期写(例如库中 PAUSED、过期副本
 // 写 RUNNING —— PAUSED→RUNNING 本身合法)。彻底堵住需要调用方携带

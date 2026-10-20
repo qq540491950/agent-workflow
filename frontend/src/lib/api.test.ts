@@ -552,6 +552,27 @@ describe("后端错误体契约", () => {
     expect(err.message).toBe("接口不存在");
   });
 
+  // 第四/五轮新增的码必须能落到人话提示上:错误体只有 code 没有 error
+  // 时(旧版后端/反向代理改写),用户不能只看到 "HTTP 400"。
+  it.each([
+    ["DSL_UNKNOWN_KEY", "未知顶层键"],
+    ["DSL_MISPLACED_KEY", "层级"],
+    ["UNKNOWN_FIELD", "未知顶层字段"],
+    ["UNKNOWN_NODE_CONFIG", "未识别的配置键"],
+    ["DEPRECATED_NODE_CONFIG", "已废弃"],
+    ["INVALID_NODE_ENABLED", "enabled"],
+  ])("%s 给出可读提示(不是裸 HTTP 码)", async (code, want) => {
+    stubError(400, { code, kind: "ValidationError" });
+    const { api } = await freshApi();
+    const err = (await api.getWorkflow("x").catch((e: unknown) => e)) as {
+      message: string;
+      code?: string;
+    };
+    expect(err.code).toBe(code);
+    expect(err.message).toContain(want);
+    expect(err.message).toContain("400");
+  });
+
   it("向后兼容:错误体只有 error 没有 code 时不抛未捕获异常", async () => {
     stubError(400, { error: "参数不合法" });
     const { api, ApiError } = await freshApi();

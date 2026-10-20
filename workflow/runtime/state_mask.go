@@ -106,6 +106,43 @@ func nodeScopedSuffix(key string) string {
 	return key[i:]
 }
 
+// ---- output 键的双重身份:恢复路径的口径差(已知,刻意保留) ----
+//
+// output(compiler.KeyOutput)同时是:
+//
+//  1. **自由文本键**:值是最近一次 Agent 的输出原文,常带 CLI stderr
+//     里的凭据 → 落库必须脱敏(否则明文进 state_json,违反约定 #8);
+//  2. **条件变量**:条件表达式可以直接读 output(唯一定义见
+//     compiler/conditionenv.go 的 conditionEnvVars)。
+//
+// 这两重身份带来一条口径差:
+//
+//   - **实时运行**:条件在**原文**上求值(会话状态在内存里,未经脱敏);
+//   - **恢复运行**:条件在**脱敏后的文本**上求值 —— 恢复时引擎把
+//     state_json(已脱敏)重新灌进会话(engine.go 的 resume 分支),
+//     output 因此是脱敏副本。
+//
+// 影响面(窄):只有当 Agent 输出里**含凭据形态的子串**、且条件表达式
+// 恰好检查那一段时,两条路径才给出不同的求值结果。例如
+// `output contains "ANTHROPIC_API_KEY=sk-"`:实时运行为真,恢复运行为假
+// (脱敏后是 "ANTHROPIC_API_KEY=***")。此时执行会走另一条边 ——
+// 差异是"可观察的分支不同",不是静默成功(约定 #14 的"该失败却成功"
+// 不适用:条件求值本身由用户的显式表达式决定)。
+//
+// 为什么保留这条差(而不是消除它):
+//
+//   - 办法一:把 output 从脱敏键里排除 → 凭据明文落库,违反约定 #8;
+//   - 办法二:另存一份未脱敏的 output 专供恢复 → 同样是明文落库;
+//   - 办法三:把 output 从条件变量集合里去掉 → 破坏
+//     compiler/conditionenv.go 的唯一定义,用户现有的条件表达式会被
+//     校验期判成 "unknown name" 而拒绝保存(约定 #13:校验期与运行期同源)。
+//
+// 三条路都要么泄漏凭据、要么改掉用户可见的条件变量语义。在"凭据不落库"
+// 与"条件变量集合不变"两个约束下,这条差**无法完美消除**,只能写明。
+//
+// 规避建议(给写条件表达式的人):不要用 output 里的凭据形态子串做判断;
+// 需要稳定的分支依据时,用 decision / status(结构化键,原样保留)。
+
 // outcomeJSONKey 判断键是否是"outcome JSON"形态
 // (node:<id>:result / node:<id>:answered):值是 compiler.NodeOutcome 的 JSON 文本。
 func outcomeJSONKey(key string) bool {

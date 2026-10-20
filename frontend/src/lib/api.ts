@@ -88,6 +88,18 @@ const CODE_HINTS: Record<string, string> = {
   WORKFLOW_DISABLED: "工作流已禁用,先启用再运行",
   STATE_CONFLICT: "状态冲突(可能已被其他操作改变),请刷新后重试",
   DENIED: "权限不足",
+  // 第四/五轮新增的码(DSL 严格化 + 未知键上报)。
+  // DSL_UNKNOWN_KEY / DSL_MISPLACED_KEY 是导入路径的硬错误(400),
+  // 未知顶层键走 UNKNOWN_FIELD(400)。
+  DSL_UNKNOWN_KEY: "DSL 含未知顶层键(检查拼写与缩进)",
+  DSL_MISPLACED_KEY: "DSL 段放错了层级(该设置不会生效)",
+  UNKNOWN_FIELD: "请求含未知顶层字段(该字段不会生效)",
+  // 以下三个是**校验期**的 code(出现在校验结果的 errors/warnings 里,
+  // 未必走 HTTP 错误体);留在表里是为了将来后端把它们升级为错误码时
+  // 前端不必再改。
+  UNKNOWN_NODE_CONFIG: "节点含未识别的配置键(该设置不会生效)",
+  DEPRECATED_NODE_CONFIG: "节点配置键已废弃(不再按该键执行)",
+  INVALID_NODE_ENABLED: "节点的 enabled 必须是布尔值(true=启用,false=运行期跳过)",
 };
 
 // 状态码兜底提示:错误体完全没有 code 时(向后兼容路径)仍给一句人话。

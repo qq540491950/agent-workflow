@@ -15,15 +15,15 @@
 | --- | --- | --- |
 | GET | `/api/workflows` | 列出全部工作流 |
 | GET | `/api/workflows/{id}` | 读取工作流定义 |
-| POST | `/api/workflows` | 创建/更新(保存前强制校验;更新版本 +1) |
+| POST | `/api/workflows` | 创建/更新(保存前强制校验;更新版本 +1)。**未知顶层字段 → 400 `UNKNOWN_FIELD`**(允许的键由 `model.Workflow` 的 json tag 反射派生) |
 | DELETE | `/api/workflows/{id}` | 删除工作流(执行记录保留) |
 | POST | `/api/workflows/{id}/duplicate` | 复制 |
 | POST | `/api/workflows/{id}/enable?value=true\|false` | 启用/禁用。**只接受显式的 `true`/`false`**,缺失或其它取值返回 400(fail closed:禁用开关缺参数不能反而打开工作流) |
-| POST | `/api/workflows/validate` | 校验(返回结构化 errors/warnings) |
+| POST | `/api/workflows/validate` | 校验(返回结构化 errors/warnings)。**未知顶层字段同样 400**;节点配置里的**未知键只报警告**(`UNKNOWN_NODE_CONFIG`),不阻断保存 |
 | GET | `/api/workflows/{id}/export` | 导出 YAML |
 | GET | `/api/workflows/{id}/versions` | 版本号列表(降序) |
 | GET | `/api/workflows/{id}/versions/{version}` | 指定版本的 DSL 快照。版本号只接受十进制数字,越界返回 400 |
-| POST | `/api/workflows/import` | 从 YAML 导入(body 为 YAML 文本;ID 冲突自动换新 ID)。body 上限 1MB,超限返回 **413** |
+| POST | `/api/workflows/import` | 从 YAML 导入(body 为 YAML 文本;ID 冲突自动换新 ID)。body 上限 1MB,超限返回 **413**。**顶层未知键 → 400 `DSL_UNKNOWN_KEY`**;`permissions` 放错层级 → 400 `DSL_MISPLACED_KEY`;其余被丢弃的键在响应顶层以 `ignored_keys` 数组回报(见"契约变化") |
 
 ## Executions
 
@@ -131,6 +131,105 @@ HTTP 状态码语义:
 文本类端点(`/export`、`/versions/{n}`)失败时同样返回上述 JSON 错误体,
 客户端应按状态码判断而非直接使用响应内容。
 
+### 错误码表(第四/五轮新增)
+
+`code` 是程序化处理的稳定标识。除下表外,既有码(`NOT_FOUND` /
+`BAD_REQUEST` / `PAYLOAD_TOO_LARGE` / `INVALID_JSON` /
+`METHOD_NOT_ALLOWED` / `WORKFLOW_DISABLED` / `STATE_CONFLICT` /
+`DENIED` / `INVALID_LOG_LEVEL` 等)保持不变。
+
+| code | 出现场景 | 含义 |
+| --- | --- | --- |
+| `DSL_UNKNOWN_KEY` | 400(导入) | DSL **文档顶层**出现未知键。YAML 与 JSON **同源** —— 同一份定义换格式导入行为一致 |
+| `DSL_MISPLACED_KEY` | 400(导入) | 某个段被放错了层级(典型:`permissions:` 写在 `workflow:` 段下)。**权限收紧被静默丢弃 = 安全语义被悄悄放开**,因此必须 fail closed |
+| `UNKNOWN_FIELD` | 400(保存/校验) | 请求体含**未知顶层字段**。允许的键集合由 `model.Workflow` 的 json tag **反射派生**(模型加字段自动生效),错误信息里会列出允许的键 |
+| `INVALID_NODE_ENABLED` | 校验错误 | 节点的 `enabled` 不是布尔值。运行期同样 fail closed(节点失败),两边结论一致 |
+| `UNKNOWN_NODE_CONFIG` | 校验**警告** | 节点配置里有**未被识别**的键(典型:`timeout_seconds` 拼成 `timeout_second`)。该设置**不会生效**,但**不阻断保存** |
+| `DEPRECATED_NODE_CONFIG` | 校验**警告** | 节点配置键已废弃(如 condition 节点的 `expression`)。仍可保存,运行期按边上的条件走 |
+
+前两个是**硬错误**(导入直接失败);后两个是**警告**(只提示,不影响保存)——
+存量工作流里确实存在拼错或已废弃的键,报错会让用户打不开自己的老工作流。
+已废弃的键**只报废弃、不报未知**,避免用户看到两条互相矛盾的提示。
+
+> **校验期的 code 与 HTTP 错误体的 code 是两套**:校验期的 code 出现在
+> `POST /api/workflows/validate` 响应的 `errors[].code` / `warnings[].code`
+> 数组里;HTTP 错误体的 `code` 在响应体顶层。同一个字符串在两处都可能出现。
+
+## 契约变化(第四/五轮)
+
+### 1. 导入响应带 `ignored_keys`
+
+`POST /api/workflows/import` 的响应在**顶层**附加一个 `ignored_keys` 数组
+(工作流字段的位置不变,前端把响应当 `Workflow` 用,契约不破):
+
+```json
+{
+  "id": "imp-1", "name": "...", "version": 1, "nodes": [], "edges": [],
+  "ignored_keys": ["workflow.settings", "settings.max_iteration"]
+}
+```
+
+含义:这些键**出现在文档里但被解析器丢弃了**,对应的设置**不会生效**。
+没有键被忽略时**不出现**该字段(前端据此区分"没解析到"与"没有")。
+
+策略分层(与上表的错误码一一对应):
+**顶层**未知键 → 报错 `DSL_UNKNOWN_KEY`;`permissions` 放错层级 → 报错
+`DSL_MISPLACED_KEY`;其余闭合结构里的未知键 → **忽略但可观测**
+(记入 `ignored_keys` + 服务端 WARN 日志),不阻断导入。
+
+### 2. 顶层字段严格校验
+
+`POST /api/workflows` 与 `POST /api/workflows/validate` 对请求体做**未知
+顶层键**检查:出现未知键 → **400 `UNKNOWN_FIELD`**,错误文本列出未知键与
+允许的键。
+
+- 允许集合的唯一来源是 `model.Workflow` 的 json tag(反射派生),不手写;
+- `permissions`(DSL 根级段的正式写法)与 `ignored_keys`(导入响应的
+  专用字段)是两个特例 —— 后者被拒会让"导入 → 原样回存"的往返失败;
+- 前端设计器发出的 payload 只含模型里的字段,因此严格化**不打破**保存路径。
+
+> **已知边界**:该检查位于服务器模式的 HTTP 层。桌面模式走 Wails 绑定 →
+> 应用层 → `model.Workflow.UnmarshalJSON`,那一层仍是宽松的 `json.Unmarshal`。
+
+### 3. `restoreBackup` 的返回形状
+
+| 字段 | 含义 |
+| --- | --- |
+| `workflows_restored` / `workflows_skipped` | 已恢复 / 同 ID 已存在而跳过 |
+| `workflows_invalid` / `workflows_invalid_ids` | 校验不通过而被**拒绝**(不落库)的定义与 ID 列表 |
+| `agent_configs_restored` | 已落库的 Agent 配置数 |
+| `agent_configs_invalid` | 未落库的 Agent 配置数(**结构非法或本机无此 Agent**) |
+| `agent_configs_unknown_ids` | **本机不存在**的 Agent ID 清单(配置永远不会被应用) |
+
+`agent_configs_invalid` 的语义已扩大:此前"本机不存在的 Agent"也被计入
+"已恢复" —— 那是**假成功**(落库只是留一行死数据,配置永远不生效)。
+
+### 4. 节点 `output` 与会话状态 `state_json` 的脱敏
+
+脱敏的**三条独立路径**(各自都要做,漏一条就漏):
+
+1. **事件流**:`event.Bus.Emit` 分发点统一脱敏;
+2. **节点明细**:落库前脱敏 + API 读出口(`/nodes`、`/export`)再脱敏一次
+   —— `output` / `error` / `result_json` 三处;
+3. **会话状态快照**(`executions.state_json`):此前**完全没脱敏**,是明文
+   旁路。现按**键分类**处理:
+   - 结构化键(`decision` / `status` / `_abort` / `_resume_node` /
+     `_current_node` / `_loop_*` / `node:<id>:status` / `node:<id>:attempt`)
+     —— **原样保留**:它们是路由与决策的依据,脱敏它们等于改写执行语义;
+   - 其余键(`output` / `_error` / `git_diff` / `user_instruction` /
+     `node:<id>:result` / `node:<id>:answered` 等)**一律脱敏**
+     (默认拒绝:将来新增的状态键不会因漏登记就明文落库);
+   - `node:<id>:result` / `node:<id>:answered` 走
+     **解析 JSON → 结构化脱敏 → 重新序列化**,保证仍是**合法 JSON**
+     (恢复路径要 `Unmarshal`,非法 JSON 会被静默当成"未答复"→ 节点重跑)。
+
+**制品(artifact)保持原样**,不脱敏 —— 制品是要给用户看的原始产物。
+
+> **已知边界**:`output` 既是条件表达式可用的变量(`compiler/conditionenv.go`
+> 把它映射到 `compiler.KeyOutput`),又是默认脱敏的自由文本键。**恢复路径**
+> 从 `state_json` 回放,条件看到的 `output` 与实时路径不一致 —— 同一份
+> 工作流恢复后与首次运行的路由可能不同。
+
 ## SSE 实时事件流(GET /api/events)
 
 - 连接建立立即返回 `text/event-stream` 响应头与注释行(`: connected`),
@@ -159,10 +258,17 @@ HTTP 状态码语义:
 时整值替换为 `***`,值含 `key=value` 形态时就地替换),落库 / SSE /
 Wails IPC 三条出口一致。
 
-**脱敏的三条独立路径**(各自都要做,漏一条就漏):
+**`runtime.error` 的两种来源**(第四、五轮):
 
-1. **事件流**:`event.Bus.Emit` 分发点统一脱敏(本节描述的这条);
-2. **节点明细**:直写 SQLite,不经总线 → **读出口**(`/nodes`、`/export`)
-   再脱敏一次,`output` / `error` / `result_json` 三处;
-3. **落库副本**:节点明细落库前即脱敏(审计文件 / 备份 DB 里不留明文),
-   **制品(artifact)保持原样** —— 制品是要给用户看的原始产物。
+| `data.reason` | 含义 |
+| --- | --- |
+| `state_commit_conflict` | **状态迁移没有落库**(CAS 冲突或落库错误)。库里的状态已被别的写者裁决(用户取消 / 显式重试 / 崩溃恢复)—— 本次迁移被放弃,**终态事件不再发**(否则事件流说"已完成"、库里还是"运行中",UI 与审计流互相打架)。`data` 带 `target_state`(想落的状态)/ `current_state`(库里的实际状态)/ `error` |
+| (无 `reason`) | 事件落库失败、节点状态机非法转换等既有的运行时错误 |
+
+取消路径上的同类冲突**不发** `runtime.error`(那是用户高频操作造成的预期
+竞态,记 WARN 即可),以免 ERROR 噪音淹掉真正的异常。可观测性靠
+`Engine.StateCommitFailures()` 计数与库里的状态。
+
+**脱敏的路径清单**见上文"契约变化 → 4. 节点 `output` 与会话状态
+`state_json` 的脱敏"(事件流 / 节点明细落库前 / 节点明细读出口 /
+会话状态快照,共四条独立路径)。

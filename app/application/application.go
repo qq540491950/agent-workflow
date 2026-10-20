@@ -511,6 +511,11 @@ func (s *WorkflowService) Save(wf *model.Workflow) (*model.Workflow, error) {
 	}
 	// 保存前必须校验
 	res := s.app.Engine.Validate(wf)
+	// 警告此前被整个丢掉(只回传 res.Errors):DEPRECATED_NODE_CONFIG 这类
+	// 警告只有显式 validate 端点看得见,直连 API 的调用方看不到 ——
+	// 静默丢失(约定 #14 同族)。这里先在应用层记进日志(不丢);
+	// 要让调用方也拿到,需要改 API 契约(见交付报告)。
+	logValidationWarnings("save", wf.ID, res)
 	if !res.Valid {
 		raw, _ := json.Marshal(res.Errors)
 		return nil, model.NewError(model.KindValidationError, "WORKFLOW_INVALID", string(raw))
@@ -519,6 +524,55 @@ func (s *WorkflowService) Save(wf *model.Workflow) (*model.Workflow, error) {
 		return nil, err
 	}
 	return s.app.Repo.GetWorkflow(wf.ID)
+}
+
+// validationWarningSink 是"校验警告"的落地出口。
+//
+// 默认写日志;测试可以替换它,断言"保存/运行路径没有把警告丢掉"。
+// 包级变量跨 goroutine 读写必须加锁(约定 #15)。
+var (
+	validationWarningMu   sync.RWMutex
+	validationWarningSink = logValidationWarning
+)
+
+// logValidationWarning 默认出口:写日志。
+func logValidationWarning(scope, id string, w validator.ValidationError) {
+	logx.Warn("工作流校验警告", "scope", scope, "id", id,
+		"code", w.Code, "node", w.Node, "message", w.Message)
+}
+
+// setValidationWarningSink 替换警告出口(测试用),返回恢复函数。
+func setValidationWarningSink(f func(scope, id string, w validator.ValidationError)) func() {
+	validationWarningMu.Lock()
+	old := validationWarningSink
+	validationWarningSink = f
+	validationWarningMu.Unlock()
+	return func() {
+		validationWarningMu.Lock()
+		validationWarningSink = old
+		validationWarningMu.Unlock()
+	}
+}
+
+// logValidationWarnings 把校验**警告**显式记出来。
+//
+// 保存/运行路径此前只回传 res.Errors,res.Warnings 被整个丢掉:
+// 警告(如 DEPRECATED_NODE_CONFIG)只有显式 validate 端点可见,直连 API
+// 的调用方看不到 —— 静默丢失(约定 #14 同族:"该报告却没报告")。
+//
+// 这里在应用层把它记下来,保证不丢;要让**调用方**也拿到,需要给
+// API 契约增加 warnings 字段(api/ 与 frontend/ 不在本轮改动范围内,
+// 精确改法见交付报告)。
+func logValidationWarnings(scope, id string, res *validator.Result) {
+	if res == nil || len(res.Warnings) == 0 {
+		return
+	}
+	validationWarningMu.RLock()
+	sink := validationWarningSink
+	validationWarningMu.RUnlock()
+	for _, w := range res.Warnings {
+		sink(scope, id, w)
+	}
 }
 
 func (s *WorkflowService) Delete(id string) error {
@@ -619,6 +673,11 @@ func (s *ExecutionService) Run(ctx context.Context, workflowID, task string, var
 	if !wf.Enabled {
 		return nil, model.NewError(model.KindValidationError, "WORKFLOW_DISABLED", "工作流已禁用")
 	}
+	// 警告不阻断运行,但必须可见:此前运行路径只回传 res.Errors,
+	// res.Warnings(例如 DEPRECATED_NODE_CONFIG)被整个丢掉,直连 API 的
+	// 调用方看不到(约定 #14 同族)。引擎内部还会再校验一次(以它为准),
+	// 这里只为把警告记出来,不改变判定结果。
+	logValidationWarnings("run", workflowID, s.app.Engine.Validate(wf))
 	exec, err := s.app.Engine.Start(context.Background(), wf, task, variables)
 	if err != nil {
 		return nil, err

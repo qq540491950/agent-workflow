@@ -351,6 +351,16 @@ export default function Workflows() {
                 try {
                   const wf = await api.importYAML(importText);
                   toast.success(`已导入: ${wf.name} (v${wf.version})`);
+                  // DSL 解析器会把闭合结构里的未知键**丢弃**(它们不生效),
+                  // 后端把清单放在响应的 ignored_keys 里。导入成功 ≠
+                  // 每个设置都生效了 —— 静默丢弃正是约定 #14 说的"该失败
+                  // 却成功"。桌面模式走 Wails 绑定,没有这个字段 → ?? [] 兜底。
+                  const ignored = wf.ignored_keys ?? [];
+                  if (ignored.length > 0) {
+                    toast.warning(
+                      `有 ${ignored.length} 个键被忽略(这些设置不会生效):${ignored.join("、")}`,
+                    );
+                  }
                   setImportOpen(false);
                   setImportText("");
                   refresh();

@@ -22,6 +22,7 @@ const m = vi.hoisted(() => ({
   duplicateWorkflow: vi.fn(),
   exportYAML: vi.fn(),
   copyYAML: vi.fn(),
+  importYAML: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -37,6 +38,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       duplicateWorkflow: m.duplicateWorkflow,
       exportYAML: m.exportYAML,
       copyYAML: m.copyYAML,
+      importYAML: m.importYAML,
     },
   };
 });
@@ -61,8 +63,10 @@ beforeEach(() => {
   m.duplicateWorkflow.mockReset().mockResolvedValue(wf);
   m.exportYAML.mockReset().mockResolvedValue("workflow:\n  id: wf-1\n");
   m.copyYAML.mockReset().mockResolvedValue("workflow:\n  id: wf-1\n");
+  m.importYAML.mockReset().mockResolvedValue({ ...wf, id: "wf-2", name: "导入的流程" });
   vi.mocked(toast.error).mockClear();
   vi.mocked(toast.success).mockClear();
+  vi.mocked(toast.warning).mockClear();
 });
 
 afterEach(() => {
@@ -131,3 +135,50 @@ function openMenu() {
   if (!trigger) throw new Error("未找到行操作菜单触发器");
   fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
 }
+
+// 导入响应里的 ignored_keys:DSL 解析器把闭合结构里的未知键**丢弃**
+// (那些设置不会生效)。后端把清单放在响应里,前端必须把它显示出来 ——
+// "导入成功"不等于"每个设置都生效"(约定 #14:静默丢弃同族问题)。
+describe("Workflows 导入 YAML:被忽略的键必须可见", () => {
+  async function doImport() {
+    renderWorkflows();
+    await settle();
+    fireEvent.click(screen.getByText("导入 YAML"));
+    await settle();
+    fireEvent.change(screen.getByPlaceholderText(/version/), {
+      target: { value: 'version: "1"\nworkflow:\n  id: wf-2\n' },
+    });
+    fireEvent.click(screen.getByText("导入"));
+    await settle();
+  }
+
+  it("带 ignored_keys 时提示 N 个键被忽略并列出键名", async () => {
+    m.importYAML.mockResolvedValue({
+      ...wf,
+      id: "wf-2",
+      name: "导入的流程",
+      ignored_keys: ["workflow.settings", "settings.max_iteration"],
+    });
+    await doImport();
+    expect(toast.success).toHaveBeenCalled();
+    const warned = vi.mocked(toast.warning).mock.calls[0]?.[0] ?? "";
+    expect(warned).toContain("2 个键被忽略");
+    expect(warned).toContain("workflow.settings");
+    expect(warned).toContain("settings.max_iteration");
+  });
+
+  it("桌面模式没有该字段时不得崩(?? [] 兜底)", async () => {
+    // 桌面模式走 Wails 绑定,响应里没有 ignored_keys。
+    m.importYAML.mockResolvedValue({ ...wf, id: "wf-2", name: "导入的流程" });
+    await doImport();
+    expect(toast.success).toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("导入失败时提示错误", async () => {
+    m.importYAML.mockRejectedValue(new Error("DSL 含未知顶层键"));
+    await doImport();
+    expect(toast.error).toHaveBeenCalledWith("DSL 含未知顶层键");
+  });
+});

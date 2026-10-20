@@ -252,11 +252,17 @@ func execUpsertSetClause() string {
 // 单条原子 upsert:不可变字段(workflow 绑定/task/变量/created_at)只在
 // 插入时写入,更新时不覆盖。
 //
-// state 列走**终态守卫**(见 execStateGuard):整行 upsert 天然会覆盖
-// state,一个拿着过期副本的写者能把刚由 CAS 落定的状态改回去 ——
-// "失败/取消"的裁决尤其致命:用户明明看到 FAILED/CANCELLED,过期写却把
-// 执行改回"运行中"甚至"已完成"(约定 #14 的"该失败却成功"同族问题)。
-// 守卫让这两个终态只能经 CasExecutionState 离开(显式重试/取消裁决)。
+// state 列走**终态守卫**(见 execStateGuardSQL):当 INSERT 撞上一个已存在
+// 的执行 ID 时,ON CONFLICT 分支不把 FAILED/CANCELLED/COMPLETED 改走 ——
+// 这三个终态只能经 CasExecutionState 离开(显式重试/取消裁决)。
+//
+// **生产路径当前不依赖这个守卫**(事实,勿夸大):全仓唯一的生产调用点是
+// workflow/runtime 的 insertExecution(首次写入,此刻行尚不存在),它插入前
+// 先查重、撞 ID 就换一个新 ID,因此 ON CONFLICT 分支在生产中不会命中。
+// 运行期的状态迁移一律走 CAS(casStateAndSave),根本不经过本方法。
+// 守卫保留在此的理由是 API 契约而非"生产有保护":SaveExecution 是导出
+// API,其冲突分支必须有一个确定的、"不推翻既有裁决"的语义,而不是
+// "最后写入者赢"。详见 execStateGuardSQL 的注释。
 func (d *DB) SaveExecution(e *model.Execution) error {
 	variables, _ := json.Marshal(orEmpty(e.Variables))
 	iterations := anyMapInt(e.Iterations)
@@ -282,24 +288,40 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 
 // execStateGuardSQL / execStateGuardArgs 是 state 列的守卫表达式(参数化)。
 //
-// 语义:FAILED / CANCELLED / COMPLETED 是**终态** —— 它们的裁决只能由
-// CasExecutionState 推翻(用户显式重试);整行 upsert 不得把状态改走,
-// 否则过期副本能把已失败的执行改回"运行中/已完成"。
+// 语义:FAILED / CANCELLED / COMPLETED 是**终态** —— 一旦落定,整行 upsert
+// (SaveExecution 的 ON CONFLICT 分支)不得把它们改走;否则一份过期副本能
+// 把已失败的执行改回"运行中/已完成"(约定 #14 的"该失败却成功"同族问题)。
 //
-// COMPLETED 也在守卫里:绕过 runtime 的直写(备份恢复工具、运维脚本)
-// 此前能把一条**已完成**的执行改回 RUNNING —— 用户在列表里看到
-// "运行中",而它其实早就跑完了(状态与事实不符,约定 #14 同族问题)。
-// 运行期自身不受影响:它的状态迁移一律走 CAS(engine.casStateAndSave),
-// 整行 upsert 只在"插入首行"时使用(那一刻行还不存在)。
+// **作用范围(以下是事实,不是"生产有保护"的承诺)**:
 //
-// 已知边界(未闭合,需引擎侧配合):
+//  1. 只作用于 SaveExecution 的 ON CONFLICT(id) 分支 —— 即"拿一个已存在
+//     的执行 ID 再插一次"时。INSERT 命中新行时该表达式不参与求值。
+//  2. 生产路径当前**不会**命中该分支:唯一的生产调用点是
+//     workflow/runtime.insertExecution(首次写入,行尚不存在),它在插入前
+//     先查重、撞 ID 就换 ID;运行期其余状态迁移一律走 CAS
+//     (casStateAndSave),不经过 SaveExecution。
+//  3. 因此本守卫是**导出 API 的契约**,不是运行期状态机的防线。
+//     运行期的防线是约定 #4 的 CasExecutionState(由 workflow/runtime
+//     自己的用例覆盖)。不要把本守卫当成"过期写进不来"的保证。
+//
+// 为什么仍然保留:SaveExecution 是导出 API,冲突分支必须有一个确定的、
+// 非破坏性的语义。若改成"最后写入者赢",将来任何新调用点都可能用一份
+// 过期副本推翻已落定的终态裁决,而且没有任何提示。
+//
+// 已知边界(未闭合,需调用方配合):
 //   - 守卫挡不住"往合法后继方向"的过期写(例如库中 PAUSED、过期副本写
 //     RUNNING —— PAUSED→RUNNING 本身合法)。彻底堵住需要调用方携带
 //     "我基于哪个版本"的令牌(CAS 返回 claim token、保存时校验),
-//     属于引擎侧改动,不在持久化层可解范围内。
+//     属于调用方改动,不在持久化层可解范围内。
 var execStateGuardSQL, execStateGuardArgs = buildExecStateGuard()
 
-// execGuardedStates 是受保护的终态。
+// execGuardedStates 是受保护的终态清单。
+//
+// 这是一份**独立维护**的清单,不是从 model.CanTransitionExecution 推导的
+// (守卫比状态机更严:连 FAILED→RUNNING 这条"显式重试"也挡,整行 upsert
+// 不得替用户做重试裁决)。它与状态机的关系由
+// TestExecStateGuardAgreesWithStateMachine 钉死 —— 状态机新增终态状态时
+// 这里必须同步跟上。
 var execGuardedStates = []model.ExecutionState{
 	model.ExecutionFailed,
 	model.ExecutionCancelled,
