@@ -256,6 +256,22 @@ edges:
 	if !strings.Contains(final.Error, "panic") {
 		t.Errorf("错误信息应说明 panic,实际 %q", final.Error)
 	}
+	// 更严:失败原因不得被**兄弟分支的取消错误**顶掉。
+	//
+	// 并行区的失败级联(compiler 的 parallelCascadeAgent)在任一分支失败后
+	// 取消共享 ctx,而 ADK 的 parallelagent 在分支 ctx 被取消时会把该分支
+	// 的**终态事件**一起丢掉(parallelagent.runSubAgent 的 select:
+	// `<-ctx.Done()` 与 `results <- …` 同时就绪时随机选一个)。失败信息只
+	// 存在于事件里的 StateDelta(节点状态的唯一来源),事件一丢,真因就整段
+	// 消失,用户只看到 "failed to run sub-agent …: context canceled"
+	// ——真因被掩盖(约定 #14)。
+	if strings.Contains(final.Error, "context canceled") {
+		t.Errorf("失败原因不应被兄弟分支的取消错误污染,实际 %q", final.Error)
+	}
+	// 失败原因必须指向真正出问题的节点
+	if !strings.Contains(final.Error, "bad") {
+		t.Errorf("失败原因应指出出问题的节点 bad,实际 %q", final.Error)
+	}
 	if got := final.NodeStates["bad"]; got != string(model.NodeFailed) {
 		t.Errorf("出问题的节点应记 FAILED,实际 %q", got)
 	}
@@ -616,8 +632,14 @@ edges:
 	if final.State != model.ExecutionFailed {
 		t.Errorf("Skill panic 后执行应 FAILED,实际 %s (%s)", final.State, final.Error)
 	}
+	// 失败原因必须说明是 Skill 炸了(此前这里只 t.Logf,等于没断言:
+	// 并行区的级联取消会让失败分支的终态事件与取消赛跑,输的那条事件
+	// 整段丢失,真因会退化成兄弟分支的 "context canceled" —— 约定 #14)。
 	if !strings.Contains(final.Error, "panic") && !strings.Contains(final.Error, "blown") {
-		t.Logf("错误信息: %q", final.Error)
+		t.Errorf("错误信息应说明 Skill panic,实际 %q", final.Error)
+	}
+	if strings.Contains(final.Error, "context canceled") {
+		t.Errorf("失败原因不应被兄弟分支的取消错误污染,实际 %q", final.Error)
 	}
 	if final.NodeStates["boom"] != string(model.NodeFailed) {
 		t.Errorf("出问题的 Skill 节点应记 FAILED,实际 %q", final.NodeStates["boom"])

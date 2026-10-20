@@ -95,6 +95,19 @@ type Engine struct {
 	// stateCommitFailures 统计"状态迁移未落库"的次数(CAS 冲突或落库错误)。
 	// 状态没落库 = 事件流与 DB 可能不一致(约定 #14),必须可观测。
 	stateCommitFailures atomic.Int64
+	// failures 记录每次执行里确凿失败的节点及其原因。
+	//
+	// 存在的理由:失败信息只存在于 ADK 事件的 StateDelta 里(节点状态的唯一
+	// 来源),而并行区的失败级联(compiler 的 parallelCascadeAgent)会取消
+	// 共享 ctx,ADK parallelagent 在分支 ctx 被取消时会把该分支的**终态
+	// 事件**一起丢掉 —— 包括**出问题的那个分支**的事件(它的终态事件正好
+	// 与级联取消赛跑)。于是 `_abort` / `_error` / `node:<id>:status` 整段
+	// 缺失,或被**被取消的兄弟分支**的事件串位("FAILED:<兄弟>" +
+	// "context canceled")—— 真因被掩盖(约定 #14)。
+	//
+	// 引擎是唯一见过节点 outcome 的地方,必须自己留底。详见
+	// failure_ledger.go。
+	failures *failureLedger
 }
 
 // EscalateStats 返回 Escalate 事件分类计数(预期内 / 异常)。
@@ -130,15 +143,16 @@ func (e *Engine) WaitIdle(timeout time.Duration) int64 {
 func NewEngine(agents coreagent.Registry, skills skill.Registry, perms *permission.Manager,
 	bus *event.Bus, gitSvc *git.Service, repo *persistence.DB) *Engine {
 	e := &Engine{
-		Agents:  agents,
-		Skills:  skills,
-		Perms:   perms,
-		CtxMgr:  contextx.NewManager(),
-		Tpl:     template.NewEngine(),
-		Bus:     bus,
-		Git:     gitSvc,
-		Repo:    repo,
-		cancels: map[string]context.CancelFunc{},
+		Agents:   agents,
+		Skills:   skills,
+		Perms:    perms,
+		CtxMgr:   contextx.NewManager(),
+		Tpl:      template.NewEngine(),
+		Bus:      bus,
+		Git:      gitSvc,
+		Repo:     repo,
+		cancels:  map[string]context.CancelFunc{},
+		failures: newFailureLedger(),
 	}
 	// 事件持久化:所有携带 ExecutionID 的事件写入 SQLite(审计/恢复/UI 回放)
 	//
@@ -443,6 +457,9 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	if nodeID == "" {
 		return nil, model.NewError(model.KindStateError, "NO_FAILED_NODE", "无法定位失败节点")
 	}
+	// 失败台账清零:重试是一次**新的运行**,上一次记下的失败原因不能
+	// 再用来补状态(否则会把上一次的 FAILED 状态补回这次的重试结果)。
+	e.failures.reset(executionID)
 	// 数据库级 CAS:并发重试只允许一个调用方成功。
 	//
 	// 状态与元信息分两步落:StateData 的修改要先知道 CAS 赢了才能做,
@@ -526,6 +543,10 @@ func (e *Engine) recoverExecution(exec *model.Execution) error {
 func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string, userInput map[string]any) {
 	e.running.Add(1)
 	defer e.running.Add(-1)
+	// 失败台账:每次 execute 都是一次**新的运行**(首次 / 恢复 / 重试),
+	// 台账从空开始;跑完即清空,不跨执行累积。
+	e.failures.reset(exec.ID)
+	defer e.failures.reset(exec.ID)
 	// 兜底:执行在独立 goroutine 里跑,节点适配器/模板/ADK 内部任意 panic
 	// 都会带走整个进程(桌面模式即整应用退出,且该执行在库中永久停留
 	// RUNNING)。统一捕获后落库为 FAILED 并发事件,便于诊断与重试。
@@ -697,8 +718,14 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 			return
 		case strings.HasPrefix(s, "FAILED:"):
 			msg := fmt.Sprint(exec.StateData["_error"])
-			if lastErr != nil {
-				msg += ": " + lastErr.Error()
+			if msg == "" {
+				// 会话状态里没有失败原因(事件被丢):用台账里的原文。
+				msg = failureReason(e.failures.list(exec.ID))
+			}
+			// ADK 报的并行区错误往往是**派生**错误(兄弟分支被级联取消 →
+			// context canceled),不是失败的原因:写进去只会把真因挤到后面。
+			if extra := secondaryFailure(lastErr); extra != "" {
+				msg += ": " + extra
 			}
 			e.failExecution(exec, msg)
 			return
@@ -708,7 +735,20 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 		}
 	}
 	if lastErr != nil {
-		e.failExecution(exec, lastErr.Error())
+		msg := lastErr.Error()
+		// 台账里的失败原因优先于 ADK 报的最后一个错误。
+		//
+		// 走到这里说明会话状态里没有 `_abort` —— 失败分支的终态事件被
+		// 丢掉了(并行区级联取消,见 failure_ledger.go)。此时 ADK 报的
+		// 是"被取消的兄弟分支"的 context canceled,拿它当失败原因 = 真因
+		// 被掩盖(约定 #14)。台账记的是引擎亲眼见到的节点失败,用它的。
+		if reason := failureReason(e.failures.list(exec.ID)); reason != "" {
+			msg = reason
+			if extra := secondaryFailure(lastErr); extra != "" {
+				msg += ": " + extra
+			}
+		}
+		e.failExecution(exec, msg)
 		return
 	}
 	e.commitTerminal(exec, model.ExecutionCompleted, event.WorkflowCompleted, map[string]any{
@@ -746,6 +786,10 @@ func (e *Engine) syncNodeStates(exec *model.Execution) {
 	if exec.StateData == nil || exec.Snapshot == nil {
 		return
 	}
+	// 补回会话状态里丢失的失败信息(并行区级联取消会丢掉失败分支的终态
+	// 事件,见 failure_ledger.go)。不补的话:节点状态表里没有那个节点,
+	// 失败原因退化成兄弟分支的 "context canceled"。
+	e.repairFailureState(exec)
 	ns := make(map[string]string, len(exec.Snapshot.Nodes))
 	for _, n := range exec.Snapshot.Nodes {
 		v, ok := exec.StateData[compiler.StatusKey(n.ID)]

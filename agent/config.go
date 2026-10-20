@@ -3,6 +3,8 @@ package agent
 import (
 	"sort"
 	"strings"
+
+	"agentworkflow/logx"
 )
 
 // AgentConfig 是每个 Agent 的运行配置:模型、端点、超时与调用级环境变量。
@@ -35,6 +37,11 @@ type AgentConfig struct {
 	DefaultWorkingDir string `json:"default_working_dir"`
 	// Behavior 仅用于 Mock Agent 的演示脚本:
 	// {"review": {"decisions": ["REJECTED","APPROVED"], "summary_template": "..."}}
+	//
+	// 注意:它是**自由结构**(map[string]any,没有固定 schema),前端给的是
+	// 一个自由 JSON 输入框(frontend/src/pages/Agents.tsx),用户可以往里
+	// 放任何东西 —— 包括 api_key / token 这类凭据。所以它必须纳入掩码
+	// 面(见 Masked)。
 	Behavior map[string]any `json:"behavior,omitempty"`
 }
 
@@ -43,6 +50,18 @@ type AgentConfig struct {
 // Env 的值整体替换为 ***;ExtraArgs 里**凭据形态**的参数值同样要替换 ——
 // 配置项本身就允许放 "--api-key sk-xxx",此前只有 Env 被掩码,
 // 这条路径让凭据原样出现在 API 响应里(约定 8)。
+//
+// **Behavior 也要掩**:它是自由结构(map[string]any,无固定 schema),
+// 前端是一个自由 JSON 输入框,用户可以往里放任何键值 —— 包括凭据。
+// 此前 Behavior 原样回显,凭据从 GET 接口明文出去(约定 8 的字面缺口)。
+//
+// 掩码口径与事件流 / 日志**同源**(logx.MaskValue):
+//   - 键名敏感(api_key / token / password …)→ 整值替换为 ***;
+//   - 值本身呈凭据形态(如 "ANTHROPIC_API_KEY=sk-xxx")→ 就地替换,
+//     上下文保持可读。
+//
+// 因此 Mock 的演示脚本(decisions / summary_template / fail_with)
+// 不受影响 —— 那几个键既不敏感,值也不是凭据形态。
 func (c AgentConfig) Masked() AgentConfig {
 	out := c
 	if c.Env != nil {
@@ -52,7 +71,84 @@ func (c AgentConfig) Masked() AgentConfig {
 		}
 	}
 	out.ExtraArgs = MaskExtraArgs(c.ExtraArgs)
+	if c.Behavior != nil {
+		out.Behavior = maskBehavior(c.Behavior)
+	}
 	return out
+}
+
+// maskBehavior 对 Behavior 做结构化脱敏(与事件流 / 日志同一份规则)。
+func maskBehavior(b map[string]any) map[string]any {
+	masked, ok := logx.MaskValue(b).(map[string]any)
+	if !ok {
+		return b
+	}
+	return masked
+}
+
+// MergeMaskedBehavior 把提交值里的掩码哨兵 "***" 换回**同路径**的已存值。
+//
+// 语义与 Env / ExtraArgs 同源(约定 5):"***" = 保留原值。
+//
+// 为什么需要:前端把整份配置原样回传(Agents.tsx:打开配置拿到掩码 →
+// 只改模型 → 保存),不合并的话 GET 返回的 "***" 会被原样写回库里 ——
+// 凭据被哨兵覆盖,用户下一次调用就没凭据了,而界面显示"已保存"。
+//
+// **按同路径**取已存值(而不是整体替换,也不是按 mode 混用):behavior 是
+// 嵌套的 map[mode]map[field]value,同名字段在不同 mode 下互相独立。
+//
+// 没有已存值时的处理与 Env 不同:Env 是"丢弃"(该键值对整体消失),
+// 这里**保留哨兵原样** —— behavior 是用户的自由 JSON,悄悄删掉一个键
+// 会改动用户的脚本;保留 "***" 至少是可见的、可再次编辑的状态。
+func MergeMaskedBehavior(submitted, stored map[string]any) map[string]any {
+	if submitted == nil {
+		return nil
+	}
+	out := make(map[string]any, len(submitted))
+	for k, v := range submitted {
+		sv, has := stored[k]
+		out[k] = mergeMaskedValue(v, sv, has)
+	}
+	return out
+}
+
+// mergeMaskedValue 递归地把哨兵换回同路径的已存值。
+//
+// hasStored 区分"没有这个键"与"这个键的值是 nil" —— 前者要保留哨兵
+// (没有可沿用的原值),后者沿用 nil。
+func mergeMaskedValue(submitted, stored any, hasStored bool) any {
+	switch sv := submitted.(type) {
+	case string:
+		if sv == MaskedValue {
+			if !hasStored {
+				return sv // 没有已存值 → 保留哨兵(不静默删掉用户的键)
+			}
+			return stored
+		}
+		return sv
+	case map[string]any:
+		sm, _ := stored.(map[string]any)
+		out := make(map[string]any, len(sv))
+		for k, v := range sv {
+			one, has := sm[k]
+			out[k] = mergeMaskedValue(v, one, has)
+		}
+		return out
+	case []any:
+		sa, _ := stored.([]any)
+		out := make([]any, len(sv))
+		for i, v := range sv {
+			var one any
+			has := false
+			if i < len(sa) {
+				one = sa[i]
+				has = true
+			}
+			out[i] = mergeMaskedValue(v, one, has)
+		}
+		return out
+	}
+	return submitted
 }
 
 // MaskExtraArgs 掩码 CLI 参数里的凭据值。

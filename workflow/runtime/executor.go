@@ -26,7 +26,24 @@ const defaultScriptTimeoutSeconds = 120
 
 // ExecuteNode 实现 compiler.NodeRunner:记录节点明细后按类型分发执行。
 // compiler 负责编排;本方法只关心单节点的业务语义。
-func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
+func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) (outcome compiler.NodeOutcome) {
+	// 节点适配器 panic 时本函数**不会正常返回**:异常沿栈上抛,由 compiler
+	// 的 runNodeGuarded 兜底转成 FAILED outcome(约定 #12 的分层:兜底在
+	// 节点执行这一层,与并行分支在不在同一 goroutine 无关)。
+	//
+	// 正因为不返回,下面的"失败记账"代码根本不会执行 —— 必须在 defer 里
+	// 记,否则"节点炸了"这件事只有 ADK 事件流知道,而并行区的级联取消
+	// 会把那条事件一起丢掉(详见 failure_ledger.go)。
+	//
+	// 记账之后**原样上抛**:兜底仍然是 compiler 的 runNodeGuarded,这里
+	// 只负责留底,不改分层。
+	defer func() {
+		if r := recover(); r != nil {
+			e.failures.record(env.Exec.ID, node.ID,
+				fmt.Sprintf("节点 %s 执行 panic: %v", node.ID, r), ctx.Err() != nil)
+			panic(r)
+		}
+	}()
 	started := time.Now()
 	// 尝试次数:循环/重试导致的重复执行记为 attempt 递增
 	attempt := nextAttempt(st, node.ID)
@@ -49,7 +66,21 @@ func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *mo
 		e.Bus.Emit(event.New("runtime.error", env.Exec.ID, node.ID, map[string]any{"error": err.Error()}))
 	}
 
-	outcome := e.dispatchNode(ctx, env, node, st)
+	outcome = e.dispatchNode(ctx, env, node, st)
+
+	// 节点失败 → 记失败台账。
+	//
+	// 判据是"失败时 ctx 未被取消":ctx 已取消 = 这是**取消**(用户取消 /
+	// 超时 / 并行区里兄弟分支失败后的级联取消),不是"这个节点坏了"。
+	// 把取消也算成失败,真因就会被 "context canceled" 顶掉(约定 #14)。
+	//
+	// 为什么必须在这里记:失败信息只存在于 ADK 事件的 StateDelta 里,而
+	// 并行区的级联取消会让**出问题的那个分支**的终态事件与取消赛跑 —
+	// 输的那条事件整段丢失(详见 failure_ledger.go)。引擎是唯一见过节点
+	// outcome 的地方,必须自己留底。
+	if outcome.State == model.NodeFailed {
+		e.failures.record(env.Exec.ID, node.ID, outcome.Error, ctx.Err() != nil)
+	}
 
 	en.State = outcome.State
 	// 落库前脱敏(约定 #8):节点 output/error 直接来自 Agent 的

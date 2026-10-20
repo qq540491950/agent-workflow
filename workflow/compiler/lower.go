@@ -1062,7 +1062,23 @@ func (l *lowerer) loopGuard(p *Plan, name string) (agent.Agent, error) {
 						summary = res.Summary
 					}
 				}
-				history := readHistory(st, histKey)
+				history, histErr := readHistory(st, histKey)
+				if histErr != nil {
+					// 状态类型不对 = 状态坏了。显式失败(不静默当成"没有历史"),
+					// 理由见 readHistory 的注释:历史为空会让停滞检测失效,
+					// 人工介入(HITL)的 responses 选项随之消失。
+					msg := histErr.Error()
+					st.Set(KeyAbort, "FAILED:"+revisitID)
+					env.SetAbort("FAILED:" + revisitID)
+					st.Set("_error", msg)
+					st.Set(StatusKey(revisitID), string(model.NodeFailed))
+					env.SetNodeState(revisitID, string(model.NodeFailed))
+					env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, revisitID, map[string]any{
+						"node": revisitID, "error": msg,
+					}))
+					yield(escalateEvent(ctx, actions), nil)
+					return
+				}
 				history = append(history, summary)
 				if len(history) > 3 {
 					history = history[len(history)-3:]
@@ -1092,18 +1108,32 @@ func (l *lowerer) loopGuard(p *Plan, name string) (agent.Agent, error) {
 	})
 }
 
-func readHistory(st StateAccess, key string) []string {
+// readHistory 读回循环守卫的历史记录(状态里的字符串数组)。
+//
+// 类型不对(状态被写成字符串/对象/含非字符串元素)→ **显式失败**。
+// 此前一律 `_ = json.Unmarshal(raw, &out)`,错误被吞 → out 变成空切片,
+// 于是:
+//   - 停滞检测(len(history) >= 2)永远不成立 → 循环不标记 stuck;
+//   - 守卫不升级为人工介入 → 等待用户时的 prompts/**responses 选项**
+//     随之消失(用户看不到该确认什么);
+//   - 循环一路跑到底,执行还可能落成 COMPLETED —— "该失败却成功"
+//     (约定 14:静默成功比崩溃更危险)。
+//
+// 因此这里把错误**交回调用方**,由调用方显式失败并给出可读原因。
+func readHistory(st StateAccess, key string) ([]string, error) {
 	v, ok := st.Get(key)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	raw, err := json.Marshal(v)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("循环历史 %q 无法序列化: %w", key, err)
 	}
 	var out []string
-	_ = json.Unmarshal(raw, &out)
-	return out
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("循环历史 %q 的类型不是字符串数组: %w", key, err)
+	}
+	return out, nil
 }
 
 func mustUserInput(st StateAccess) map[string]any {

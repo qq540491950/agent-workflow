@@ -1212,6 +1212,12 @@ func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
 	// 前端把整份配置原样回传(Agents.tsx:打开配置拿到掩码 → 只改模型 →
 	// 保存),不回传就会把库里的真实凭据覆盖成字面量 "***"。
 	cfg.ExtraArgs = agent.MergeExtraArgs(cfg.ExtraArgs, stored.ExtraArgs)
+	// behavior 里的 *** 同义("保留原值"):它是自由结构,GET 时按
+	// logx.MaskValue 的口径脱敏(见 agent.Masked),不回传合并就会把
+	// 凭据覆盖成哨兵。按**同路径**对齐(mode → 字段 → 值)。
+	if cfg.Behavior != nil {
+		cfg.Behavior = agent.MergeMaskedBehavior(cfg.Behavior, stored.Behavior)
+	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -1446,6 +1452,7 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 	restoredCfg := 0
 	invalidCfg := 0
 	unknownCfgIDs := []string{}
+	applyFailedIDs := []string{}
 	for id, raw := range norm.AgentConfigs {
 		cfg := agent.AgentConfig{}
 		// 配置解不出结构就不能落库:此前无条件写入,解不出时静默跳过应用,
@@ -1465,7 +1472,21 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 		if err := s.app.Repo.SaveAgentConfig(id, raw); err != nil {
 			return nil, err
 		}
-		_ = s.app.applyAgentConfig(id, cfg)
+		// 运行时应用失败 ≠ 已恢复:配置已落库,但适配器实例没换成功 ——
+		// 这一路的调用仍走旧实例(旧凭据/旧端点/旧参数)。
+		// 此前 `_ = s.app.applyAgentConfig(id, cfg)` 把错误吞掉,照样
+		// 计入"已恢复" —— 与上面"未知 Agent"同一类假成功,只是漏网在这里。
+		//
+		// 处理口径:不计入"已恢复",单独列出失败的 Agent ID(用户能去
+		// 逐个排查)。配置本身合法且已落库,下次启动时 reloadAgents 会
+		// 重新应用(失败会记 WARN),所以**不回滚**落库 —— 回滚会丢掉
+		// 用户刚恢复出来的合法配置。
+		if err := s.app.applyAgentConfig(id, cfg); err != nil {
+			applyFailedIDs = append(applyFailedIDs, id)
+			logx.Warn("备份恢复:Agent 配置应用失败,未计入已恢复",
+				"agent", id, "error", err.Error())
+			continue
+		}
 		restoredCfg++
 	}
 	return map[string]any{
@@ -1477,6 +1498,8 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 		"agent_configs_invalid":  invalidCfg,
 		// 本机不存在的 Agent(配置无法生效,未落库)
 		"agent_configs_unknown_ids": unknownCfgIDs,
+		// 已落库但运行时应用失败(不算已恢复;下次启动会重试应用)
+		"agent_configs_apply_failed_ids": applyFailedIDs,
 	}, nil
 }
 

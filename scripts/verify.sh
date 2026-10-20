@@ -311,19 +311,39 @@ echo "OK(build + vet 均通过)"
 #     文件(正常,不是错误),换下一个平台;
 #   - 其它任何错误 → 类型/语法错误 → 门禁失败。
 #
-# 三个目标平台都排除 → 这个包只存在于别的平台(罕见),跳过并说明
-# (残余盲区,记在下面)。
+# 目标平台枚举:**全集**,单一事实来源 = `go tool dist list`
+# (go 工具自带的"我支持哪些目标平台"清单,输出 "<goos>/<goarch>" 组合)。
+#
+# 此前这里写死的是 "windows linux darwin" —— 只覆盖 3 个平台。于是只含
+# `//go:build freebsd`(或 openbsd / netbsd / plan9 / js-wasm / ios /
+# android / aix / solaris / dragonfly / illumos …)的孤儿包对门禁
+# **完全隐形**:类型错误也不报(实测:9 步全绿 = 绕过)。
+#
+# 手写清单必然漏:这次把漏的补进去,下一次 go 支持新平台时还是漏。
+# 唯一可靠的做法是问 go 工具要全集 —— 实测 47 个目标组合。
 #
 # 为什么是"逐包"而不是"整包集合一次 vet":`GOOS=windows go vet ./...`
 # 遇到"该平台没有文件的包"会直接报错退出,没法区分"这个包在 Windows 下
 # 不存在"(正常)与"这个包有类型错误"(要报)。逐包跑才能把两者分开。
-ORPHAN_GOOS="windows linux darwin"
+ALL_TARGETS=$(go tool dist list | sort -u)
+ALL_TARGET_COUNT=$(printf '%s\n' "$ALL_TARGETS" | grep -c . || true)
+[ "$ALL_TARGET_COUNT" -gt 0 ] || fail "go tool dist list 没有输出(拿不到目标平台全集,孤儿包检查无从下手)"
+echo "目标平台全集: $ALL_TARGET_COUNT 个(go tool dist list,含 GOOS/GOARCH 组合)"
 
 # orphan_check <模块目录> <go list 参数> <候选包目录...>
 #
 # 对每个候选包目录判断:它是不是被某个平台编译到了。
-# 返回 0 = 全部候选包都被覆盖(或该平台不存在此包,正常跳过);
+# 返回 0 = 全部候选包都被覆盖(或所有平台都没有它的文件,正常跳过);
 # 返回 1 = 有候选包在它**声称支持**的平台上编译不过(真实错误)。
+#
+# 性能(目标平台从 3 个涨到 47 个,实测耗时见报告):
+#   - **常态零开销**:当前平台全部可见(没有孤儿包)→ 直接 return,
+#     连一次额外探测都不做;
+#   - 探测**按目标平台批量**:一次 `go list` 覆盖**所有**候选包,
+#     不是每个候选包跑一次(47 目标 × N 候选 = 47N 次进程调用);
+#   - vet **按文件集去重**:同一组文件在几个 GOARCH 下都一样 → 只 vet
+#     一次(实测:一个 `//go:build freebsd` 的包在 freebsd/{386,amd64,arm,
+#     arm64} 下文件集相同 → 1 次 vet 而不是 4 次)。
 orphan_check() {
 	oc_mod="$1"
 	shift
@@ -331,38 +351,110 @@ orphan_check() {
 	shift
 	oc_rc=0
 	oc_covered=$(cd "$oc_mod" && go list -f '{{.Dir}}' $oc_listargs 2>/dev/null | sort -u)
+	# 只有**当前平台看不见**的候选才需要交叉检查(其余包前面的步骤已经编译过)
+	oc_dirs=""
+	oc_cands=""
 	for oc_rel in "$@"; do
 		oc_abs=$(cd "$oc_mod/$oc_rel" 2>/dev/null && pwd) || continue
 		# 当前平台已经看得见的包 → 前面的步骤已经编译过它,跳过。
 		if printf '%s\n' "$oc_covered" | grep -qxF "$oc_abs"; then
 			continue
 		fi
-		oc_status="skip"
-		for oc_goos in $ORPHAN_GOOS; do
-			oc_vet_rc=0
-			oc_out=$(cd "$oc_mod" && GOOS="$oc_goos" CGO_ENABLED=0 go vet "./$oc_rel" 2>&1) || oc_vet_rc=$?
-			if [ "$oc_vet_rc" -eq 0 ]; then
-				oc_status="ok"
-				break
-			fi
-			# "该平台没有这个包的文件"= 正常,换下一个平台。
-			if printf '%s' "$oc_out" | grep -q "build constraints exclude all Go files"; then
-				continue
-			fi
-			oc_status="err"
-			echo "---- GOOS=$oc_goos go vet ./$oc_rel 输出(孤儿包检查)----" >&2
-			printf '%s\n' "$oc_out" >&2
-			break
-		done
-		case "$oc_status" in
-		err)
-			oc_rc=1
-			;;
-		ok)
+		oc_cands="$oc_cands $oc_rel"
+		if [ "$oc_rel" = "." ]; then
+			oc_dirs="$oc_dirs ."
+		else
+			oc_dirs="$oc_dirs ./$oc_rel"
+		fi
+	done
+	# 没有孤儿包 → 没有任何交叉检查要跑(常态路径:零开销)
+	[ -n "$oc_dirs" ] || return 0
+
+	oc_modpath=$(cd "$oc_mod" && go list -m 2>/dev/null || true)
+	oc_vetted="" # 已 vet 过的 "<包>|<文件集>"(去重键)
+	oc_ok=""     # 已确认可编译的包
+	oc_err=""    # 检出真实错误的包(错误详情已单独回显)
+	for oc_target in $ALL_TARGETS; do
+		oc_goos=${oc_target%/*}
+		oc_goarch=${oc_target#*/}
+		# 一次 go list 覆盖**所有**候选包,输出(制表符分隔):
+		#   导入路径 | 源文件数 | 内部测试文件数 | 外部测试文件数 |
+		#   源文件集 | 内部测试文件集 | 外部测试文件集 | 错误
+		oc_probe=$(cd "$oc_mod" && GOOS="$oc_goos" GOARCH="$oc_goarch" CGO_ENABLED=0 \
+			go list -e -f '{{.ImportPath}}{{"\t"}}{{len .GoFiles}}{{"\t"}}{{len .TestGoFiles}}{{"\t"}}{{len .XTestGoFiles}}{{"\t"}}{{.GoFiles}}{{"\t"}}{{.TestGoFiles}}{{"\t"}}{{.XTestGoFiles}}{{"\t"}}{{.Error}}' \
+			$oc_dirs 2>/dev/null) || oc_probe=""
+		# 归一化:只留下"这个平台下有文件"的包;以及"不是约束排除"的真实错误
+		# (例如一个目录里有两个不同的 package 名 —— 那是实打实的错误,
+		#  不能因为"没有可编译文件"就被当成约束排除而放过)。
+		oc_norm=$(printf '%s\n' "$oc_probe" | awk -F'\t' -v mp="$oc_modpath" '
+			{
+				if (NF < 8) next
+				rel = $1
+				if (rel == "") next
+				if (mp != "" && substr(rel, 1, length(mp)) == mp) rel = substr(rel, length(mp) + 1)
+				sub(/^\//, "", rel)
+				if (rel == "") rel = "."
+				n = $2 + $3 + $4
+				err = $8
+				if (n == 0) {
+					if (err != "<nil>" && err !~ /build constraints exclude all Go files/) {
+						printf "ERR\t%s\t%s\n", rel, err
+					}
+					next
+				}
+				files = $5 " " $6 " " $7
+				gsub(/[ \t]+/, " ", files)
+				printf "FILES\t%s\t%s\n", rel, files
+			}')
+		[ -n "$oc_norm" ] || continue
+		while IFS=$'\t' read -r oc_kind oc_rel oc_rest; do
+			case "$oc_kind" in
+			ERR)
+				oc_rc=1
+				oc_err="$oc_err $oc_rel"
+				echo "---- GOOS=$oc_goos GOARCH=$oc_goarch 包 ./$oc_rel 无法解析(孤儿包检查)----" >&2
+				printf '%s\n' "$oc_rest" >&2
+				;;
+			FILES)
+				oc_key="$oc_rel|$oc_rest"
+				case "$oc_vetted" in
+				*"|$oc_key|"*) continue ;;
+				esac
+				oc_vetted="$oc_vetted|$oc_key|"
+				if [ "$oc_rel" = "." ]; then
+					oc_arg="."
+				else
+					oc_arg="./$oc_rel"
+				fi
+				oc_vet_rc=0
+				oc_out=$(cd "$oc_mod" && GOOS="$oc_goos" GOARCH="$oc_goarch" CGO_ENABLED=0 go vet "$oc_arg" 2>&1) || oc_vet_rc=$?
+				if [ "$oc_vet_rc" -eq 0 ]; then
+					oc_ok="$oc_ok $oc_rel"
+				elif printf '%s' "$oc_out" | grep -q "build constraints exclude all Go files"; then
+					# 该平台没有这个包的文件(正常)—— 探测阶段已按文件数过滤,
+					# 这里只是兜底(例如 CGO_ENABLED=0 把 cgo 文件全排除了)。
+					:
+				else
+					oc_rc=1
+					oc_err="$oc_err $oc_rel"
+					echo "---- GOOS=$oc_goos GOARCH=$oc_goarch go vet $oc_arg 输出(孤儿包检查)----" >&2
+					printf '%s\n' "$oc_out" >&2
+				fi
+				;;
+			esac
+		done <<<"$oc_norm"
+	done
+	# 汇总:覆盖到 / 检出错误(详情已回显)/ 完全没被任何目标平台编译到
+	for oc_rel in $oc_cands; do
+		case " $oc_ok " in
+		*" $oc_rel "*)
 			echo "   覆盖: ./$oc_rel"
 			;;
-		skip)
-			echo "   跳过: ./$oc_rel(在 $ORPHAN_GOOS 下都不存在 —— 只属于其它平台的包)"
+		*)
+			case " $oc_err " in
+			*" $oc_rel "*) : ;; # 上面已经回显过错误详情,不再重复
+			*) echo "   跳过: ./$oc_rel(全部已知目标平台下都没有可编译文件)" ;;
+			esac
 			;;
 		esac
 	done
@@ -433,23 +525,46 @@ rm -f "$WIN_CHECK_DIR/pkg/zz_windows.go"
 
 # ---- 门禁自检:孤儿包检查本身必须真的能抓到类型错误 ----------------------
 # 目的:证明 orphan_check **有效**,而不是"看上去在跑"。
-# 做法:在同一个隔离模块里造一个只含 //go:build windows 文件的包 ——
+# 做法:在同一个隔离模块里造一个只含 //go:build <平台> 文件的包 ——
 # 它对 `go list ./...` **完全隐形**(这正是要修的盲区:上面三条自检用的
 # win_check 走 ./...,看不见它),只有 orphan_check 能看见它。
-# 依次验证两件事:
-#   1. 对照组 —— 类型**正确**的 windows-only 包必须**通过**。
+#
+# 每个平台依次验证两件事:
+#   1. 对照组 —— 类型**正确**的 <平台>-only 包必须**通过**。
 #      没有这一条,下面那条就是恒真断言(vet 无论对错都失败也算"成功")。
-#   2. 含类型错误的 windows-only 包必须**失败**。
-mkdir -p "$WIN_CHECK_DIR/winonly"
-printf '//go:build windows\n\npackage winonly\n\nvar Good string = "ok"\n' >"$WIN_CHECK_DIR/winonly/only_windows.go"
-if ! orphan_check "$WIN_CHECK_DIR" "./..." "winonly"; then
-	fail "门禁自检失败:孤儿包检查把一个**类型正确**的 //go:build windows 包判成失败 —— 检查本身不可信"
-fi
-printf '//go:build windows\n\npackage winonly\n\nvar Bad string = 42\n' >"$WIN_CHECK_DIR/winonly/only_windows.go"
-if orphan_check "$WIN_CHECK_DIR" "./..." "winonly"; then
-	fail "门禁自检失败:孤儿包(只含 //go:build windows 文件的包)里的类型错误没有被孤儿包检查发现"
-fi
-rm -rf "$WIN_CHECK_DIR/winonly"
+#   2. 含类型错误的 <平台>-only 包必须**失败**。
+#
+# 覆盖的平台:windows(迭代 11/13 的老自检,必须继续有效)+
+# **freebsd / js**(迭代 14B 新增:这正是"手写 windows linux darwin"
+# 枚举漏掉的那一类 —— 终审实测:只含 //go:build freebsd 的孤儿包 +
+# 类型错误 → 9 步门禁全绿 = 绕过)。
+#
+# 自检**必须走真实的枚举路径**:orphan_check 内部用的是
+# `go tool dist list` 的全集,这里只声明"这个平台应该被覆盖到",
+# 具体由 orphan_check 自己去找 —— 自检若自己另写一套平台列表,
+# 就复现了原来那个 bug(枚举与检查不同源)。
+orphan_selfcheck() {
+	# orphan_selfcheck <平台标签> <build 标签> <目录名> <包名>
+	osc_tag="$1"
+	osc_build="$2"
+	osc_dir="$3"
+	osc_pkg="$4"
+	mkdir -p "$WIN_CHECK_DIR/$osc_dir"
+	printf '//go:build %s\n\npackage %s\n\nvar Good string = "ok"\n' "$osc_build" "$osc_pkg" >"$WIN_CHECK_DIR/$osc_dir/only_$osc_dir.go"
+	if ! orphan_check "$WIN_CHECK_DIR" "./..." "$osc_dir"; then
+		fail "门禁自检失败:孤儿包检查把一个**类型正确**的 //go:build $osc_build 包判成失败 —— 检查本身不可信"
+	fi
+	printf '//go:build %s\n\npackage %s\n\nvar Bad string = 42\n' "$osc_build" "$osc_pkg" >"$WIN_CHECK_DIR/$osc_dir/only_$osc_dir.go"
+	if orphan_check "$WIN_CHECK_DIR" "./..." "$osc_dir"; then
+		fail "门禁自检失败:孤儿包(只含 //go:build $osc_build 文件的包)里的类型错误没有被孤儿包检查发现"
+	fi
+	rm -rf "$WIN_CHECK_DIR/$osc_dir"
+	echo "   自检通过: //go:build $osc_build 的孤儿包(类型正确 → 通过 / 类型错误 → 被抓)"
+}
+
+orphan_selfcheck "windows" "windows" "winonly" "winonly"
+orphan_selfcheck "freebsd" "freebsd" "fbonly" "fbonly"
+orphan_selfcheck "js" "js" "jsonly" "jsonly"
 echo "OK(自检:类型正确的孤儿包通过 / 含类型错误的孤儿包被抓)"
 
 # ---- 真正的孤儿包检查(工作区) -------------------------------------------
@@ -462,51 +577,103 @@ WIN_CHECK_DIR=""
 echo "OK(自检:对照组通过 / 测试文件类型错误被抓 / 源文件类型错误被抓)"
 end_step
 
-step "5/9" "go test -count=1 -race"
+step "5/9" "go test -count=1 -race -v"
 TEST_LOG=$(mktemp /tmp/awo-verify-test.XXXXXX)
 # 退出码直接取自 go test(不经管道):管道会把"grep 没匹配到行"的退出码
 # 混进来,让一次成功的测试被误判为失败。完整日志落盘(第 6 步要用),
-# 控制台只滤掉 macOS SDK 版本告警 —— Wails/objc 的链接产物每次刷十几行,
-# 与被测代码无关。
-if ! go test -count=1 -race $PKGS >"$TEST_LOG" 2>&1; then
+# 控制台只回显结果行 —— Wails/objc 的链接产物每次刷十几行,与被测代码
+# 无关。
+#
+# **为什么加 -v**:第 6 步要区分"真跑过的用例"与"被 t.Skip 跳过的用例",
+# 而这两种情况在**不带 -v** 的输出里长得一模一样(都是 `ok <pkg> 0.00s`)——
+# 终审实测:一个只含 t.Skip() 的新包 → 门禁判"有真实用例" → 全绿 = 绕过。
+# 只有 -v 会打印 `--- PASS:` / `--- SKIP:` 两种行,才分得开。
+#
+# 性能实测(全量 21 个包):带 -v 18.3s vs 不带 -v 19.1s —— **没有可测的
+# 额外开销**(噪声范围内),只是日志从 43 行涨到 ~2300 行。日志落盘、
+# 成功时只回显结果行,控制台不会被淹没;失败时回显全文。
+if ! go test -count=1 -race -v $PKGS >"$TEST_LOG" 2>&1; then
 	cat "$TEST_LOG"
 	fail "go test 失败"
 fi
-grep -v "was built for newer 'macOS' version" "$TEST_LOG" || true
+grep -E '^(ok|FAIL|\?)[[:space:]]' "$TEST_LOG" | grep -v "was built for newer 'macOS' version" || true
 echo "OK"
 end_step
 
-step "6/9" "每个包都必须有真实用例"
-# 逐包核对第 4 步的测试结果行。go test 的输出变体:
+step "6/9" "每个包都必须有真实执行的用例"
+# 逐包核对第 5 步的测试结果行 **+ 真正执行过的用例数**。
+#
+# go test 的输出变体:
 #   ok   <pkg> 0.12s                    → 有用例
 #   ok   <pkg> 0.00s [no tests to run]  → 包在,但一条用例都没跑(静默 0 用例)
 #   ?    <pkg> [no test files]           → 包里根本没有测试文件
 #   FAIL <pkg> 0.12s                    → 测试失败(第 5 步已拦,这里是兜底)
 #   ok   <pkg> (cached)                 → 有用例(只是命中缓存)
 #
+# **"有 ok 行"不等于"有真实用例"**(迭代 14B 修的绕过):
+# 一个只含 `t.Skip()` 的新包,输出同样是 `ok <pkg> 0.00s` —— 门禁据此
+# 判"有真实用例"并全绿(终审实测:9 步全绿 = 绕过)。而 `t.Skip()` 掉的
+# 用例**什么都没验证**:包看起来有测试,实际一条没跑,将来它自己坏了也
+# 不会有人发现。
+#
+# 因此本步要求:**至少有一条真正执行并通过的用例**(第 5 步用 -v 才会
+# 打印 `--- PASS:` / `--- SKIP:`,两者在不带 -v 的输出里无法区分)。
+# 判定口径:
+#   - 有 `--- PASS:` 行 → 真有用例(通过);
+#   - 只有 `--- SKIP:` 行 → **全部被跳过**(新原因:skipall);
+#   - 一条 `--- PASS:`/`--- SKIP:` 都没有 → 0 个真实用例(zero)。
+#
 # 匹配用 awk 的"第二列精确等于包路径",不用正则/前缀匹配:
 # `agentworkflow` 是 `agentworkflow/api` 的前缀,前缀匹配会把两个包搞混。
+# `--- PASS:` / `--- SKIP:` 只认**行首无缩进**的顶层用例(子用例带缩进;
+# 父用例被跳过时子用例也算跳过,按父用例计数即可)。
+#
+# 另:必须同时看到该包自己的 `=== RUN` 行,才算"测试框架真的跑过用例"。
+# 否则用例自己往 stdout 打印一行 "--- PASS: xxx" 就能骗过检查(误判成
+# 有真实用例)。看不到 RUN 行 → 该包的 PASS 一律不计数(fail closed)。
 MISSING=$(awk -v pkgs="$CHECK_PKGS" '
 BEGIN {
 	n = split(pkgs, a, " ")
 	for (i = 1; i <= n; i++) if (a[i] != "") want[a[i]] = 1
-	reason["zero"]    = "0 个用例(测试文件里没有 Test 函数,或被 build 标签跳过)"
+	reason["zero"]    = "0 个真实用例(测试文件里没有 Test 函数,或被 build 标签跳过)"
+	reason["skipall"] = "全部用例都被 t.Skip 跳过(没有一条真正执行过 —— 看着有测试,实际什么都没验证)"
 	reason["nofiles"] = "没有测试文件([no test files])"
 	reason["fail"]    = "测试失败"
 	reason["missing"] = "测试结果行缺失(包没进测试列表?)"
 }
-$1 == "ok"   { if ($2 in want) st[$2] = (index($0, "no tests to run") > 0) ? "zero" : "ok"; next }
-$1 == "?"   { if ($2 in want) st[$2] = "nofiles"; next }
-$1 == "FAIL" { if ($2 in want) st[$2] = "fail"; next }
+/^=== RUN / { nrun++; next }
+/^--- PASS: / { npass++; next }
+/^--- SKIP: / { nskip++; next }
+/^--- FAIL: / { nfail++; next }
+/^(ok|FAIL|\?)[[:space:]]/ {
+	if ($2 in want) {
+		p = $2
+		if ($1 == "ok") st[p] = "ok"
+		else if ($1 == "FAIL") st[p] = "fail"
+		else st[p] = "nofiles"
+		if (index($0, "no tests to run") > 0) st[p] = "zero"
+		# 框架没跑过任何用例 → PASS 行不可信(可能是用例自己打印的)
+		np[p] = (nrun > 0) ? npass : 0
+		ns[p] = nskip
+		nrun = 0
+		npass = 0
+		nskip = 0
+		nfail = 0
+		next
+	}
+}
 END {
 	for (p in want) {
 		s = (p in st) ? st[p] : "missing"
+		if (s == "ok") {
+			if (np[p] == 0) s = (ns[p] > 0) ? "skipall" : "zero"
+		}
 		if (s != "ok") printf "  %s: %s\n", p, reason[s]
 	}
 }
 ' "$TEST_LOG" | sort)
-[ -z "$MISSING" ] || fail "以下包缺少真实用例:$MISSING"
-echo "OK($CHECK_COUNT 个包均有真实用例)"
+[ -z "$MISSING" ] || fail "以下包缺少真实执行的用例:$MISSING"
+echo "OK($CHECK_COUNT 个包均有真实执行并通过的用例)"
 end_step
 
 step "7/9" "前端 lint / 构建 / vitest"

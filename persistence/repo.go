@@ -600,7 +600,21 @@ func (d *DB) ListEvents(executionID string, limit int) ([]map[string]any, error)
 			return nil, wrap(err)
 		}
 		data := map[string]any{}
-		_ = json.Unmarshal([]byte(dataJSON), &data)
+		// 事件 data 列损坏 → **降级 + WARN**(与执行列表同一口径)。
+		//
+		// 为什么不是显式失败:事件是**历史审计记录**,一次事件列表/事件流
+		// 里坏一条,不该让整个列表页打不开(与 ListExecutions 的批量读取
+		// 同理)。但也不能像此前那样 `_ = json.Unmarshal(...)` 静默吞掉 ——
+		// 那会让这条事件的载荷凭空变成 {} ,审计线索消失且**没有任何痕迹**。
+		// 现在:载荷降级为空对象 + 一条 WARN(可在日志里定位到具体事件)。
+		if err := decodeJSONColumn("data_json", dataJSON, &data); err != nil {
+			logx.Warn("事件 data_json 损坏,已按空载荷处理",
+				"execution", execID, "event", typ, "error", err.Error())
+			data = map[string]any{}
+		}
+		if data == nil {
+			data = map[string]any{}
+		}
 		out = append(out, map[string]any{
 			"seq": seq, "execution_id": execID, "node_id": nodeID,
 			"type": typ, "data": data, "created_at": createdAt,
@@ -679,7 +693,15 @@ func (d *DB) ListAllEvents(eventType string, limit int) ([]map[string]any, error
 			return nil, wrap(err)
 		}
 		data := map[string]any{}
-		_ = json.Unmarshal([]byte(dataJSON), &data)
+		// 同 ListEvents:事件 data 列损坏 → 降级 + WARN,不静默吞掉。
+		if err := decodeJSONColumn("data_json", dataJSON, &data); err != nil {
+			logx.Warn("事件 data_json 损坏,已按空载荷处理",
+				"execution", execID, "event", typ, "error", err.Error())
+			data = map[string]any{}
+		}
+		if data == nil {
+			data = map[string]any{}
+		}
 		out = append(out, map[string]any{
 			"seq": seq, "execution_id": execID, "node_id": nodeID,
 			"type": typ, "data": data, "created_at": createdAt,

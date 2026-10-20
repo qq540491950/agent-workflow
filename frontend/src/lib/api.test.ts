@@ -17,8 +17,24 @@ vi.mock("@wailsio/runtime", () => ({
 const wfList = vi.fn();
 const wfSavePayload = vi.fn();
 const wfImportYAML = vi.fn();
+const wfGet = vi.fn();
+const wfVersions = vi.fn();
+const wfVersionDSL = vi.fn();
+const wfExportYAML = vi.fn();
+const wfValidate = vi.fn();
 const exAllEvents = vi.fn();
 const exRun = vi.fn();
+const exList = vi.fn();
+const exGet = vi.fn();
+const exNodes = vi.fn();
+const exEvents = vi.fn();
+const exArtifacts = vi.fn();
+const exStats = vi.fn();
+const agList = vi.fn();
+const agGetConfig = vi.fn();
+const agUpdateConfig = vi.fn();
+const skList = vi.fn();
+const gtStatus = vi.fn();
 const stExportBackup = vi.fn();
 const stRestoreBackup = vi.fn();
 const stInfo = vi.fn();
@@ -46,6 +62,11 @@ vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () =>
       List: (...a: unknown[]) => wfList(...a),
       SavePayload: (...a: unknown[]) => wfSavePayload(...a),
       ImportYAML: (...a: unknown[]) => wfImportYAML(...a),
+      Get: (...a: unknown[]) => wfGet(...a),
+      Versions: (...a: unknown[]) => wfVersions(...a),
+      VersionDSL: (...a: unknown[]) => wfVersionDSL(...a),
+      ExportYAML: (...a: unknown[]) => wfExportYAML(...a),
+      Validate: (...a: unknown[]) => wfValidate(...a),
     },
   ),
 );
@@ -70,6 +91,12 @@ vi.mock("@bindings/agentworkflow/app/application/executionservice.js", () =>
     {
       AllEvents: (...a: unknown[]) => exAllEvents(...a),
       Run: (...a: unknown[]) => exRun(...a),
+      List: (...a: unknown[]) => exList(...a),
+      Get: (...a: unknown[]) => exGet(...a),
+      Nodes: (...a: unknown[]) => exNodes(...a),
+      Events: (...a: unknown[]) => exEvents(...a),
+      Artifacts: (...a: unknown[]) => exArtifacts(...a),
+      Stats: (...a: unknown[]) => exStats(...a),
     },
   ),
 );
@@ -113,26 +140,29 @@ function bindingStub(
 }
 
 vi.mock("@bindings/agentworkflow/app/application/agentservice.js", () =>
-  bindingStub("AgentService", [
-    "List",
-    "GetConfig",
-    "UpdateConfig",
-    "ResetConfig",
-    "Test",
-    "SetPermission",
-  ]),
+  bindingStub(
+    "AgentService",
+    ["List", "GetConfig", "UpdateConfig", "ResetConfig", "Test", "SetPermission"],
+    {
+      List: (...a: unknown[]) => agList(...a),
+      GetConfig: (...a: unknown[]) => agGetConfig(...a),
+      UpdateConfig: (...a: unknown[]) => agUpdateConfig(...a),
+    },
+  ),
 );
 vi.mock("@bindings/agentworkflow/app/application/skillservice.js", () =>
-  bindingStub("SkillService", ["List", "SetEnabled", "Test"]),
+  bindingStub("SkillService", ["List", "SetEnabled", "Test"], {
+    List: (...a: unknown[]) => skList(...a),
+  }),
 );
 vi.mock("@bindings/agentworkflow/app/application/gitservice.js", () =>
-  bindingStub("GitService", [
-    "Status",
-    "Diff",
-    "Log",
-    "Commit",
-    "SetWorkingDir",
-  ]),
+  bindingStub(
+    "GitService",
+    ["Status", "Diff", "Log", "Commit", "SetWorkingDir"],
+    {
+      Status: (...a: unknown[]) => gtStatus(...a),
+    },
+  ),
 );
 vi.mock("@bindings/agentworkflow/app/application/settingsservice.js", () =>
   bindingStub(
@@ -165,8 +195,24 @@ beforeEach(() => {
   wfList.mockReset();
   wfSavePayload.mockReset();
   wfImportYAML.mockReset();
+  wfGet.mockReset();
+  wfVersions.mockReset();
+  wfVersionDSL.mockReset();
+  wfExportYAML.mockReset();
+  wfValidate.mockReset();
   exAllEvents.mockReset();
   exRun.mockReset();
+  exList.mockReset();
+  exGet.mockReset();
+  exNodes.mockReset();
+  exEvents.mockReset();
+  exArtifacts.mockReset();
+  exStats.mockReset();
+  agList.mockReset();
+  agGetConfig.mockReset();
+  agUpdateConfig.mockReset();
+  skList.mockReset();
+  gtStatus.mockReset();
   stExportBackup.mockReset();
   stRestoreBackup.mockReset();
   stInfo.mockReset();
@@ -287,6 +333,209 @@ describe("desktop 模式 IPC 调用", () => {
     expect(exAllEvents).toHaveBeenCalledWith("node.started", 5);
     await api.allEvents("?type=workflow.completed");
     expect(exAllEvents).toHaveBeenCalledWith("workflow.completed", 200);
+  });
+});
+
+// 桌面分支的契约断言(迭代 14B 补)。
+//
+// 此前只有 listWorkflows / allEvents 两个桌面分支被断言 —— 破坏
+// getWorkflow 的桌面分支(改成走 wf.List / 走 HTTP),66 条用例**全绿**。
+// 双模式契约是约定 10 的硬要求,断言面必须覆盖**主要读接口**:
+// 工作流 / 执行 / 节点 / 制品 / 事件 / Agent 配置 / 技能 / 设置 / 备份 /
+// Git 状态。
+//
+// 每条断言都同时钉死两件事:
+//   1. 桌面分支调用了**哪个绑定**、**带了什么参数**(绑错名字/错参数
+//      会红);
+//   2. 桌面分支**不发 HTTP**(否则就是偷偷走了另一条路 —— 双模式语义
+//      分叉的典型来源)。
+describe("desktop 模式读接口契约(迭代 14B)", () => {
+  // 每个用例都用同一套脚手架:探测成功 + 断言不发 HTTP。
+  async function desktopApi() {
+    callByID.mockResolvedValue([]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    return { api, fetchMock };
+  }
+
+  it("工作流:getWorkflow 走 wf.Get(id)", async () => {
+    wfGet.mockResolvedValue({ id: "wf-1" });
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.getWorkflow("wf-1")).resolves.toEqual({ id: "wf-1" });
+    expect(wfGet).toHaveBeenCalledWith("wf-1");
+    expect(wfList).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("工作流:workflowVersions 走 wf.Versions(id)", async () => {
+    wfVersions.mockResolvedValue([1, 2, 3]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.workflowVersions("wf-1")).resolves.toEqual([1, 2, 3]);
+    expect(wfVersions).toHaveBeenCalledWith("wf-1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("工作流:versionDSL 走 wf.VersionDSL(id, version)", async () => {
+    wfVersionDSL.mockResolvedValue("version: 1\n");
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.versionDSL("wf-1", 7)).resolves.toBe("version: 1\n");
+    expect(wfVersionDSL).toHaveBeenCalledWith("wf-1", 7);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("工作流:exportYAML 走 wf.ExportYAML(id)", async () => {
+    wfExportYAML.mockResolvedValue("workflow:\n  id: wf-1\n");
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.exportYAML("wf-1")).resolves.toBe("workflow:\n  id: wf-1\n");
+    expect(wfExportYAML).toHaveBeenCalledWith("wf-1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("工作流:validateWorkflow 走 wf.Validate(wf)", async () => {
+    wfValidate.mockResolvedValue({ valid: true, errors: [] });
+    const { api, fetchMock } = await desktopApi();
+    const wf = { id: "wf-1", name: "n" } as unknown as Workflow;
+    await api.validateWorkflow(wf);
+    expect(wfValidate).toHaveBeenCalledWith(wf);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("执行:listExecutions 走 ex.List(workflowID, limit)", async () => {
+    exList.mockResolvedValue([{ id: "e1" }]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.listExecutions("wf-1", 25)).resolves.toEqual([{ id: "e1" }]);
+    expect(exList).toHaveBeenCalledWith("wf-1", 25);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("执行:listExecutions 的 limit 被收敛到上限(与服务端同一口径)", async () => {
+    exList.mockResolvedValue([]);
+    const { api } = await desktopApi();
+    await api.listExecutions("", 999999);
+    expect(exList).toHaveBeenCalledWith("", 1000);
+  });
+
+  it("执行:getExecution 走 ex.Get(id)", async () => {
+    exGet.mockResolvedValue({ id: "e1" });
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.getExecution("e1")).resolves.toEqual({ id: "e1" });
+    expect(exGet).toHaveBeenCalledWith("e1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("节点:executionNodes 走 ex.Nodes(id)", async () => {
+    exNodes.mockResolvedValue([{ id: "e1:n1" }]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.executionNodes("e1")).resolves.toEqual([{ id: "e1:n1" }]);
+    expect(exNodes).toHaveBeenCalledWith("e1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("事件:executionEvents 走 ex.Events(id)", async () => {
+    exEvents.mockResolvedValue([{ seq: 1 }]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.executionEvents("e1")).resolves.toEqual([{ seq: 1 }]);
+    expect(exEvents).toHaveBeenCalledWith("e1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("制品:executionArtifacts 走 ex.Artifacts(id)", async () => {
+    exArtifacts.mockResolvedValue([{ id: "a1" }]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.executionArtifacts("e1")).resolves.toEqual([{ id: "a1" }]);
+    expect(exArtifacts).toHaveBeenCalledWith("e1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("统计:stats 走 ex.Stats()", async () => {
+    exStats.mockResolvedValue([{ workflow_id: "wf-1", total: 3 }]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.stats()).resolves.toEqual([{ workflow_id: "wf-1", total: 3 }]);
+    expect(exStats).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Agent:listAgents 走 ag.List()", async () => {
+    agList.mockResolvedValue([{ id: "mock-claude" }]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.listAgents()).resolves.toEqual([{ id: "mock-claude" }]);
+    expect(agList).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Agent 配置:getAgentConfig 走 ag.GetConfig(id)", async () => {
+    agGetConfig.mockResolvedValue({ model: "m", env: { K: "***" } });
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.getAgentConfig("claude-code")).resolves.toEqual({
+      model: "m",
+      env: { K: "***" },
+    });
+    expect(agGetConfig).toHaveBeenCalledWith("claude-code");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Agent 配置:updateAgentConfig 先写后回读掩码配置(两种模式同形状)", async () => {
+    agUpdateConfig.mockResolvedValue(undefined);
+    agGetConfig.mockResolvedValue({ model: "m2", env: { K: "***" } });
+    const { api, fetchMock } = await desktopApi();
+    const cfg = { model: "m2", env: { K: "sk-***" } } as never;
+    await expect(api.updateAgentConfig("claude-code", cfg)).resolves.toEqual({
+      model: "m2",
+      env: { K: "***" },
+    });
+    expect(agUpdateConfig).toHaveBeenCalledWith("claude-code", cfg);
+    expect(agGetConfig).toHaveBeenCalledWith("claude-code");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("技能:listSkills 走 sk.List()", async () => {
+    skList.mockResolvedValue([{ id: "log" }]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.listSkills()).resolves.toEqual([{ id: "log" }]);
+    expect(skList).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("设置:getSettings 走 st.Info()", async () => {
+    stInfo.mockResolvedValue({
+      data_dir: "/tmp",
+      git_working_dir: "/tmp/repo",
+      log_level: "info",
+      allow_script_nodes: false,
+    });
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.getSettings()).resolves.toMatchObject({ log_level: "info" });
+    expect(stInfo).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("备份:exportBackupText 走 st.ExportBackup() 并序列化成 JSON 文本", async () => {
+    stExportBackup.mockResolvedValue({ workflows: [], agent_configs: {} });
+    const { api, fetchMock } = await desktopApi();
+    const text = await api.exportBackupText();
+    expect(stExportBackup).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(text)).toEqual({ workflows: [], agent_configs: {} });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("备份:restoreBackup 走 st.RestoreBackup(backup)", async () => {
+    stRestoreBackup.mockResolvedValue({ workflows_restored: 2, agent_configs_restored: 1 });
+    const { api, fetchMock } = await desktopApi();
+    const backup = { workflows: [], agent_configs: {} };
+    await expect(api.restoreBackup(backup)).resolves.toMatchObject({
+      workflows_restored: 2,
+    });
+    expect(stRestoreBackup).toHaveBeenCalledWith(backup);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Git:gitStatus 走 gt.Status()", async () => {
+    gtStatus.mockResolvedValue({ branch: "main", modified: [], staged: [], untracked: [] });
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.gitStatus()).resolves.toMatchObject({ branch: "main" });
+    expect(gtStatus).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

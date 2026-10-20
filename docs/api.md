@@ -47,7 +47,7 @@
 | --- | --- | --- |
 | GET | `/api/agents` | Agent 注册表(含权限策略与已配置模型) |
 | POST | `/api/agents/{id}/test` | 可用性测试(CLI 探测) |
-| GET | `/api/agents/{id}/config` | 读取运行配置(env 值以 `***` 掩码;**`extra_args` 里的值同样被掩码**) |
+| GET | `/api/agents/{id}/config` | 读取运行配置(env 值以 `***` 掩码;**`extra_args` 里的值同样被掩码**)。**`behavior` 字段目前未掩码(登记为 #255,第十三轮修复中)** |
 | PUT | `/api/agents/{id}/config` | 保存配置并热重建适配器(env `***`=保留,空=删除) |
 | POST | `/api/agents/{id}/reset` | 清空运行配置,恢复适配器内置默认 |
 | POST | `/api/agents/{id}/permission` | 更新权限策略。整表读-改-写已加锁串行化,并发授权**不会互相覆盖** |
@@ -69,7 +69,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关 |
-| POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改)。**`log_level` 只接受 `debug`/`info`/`warn`/`error`**(大小写不敏感,落库归一为小写),非法值返回 400 —— 不再静默回落 info(界面显示的级别与实际生效的级别会不一致) |
+| POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改)。**`log_level` 只接受 `debug`/`info`/`warn`/`error`**(大小写不敏感,落库归一为小写),非法值返回 400 —— 不再静默回落 info(界面显示的级别与实际生效的级别会不一致)。**`git_working_dir` 的"缺省"与"空串"是两种语义**:请求体里**没有该字段** = 保持原值不变;**显式传空串** = **清除**(落库空串 + 回到启动默认目录)。**先全量校验、后统一落库** —— 任一项非法则一项都不改 |
 | GET | `/api/backup` | 导出备份(工作流 + Agent 配置,含明文敏感环境变量)。响应头 `Cache-Control: no-store`,避免明文 API Key 留在浏览器/代理的磁盘缓存里 |
 | POST | `/api/backup/restore` | 恢复备份。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝;**本机不存在的 Agent 也计入 `agent_configs_invalid` 且不落库**(此前计入"已恢复"是假成功:配置永远不会被应用)。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` / **`agent_configs_unknown_ids`** |
 | GET | `/api/events` | **SSE** 实时事件流(UIEvent;连接即达响应头,15s keepalive) |
@@ -163,7 +163,7 @@ HTTP 状态码语义:
 > `POST /api/workflows/validate` 响应的 `errors[].code` / `warnings[].code`
 > 数组里;HTTP 错误体的 `code` 在响应体顶层。同一个字符串在两处都可能出现。
 
-## 契约变化(第四/五/七/十轮)
+## 契约变化(第四/五/七/十/十二轮)
 
 ### 1. 导入响应带 `ignored_keys`
 
@@ -340,6 +340,67 @@ HTTP 状态码语义:
 两者都由**应用服务层**产出(解析只做一遍),**服务器模式与桌面模式走同一段
 代码**(`SavePayload` / `ParseWorkflowPayload`)—— 同一份非法载荷在两种模式下
 给出**同一个 code**。详见 `docs/OPTIMIZATION.md` 第十一节(#197 / #198 / #199)。
+
+### 10. 凭据脱敏的覆盖矩阵(第十二轮变更)
+
+> 登记于 `docs/OPTIMIZATION.md` #245-#247;回归锁见
+> `docs/TESTING.md` 的"可执行覆盖矩阵"专节。
+
+**问题**:此前**两套掩码规则并存** —— `logx.Mask`(按**键名**判定)与
+`agent.MaskCredentialValues`(按**值形态**判定)各覆盖一半,"出口用哪套就漏
+另一半"。终审实测:`Bearer eyJ…` / `sk-ant-…` / `ghp_…` / `AKIA…` /
+`Basic <base64>` / PEM 私钥块 / 高熵裸串,在节点 `output` / `error` /
+`result_json`、`state_json`、事件表、**实时 SSE**、API 出口(执行详情 /
+节点明细 / 导出 / 事件流)、日志、制品**全部明文泄漏**。
+
+**现在的口径**:值的形态规则**只有一份**(`logx/credential.go`),
+`agent` 侧降为薄封装;`logx.Mask` 升级为"**键名 ∪ 值形态**"。
+落库侧与读出口**各过一次** → 两条规则的终态都是 `***` → **幂等**
+(连续脱敏 1 次与 2 次逐字节相同)。
+
+**用户可见的变化**:同一个凭据,在**任何**读出口(`GET /api/executions/{id}`、
+`GET /api/executions/{id}/nodes`、`GET /api/executions/{id}/export`、
+`GET /api/events`、`GET /api/events/all`、`GET /api/executions/{id}/artifacts`)
+都不再以明文出现 —— 之前它只在**部分**出口被替换。
+
+**形态 × 出口的覆盖矩阵**(两个出口 = `Mask` 与 `MaskCredentialValues`):
+
+| 形态 | `Mask`(日志 / 节点输出 / `state_json` / 事件流 / 详情 / 导出) | `MaskCredentialValues`(制品 `git diff`) |
+| --- | --- | --- |
+| `API_KEY=sk-xxx`(key=value) | 脱敏 | 脱敏 |
+| `sk-ant-` / `ghp_` / `AKIA…`(已知前缀裸值) | 脱敏 | 脱敏 |
+| `eyJ…`(裸 JWT)、`Bearer eyJ…`、`Basic <base64>` | 脱敏 | 脱敏 |
+| PEM 私钥块 | 脱敏 | 脱敏 |
+| 高熵裸串(无前缀无键名,≥24 字符) | 脱敏 | 脱敏 |
+| `password: hunter2`、`token=abc123`(低熵) | 脱敏 | **不脱敏**(有意取舍) |
+| 代码标识符(`const token = getToken();`)、英文句子、文件路径 | **不脱敏** | **不脱敏** |
+
+**两条刻意保留的取舍**(不是漏网,登记在开放清单里):
+
+- **制品出口的低熵值不脱敏** —— diff 里的 `password = "xxx"` 多半是**代码或
+  占位符**,抹掉会毁掉**审计证据**;DB / API / 日志出口走**键名规则**,照常脱敏。
+- **高熵裸值的 24 字符门槛** —— 裸值语境没有键名线索,门槛必须比键名语境
+  (≥16 或 ≥32)**严**,否则 40 位 git SHA、base64 测试夹具会被抹掉。
+  驼峰标识符另有护栏(大小写起伏 ≥4 次不脱敏)。
+
+> **为什么这值得单列一节**:此前"规则覆盖了哪些形态 × 哪些出口"**从来没被
+> 断言过** —— 改规则不会让测试变红,少一条规则也不会。现在矩阵是**可执行的**
+> (`TestCredentialShapeCoverageMatrix`),13 形态 × 2 出口**逐格**登记期望,
+> **未覆盖的格子必须写清理由**。将来谁改门槛,矩阵立刻变红,取舍必须被
+> **重新论证**一遍。
+
+### 11. `behavior` 字段尚未掩码(第十三轮修复中,登记为 #255)
+
+> **这是当前仍开放的一条**,写在这里是为了让"字段级的掩码覆盖面"可查。
+
+`GET /api/agents/{id}/config` 返回的 `AgentConfig` 里,`env` 的值与
+`extra_args` 里的凭据**都**被掩码为 `***`,但 **`behavior`(自由映射
+`map[string]any`)没有走掩码** → 该字段里若含凭据形态的值,会**原样返回**
+(约定 8 要求"API 返回掩码")。
+
+**已知结论(第十三轮修)**:掩码要覆盖**全部**可能承载凭据的字段;
+`behavior` 是自由映射,不能按值形态**盲抹**(会毁掉合法配置),但**必须过
+一遍值的形态规则**。
 
 ## SSE 实时事件流(GET /api/events)
 
