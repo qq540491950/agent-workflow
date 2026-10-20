@@ -294,13 +294,27 @@ describe("subscribeEvents(web 模式)", () => {
   it("SSE 消息分发到订阅者,退订后不再接收", async () => {
     callByID.mockRejectedValue(new Error("no ipc"));
     type MessageHandler = (m: { data: string }) => void;
-    let onmessage: MessageHandler | null = null;
+    // 用 `!` 而非 `= null`:赋值发生在 FakeEventSource 的构造函数里(嵌套
+    // 函数),TS 的流分析看不到它,`let x: T | null = null` 在使用点会被收窄
+    // 成 null,连 `as MessageHandler` 都会报 TS2352。
+    let onmessage!: MessageHandler | null;
+    // 建连完成的信号。ensureEventStream 是异步链(detectMode → import runtime
+    // → new EventSource),而 subscribeEvents 不返回它的 promise —— 测试没有
+    // 可 await 的句柄。此前用固定节拍数(`setTimeout(0)`)去猜这条链跑完没有,
+    // 而它要几拍**不是常数**(实测 1 拍,并行抢资源时会更多):猜对了纯属运气,
+    // 猜错就是 onmessage 还是 null → 消息被静默丢掉 → 用例变红。
+    // 这里改成等"EventSource 真的建好了"这件确定发生的事。
+    let resolveConnected!: () => void;
+    const connected = new Promise<void>((resolve) => {
+      resolveConnected = resolve;
+    });
     class FakeEventSource {
       url: string;
       onmessage: MessageHandler | null = null;
       constructor(url: string) {
         this.url = url;
         onmessage = (m) => this.onmessage?.(m);
+        resolveConnected();
       }
     }
     vi.stubGlobal("window", {});
@@ -309,13 +323,12 @@ describe("subscribeEvents(web 模式)", () => {
     const { subscribeEvents } = await freshApi();
     const got: string[] = [];
     const unsub = subscribeEvents((ev) => got.push(ev.type));
-    // ensureEventStream 是异步链(detectMode → import runtime/建连),让微任务跑完
-    await new Promise((r) => setTimeout(r, 0));
-    const fire = onmessage as MessageHandler | null;
-    fire?.({ data: JSON.stringify({ type: "node.started" }) });
-    fire?.({ data: "not-json" }); // 非法消息被忽略
+    await connected; // EventSource 已建连
+    const fire = onmessage as MessageHandler;
+    fire({ data: JSON.stringify({ type: "node.started" }) });
+    fire({ data: "not-json" }); // 非法消息被忽略
     unsub();
-    fire?.({ data: JSON.stringify({ type: "node.completed" }) });
+    fire({ data: JSON.stringify({ type: "node.completed" }) });
     expect(got).toEqual(["node.started"]);
   });
 
@@ -323,7 +336,12 @@ describe("subscribeEvents(web 模式)", () => {
   // 与"确实没有新数据"无法区分。现在必须报出来。
   it("SSE 断线会被报出来(不再静默吞掉)", async () => {
     callByID.mockRejectedValue(new Error("no ipc"));
-    let onerror: (() => void) | null = null;
+    let onerror!: (() => void) | null;
+    // 同上:等 EventSource 建连这件确定发生的事,而不是猜事件循环节拍数。
+    let resolveConnected!: () => void;
+    const connected = new Promise<void>((resolve) => {
+      resolveConnected = resolve;
+    });
     class FakeEventSource {
       url: string;
       onmessage: ((m: { data: string }) => void) | null = null;
@@ -331,6 +349,7 @@ describe("subscribeEvents(web 模式)", () => {
       constructor(url: string) {
         this.url = url;
         onerror = () => this.onerror?.();
+        resolveConnected();
       }
     }
     vi.stubGlobal("window", {});
@@ -339,8 +358,8 @@ describe("subscribeEvents(web 模式)", () => {
 
     const { subscribeEvents } = await freshApi();
     subscribeEvents(() => {});
-    await new Promise((r) => setTimeout(r, 0));
-    (onerror as (() => void) | null)?.();
+    await connected; // EventSource 已建连
+    (onerror as () => void)();
     expect(toast.error).toHaveBeenCalled();
     expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("实时事件流");
   });

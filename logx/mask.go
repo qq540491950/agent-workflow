@@ -11,13 +11,16 @@ import (
 const maskPlaceholder = "***"
 
 // sensitivePattern 匹配"值形态"的敏感键值对(key=value / key: value /
-// "key": "value"),值可带可选的 Bearer 前缀。
+// "key": "value"),值可带可选的认证方案前缀(Bearer / Basic)。
 //
 // 注意:这条规则是"宁可误伤也不漏"的最后一道防线 —— 日志/diff 文本里
 // 出现 token=xxx 就整体替换,即使它其实是普通代码(误伤评估见
 // keySensitivity 的说明)。
+//
+// 认证方案前缀必须一并吞掉:否则 "Authorization: Basic <base64>" 会
+// 只替换掉 "Basic" 这个词本身,真正的 base64 凭据原样留下(实测漏过)。
 var sensitivePattern = regexp.MustCompile(
-	`(?i)((?:api[_-]?key|token|password|passwd|secret|authorization|credential)s?"?\s*[:=]\s*"?(?:bearer\s+)?)([^",\s}&]+)`)
+	`(?i)((?:api[_-]?key|token|password|passwd|secret|authorization|credential)s?"?\s*[:=]\s*"?(?:(?:bearer|basic)\s+)?)([^",\s}&]+)`)
 
 // sensitiveHint 是敏感词的公共子串。正则很贵,而事件总线的热路径上
 // 每个 payload 都要过一遍(Emit 是每节点每次执行都调用的),所以先用
@@ -35,12 +38,32 @@ func mayContainSensitive(s string) bool {
 	return false
 }
 
-// Mask 脱敏文本中的敏感键值对(含 Bearer 前缀形式)。
+// Mask 脱敏文本中的敏感内容。
+//
+// 两条规则,同源(值的形态规则见 credential.go —— 唯一定义处):
+//
+//  1. **键名规则**:敏感键 + key=value / key: value 形态 → 整值替换为 ***;
+//  2. **值形态规则**:值本身呈凭据形态时替换 —— 与键名无关。
+//
+// 第 2 条是迭代 12 补上的。此前只有第 1 条,于是**裸值**凭据
+// (没有键名线索)原样落库并经所有 API 出口外泄 —— 第十一轮终审实测:
+//
+//	cli stderr: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc
+//
+// 这类文本不含 api_key/token/password 等键名词,键名规则根本不触发。
+// 修法不是再加一份键名清单(那会继续漂移),而是把"值形态"这条规则
+// 提升到本包、与键名规则并列(约定 #13 的同源精神)。
+//
+// 幂等:两条规则的终态都是 "***",而 "***" 本身不呈任何凭据形态 ——
+// 二次脱敏逐字节不变。
 func Mask(s string) string {
-	if !mayContainSensitive(s) {
+	if s == "" {
 		return s
 	}
-	return sensitivePattern.ReplaceAllString(s, `${1}***`)
+	if mayContainSensitive(s) {
+		s = sensitivePattern.ReplaceAllString(s, `${1}***`)
+	}
+	return maskCredentialShapes(s)
 }
 
 // ---------------------------------------------------------------------------

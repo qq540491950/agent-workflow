@@ -157,9 +157,18 @@ func TestMaskStateDataKeepsOutcomeJSONValid(t *testing.T) {
 //
 // 下面的断言必须**只能**由键名判定满足:取值刻意不含 key=value 形态
 // (logx.Mask 改不动它),否则测试会退化成恒真。
+//
+// **取值变更说明(迭代 12)**:原取值是 "sk-plain-value-999" —— 它带已知的
+// 凭据前缀 "sk-",在迭代 12 把"值形态"规则收敛进 logx.Mask 之后,logx.Mask
+// 会改动它,于是下面那条"前置自检"恒红(测试前提不再成立)。
+//
+// 断言本身**没有**改动(仍然是"顶层敏感键的值必须变成 ***"),改的只是用来
+// 探测键名判定的**探针值**:换成既不含已知凭据前缀、也不构成高熵长串的
+// "plain-value-999"。这样"前置自检"重新成立,断言依然只由键名判定满足 ——
+// 测试的分辨力不变(它仍能区分"键名判定"与"值形态判定")。
 func TestMaskStateDataMasksSensitiveKeyNames(t *testing.T) {
 	// 前置自检:这些值不会被"值形态"脱敏改动 —— 否则下面的断言测不到键名判定。
-	const plain = "sk-plain-value-999"
+	const plain = "plain-value-999"
 	if got := logx.Mask(plain); got != plain {
 		t.Fatalf("测试前提不成立:logx.Mask 会改动 %q(无法用它区分键名判定与值形态判定)", plain)
 	}
@@ -186,6 +195,9 @@ func TestMaskStateDataMasksSensitiveKeyNames(t *testing.T) {
 // (node:my-token:status)会被整值替换成 "***" —— 节点状态直接丢失,恢复时
 // 该节点会被重跑(约定 #14 同族:脱敏不得改写执行语义)。
 func TestMaskStateDataKeyNameJudgmentDoesNotTouchStructuredKeys(t *testing.T) {
+	// 取值**刻意**是凭据形态("sk-" 前缀):迭代 12 之后 logx.Mask 会改动
+	// 它 —— 于是这条断言的分辨力不降反升:结构化键连"凭据形态的值"都
+	// 必须原样保留(一旦豁免失效,这里立刻变红)。
 	const plain = "sk-plain-value-999"
 	for _, key := range []string{
 		"node:my-token:status",

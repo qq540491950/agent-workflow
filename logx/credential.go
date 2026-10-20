@@ -1,0 +1,614 @@
+package logx
+
+import (
+	"regexp"
+	"strings"
+)
+
+// 本文件是"凭据形态"判定与脱敏的**唯一来源**(约定 #8 + 约定 #13 的同源精神)。
+//
+// ---- 为什么曾经有两套机制 ----
+//
+// 迭代 12 之前,仓库里有两套并行的掩码规则:
+//
+//   - logx.Mask / logx.MaskValue:按键名判定(key=value / key: value 形态);
+//   - agent.MaskCredentialValues:按**值形态**判定(已知前缀 / JWT / PEM /
+//     高熵长串),且只在 2 处被调用(制品出口 + agent 内部)。
+//
+// 两套语义不同、覆盖范围不同,于是同一个凭据在不同出口的结论不一致。
+// 第十一轮终审实测到的泄漏就是这条缝:
+//
+//	cli stderr: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc
+//
+//   - logx.Mask:盖不住(没有键名 → 键名规则不触发);
+//   - agent.MaskCredentialValues:也盖不住(它的规则要求"键名 + 值"形态,
+//     裸 Bearer 没有键名)。
+//
+// 结果:该 JWT 原样落进 execution_nodes.output 与 executions.state_json,
+// 并经所有 API 出口(SSE / 执行详情 / 导出)流到前端。
+//
+// ---- 现在的分工 ----
+//
+// **值的形态规则只有这一份**(本文件)。三个出口共用它:
+//
+//	logx.Mask(s)             日志 / 节点 output / state_json / 事件流
+//	logx.MaskValue(v)        结构化(map / slice / 结构体)
+//	logx.MaskCredentialValues(s)  只按值形态(制品 diff:必须保住代码可读性)
+//
+// agent.MaskCredentialValues 变成薄封装(转发到本文件),不再自带一份规则。
+//
+// ---- 两种严格度(刻意区分,不是两份规则) ----
+//
+//   - 键名语境(key=value):键名本身就是线索,高熵门槛**宽松**
+//     (≥16 字符 + 字母 + 数字 + 大小写混合 或 ≥32 字符);
+//   - 裸值语境(没有键名):没有线索,高熵门槛**严格**
+//     (≥24 字符 + 大小写混合 + 数字)—— 否则 40 位 git SHA、base64 测试
+//     夹具这类正常内容会被抹掉,毁掉 diff 的审计价值。
+//
+// 判定"是不是凭据形态"的函数是同一个(credentialShape),只有门槛参数不同。
+
+// ---- 占位符 ----
+
+// maskPlaceholder 在 mask.go 定义(= "***")。
+
+// ---------------------------------------------------------------------------
+// 预筛
+// ---------------------------------------------------------------------------
+
+// credentialShapeHints 是"文本里可能含凭据形态值"的廉价预筛子串(全小写)。
+//
+// 正则很贵,而事件总线的热路径上每个 payload 都要过一遍 Mask。先用
+// strings.Contains 跳过绝大多数正常文本:node 名、summary、英文句子、
+// 代码标识符都不含这些子串。
+var credentialShapeHints = []string{
+	"sk-", "sk_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
+	"glpat-", "xox", "xapp-", "npm_", "hf_", "ya29.", "eyj", "akia", "asia",
+	"aiza", "abia", "pk-", "rk-", "dop_v1_", "sq0atp-", "lin_api_", "hvs.",
+	"pypi-", "shpat_", "shpca_", "shppa_", "bearer", "basic", "-----begin",
+	"hooks.slack.com",
+}
+
+// mayContainCredentialShape 廉价预筛:文本里是否可能出现凭据形态的值。
+func mayContainCredentialShape(s string) bool {
+	lower := strings.ToLower(s)
+	for _, h := range credentialShapeHints {
+		if strings.Contains(lower, h) {
+			return true
+		}
+	}
+	// 高熵裸值:必须同时含大写、小写、数字 —— 三个条件缺一即不可能命中。
+	return hasUpper(s) && hasLower(s) && hasDigit(s)
+}
+
+// ---------------------------------------------------------------------------
+// 规则 1:PEM 私钥块
+// ---------------------------------------------------------------------------
+
+// pemBlockPattern 匹配 PEM 私钥块(证书不是私钥,不需要脱敏)。
+//
+// 形如:
+//
+//	-----BEGIN RSA PRIVATE KEY-----
+//	MIIEowIBAAKCAQEA...
+//	-----END RSA PRIVATE KEY-----
+//
+// 捕获组 1 = BEGIN 行,组 2 = END 行(可能不存在 —— 文本被截断)。
+// 块体(base64 行)被整体替换为 ***,BEGIN/END 行保留(读者仍看得出
+// "这里曾经是一把私钥")。
+var pemBlockPattern = regexp.MustCompile(
+	`(?m)(-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----)(?:\r?\n[A-Za-z0-9+/=]+)*(\r?\n-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----)?`)
+
+// ---------------------------------------------------------------------------
+// 规则 2:JWT
+// ---------------------------------------------------------------------------
+
+// jwtTokenPattern 匹配 JWT(HS/RS/ES 签名都是三段 base64url)。
+//
+// 头段以 "eyJ" 开头(base64url 编码的 '{"' ),这是 JWT 最稳定的形态特征。
+var jwtTokenPattern = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]{2,}){1,2}`)
+
+// jwtValuePattern 是锚定版(判定单个值是不是 JWT 时用)。
+var jwtValuePattern = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]{2,}){1,2}$`)
+
+// ---------------------------------------------------------------------------
+// 规则 3:webhook URL
+// ---------------------------------------------------------------------------
+
+// webhookPattern 匹配 Slack 之类的 incoming webhook URL(整条 URL 都是凭据)。
+var webhookPattern = regexp.MustCompile(`https?://hooks\.slack\.com/\S+`)
+
+// ---------------------------------------------------------------------------
+// 规则 4:键名 + 值形态(key=value / key: value)
+// ---------------------------------------------------------------------------
+
+// credentialAssignPattern 匹配"键名 + 分隔符 + 值"形态的片段。
+//
+// 键名取 ["']?[A-Za-z_][A-Za-z0-9_.\-]*["']?(允许驼峰、点号与 JSON 的
+// 引号),值取引号串或一段不含空白/逗号/分号/右括号的 token —— 与日志里
+// 常见的环境变量回显("ANTHROPIC_API_KEY=sk-...")、HTTP 头
+// ("Authorization: Bearer x")与 .env 行形态一致。
+var credentialAssignPattern = regexp.MustCompile(
+	`(?i)(["']?[A-Za-z_][A-Za-z0-9_.\-]*["']?)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;)\]}]+)`)
+
+// ---------------------------------------------------------------------------
+// 规则 5:认证方案(Bearer / Basic)
+// ---------------------------------------------------------------------------
+
+// authSchemePattern 匹配认证方案 + 凭据:"Bearer <token>" / "Basic <base64>"。
+//
+// 方案词要求词边界(避免把 "bearerish" 当方案),token 取一段不含空白的
+// 可见字符。
+var authSchemePattern = regexp.MustCompile(`(?i)\b(bearer|basic)([ \t]+)([A-Za-z0-9_\-~+/=]+)`)
+
+// authSchemeWords 是被认可的认证方案词。
+var authSchemeWords = map[string]bool{"bearer": true, "basic": true}
+
+// ---------------------------------------------------------------------------
+// 规则 6:裸值(已知前缀 / 严格高熵)
+// ---------------------------------------------------------------------------
+
+// credentialTokenPattern 切出文本里的"候选值"(不含点号:点号分隔的是
+// 句子成分或路径,不是凭据的一部分)。
+var credentialTokenPattern = regexp.MustCompile(`[A-Za-z0-9_\-~+/=]+`)
+
+// strictCredentialPrefixes 是"前缀本身就有辨识度"的已知凭据前缀。
+//
+// 命中即判定为凭据形态(要求前缀之后的尾巴够长且只含凭据字符)。
+var strictCredentialPrefixes = []string{
+	"sk-", "sk-ant-",
+	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-",
+	"xoxb-", "xoxp-", "xoxa-", "xoxr-", "xapp-",
+	"ya29.", "eyj",
+	"dop_v1_", "sq0atp-", "lin_api_",
+}
+
+// looseCredentialPrefixes 是"前缀可能撞上普通标识符"的凭据前缀。
+//
+// 这些前缀要求值里**含数字**且总长够长,否则不判定为凭据
+// (例:"npm_install_something" 不是凭据)。
+var looseCredentialPrefixes = []string{
+	"sk_", "pk-", "rk-", "npm_", "hf_", "hvs.", "pypi-",
+	"shpat_", "shpca_", "shppa_",
+	"akia", "asia", "aiza", "abia",
+}
+
+// minStrictTail 是严格前缀之后至少要跟的字符数。
+//
+// 取 12 是为了不误伤 "sk-config" / "sk-my-app-key" 这类普通标识符。
+const minStrictTail = 12
+
+// minLooseLen 是宽松前缀要求的值的最小总长。
+const minLooseLen = 16
+
+// awsAccessKeyPattern 匹配 AWS 访问密钥 ID(AKIA/ASIA/AIDA/AROA/ANPA/ABIA
+// + 12~16 位大写字母数字)。
+var awsAccessKeyPattern = regexp.MustCompile(`^(?:AKIA|ASIA|AIDA|AROA|ANPA|ABIA|ACCA)[0-9A-Z]{12,}$`)
+
+// ---------------------------------------------------------------------------
+// 对外入口
+// ---------------------------------------------------------------------------
+
+// MaskCredentialValues 只按"值形态"脱敏(键名与上下文原样保留)。
+//
+// 与 Mask 的区别只有一条:**不看键名**。
+//
+//   - Mask:键名敏感就整值替换 —— 适合日志/落库(宁可多遮);
+//
+//   - MaskCredentialValues:只有值本身呈凭据形态才替换 —— 适合制品
+//     (git diff):代码里的标识符必须原样保留,否则 diff 的审计价值被毁掉。
+//
+//     ANTHROPIC_API_KEY=sk-ant-xxx  → ANTHROPIC_API_KEY=***
+//     const token = getToken();       → 原样保留
+//
+// 幂等:所有规则都以 "***" 为终态,而 "***" 本身不呈任何凭据形态 ——
+// 二次脱敏逐字节不变(读出口与落库侧各过一次,结果必须一致)。
+func MaskCredentialValues(text string) string {
+	if text == "" {
+		return text
+	}
+	return maskCredentialShapes(text)
+}
+
+// maskCredentialShapes 按"值形态"脱敏的唯一实现。
+//
+// 规则按顺序执行(先整体形态,后局部形态):
+//
+//  1. PEM 私钥块 → 块体替换为 ***;
+//  2. JWT → 替换;
+//  3. webhook URL → 替换;
+//  4. 键名 + 值形态 → 只替换值(键名保留);
+//  5. 认证方案(Bearer/Basic)→ 只替换方案后的 token;
+//  6. 裸值(已知前缀 / 严格高熵)→ 替换。
+func maskCredentialShapes(text string) string {
+	if text == "" || !mayContainCredentialShape(text) {
+		return text
+	}
+	out := pemBlockPattern.ReplaceAllString(text, "${1}***${2}")
+	out = jwtTokenPattern.ReplaceAllString(out, maskPlaceholder)
+	out = webhookPattern.ReplaceAllString(out, maskPlaceholder)
+	out = maskAssignments(out)
+	out = maskAuthSchemes(out)
+	out = maskBareValues(out)
+	return out
+}
+
+// maskAssignments 处理"键名 + 值"形态:键名敏感**且**值呈凭据形态时,
+// 只替换值(键名与分隔符保留)。
+//
+// 这是"第十轮取舍"的核心:键名敏感但值是普通代码时
+// (const token = getToken();)必须原样保留 —— 否则 git diff 里
+// "改了哪一行"这个审计证据被毁掉。
+func maskAssignments(text string) string {
+	matches := credentialAssignPattern.FindAllStringSubmatchIndex(text, -1)
+	if matches == nil {
+		return text
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range matches {
+		keyStart, keyEnd := m[2], m[3]
+		valStart, valEnd := m[6], m[7]
+		key := strings.Trim(strings.TrimSpace(text[keyStart:keyEnd]), `"'`)
+		if keySensitivity(key) == sensNone {
+			continue
+		}
+		raw := text[valStart:valEnd]
+		body, quote := splitQuotes(raw)
+
+		// 认证方案形态:值是 "Bearer"/"Basic",真正的凭据在紧随其后的 token。
+		if scheme, ok := authSchemeWord(body); ok {
+			j := valEnd
+			for j < len(text) && (text[j] == ' ' || text[j] == '\t') {
+				j++
+			}
+			k := j
+			for k < len(text) && !isValueTerminator(text[k]) {
+				k++
+			}
+			if k > j && schemeTokenIsCredential(scheme, key, text[j:k]) {
+				b.WriteString(text[last:valStart])
+				b.WriteString(raw + " " + maskPlaceholder)
+				last = k
+			}
+			continue
+		}
+
+		if !credentialShape(body, true) {
+			continue
+		}
+		b.WriteString(text[last:valStart])
+		if quote != 0 {
+			b.WriteString(string(quote) + maskPlaceholder + string(quote))
+		} else {
+			b.WriteString(maskPlaceholder)
+		}
+		last = valEnd
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+// maskAuthSchemes 处理**没有键名**的认证方案形态:"Bearer <token>"。
+//
+// 这是第十一轮终审实测到的泄漏形态(裸 Bearer <JWT> 落库并经所有 API
+// 出口外泄)。
+//
+// 方案词本身保留(读者要看得出这是哪种认证),只替换后面的 token。
+func maskAuthSchemes(text string) string {
+	return authSchemePattern.ReplaceAllStringFunc(text, func(m string) string {
+		g := authSchemePattern.FindStringSubmatch(m)
+		if g == nil {
+			return m
+		}
+		scheme := strings.ToLower(g[1])
+		if !schemeTokenIsCredential(scheme, "", g[3]) {
+			return m
+		}
+		return g[1] + g[2] + maskPlaceholder
+	})
+}
+
+// maskBareValues 处理**没有任何键名线索**的裸值形态。
+//
+// 门槛比键名语境严格得多(见文件头说明):裸值没有线索,宁可漏一个
+// 短凭据,也不抹掉 git SHA / base64 夹具这类正常内容。
+//
+// 两条上下文护栏(实测踩过的坑):
+//
+//   - **路径段**:裸值夹在 "/" 之间时,它是路径的一段而不是凭据
+//     (实测:Go 测试临时目录名 "TestScriptNodeHonors...1637892132"
+//     被当成凭据抹掉,脚本节点的输出因此丢了工作目录);
+//   - **驼峰标识符**:大写后紧跟小写的起伏连续出现 ≥4 次时,它是类名 /
+//     测试名而不是随机凭据。
+//
+// 已知前缀 / JWT / AWS 密钥这些"硬性"形态不受这两条护栏约束 ——
+// 它们在路径里也仍然是凭据。
+func maskBareValues(text string) string {
+	matches := credentialTokenPattern.FindAllStringIndex(text, -1)
+	if matches == nil {
+		return text
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range matches {
+		tok := text[m[0]:m[1]]
+		mask := false
+		switch {
+		case credentialShapeHard(tok):
+			mask = true
+		case highEntropy(tok, false):
+			mask = !isPathSegment(text, m[0], m[1]) && !isCamelIdentifier(tok)
+		}
+		if !mask {
+			continue
+		}
+		b.WriteString(text[last:m[0]])
+		b.WriteString(maskPlaceholder)
+		last = m[1]
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// 形态判定
+// ---------------------------------------------------------------------------
+
+// credentialShape 判定一个值是否呈"凭据形态"。
+//
+// loose=true 用宽松的高熵门槛(有键名线索时),loose=false 用严格门槛
+// (裸值时)。其余判据与门槛无关。
+func credentialShape(v string, loose bool) bool {
+	if credentialShapeHard(v) {
+		return true
+	}
+	if looksLikePath(v) {
+		return false // 路径不是凭据
+	}
+	return highEntropy(v, loose)
+}
+
+// credentialShapeHard 判定一个值是否呈"硬性"凭据形态(与上下文无关):
+// PEM 块 / AWS 密钥 / JWT / 已知前缀。
+//
+// 这类形态在路径里、代码里也仍然是凭据,不受路径/驼峰护栏约束。
+func credentialShapeHard(v string) bool {
+	if v == "" {
+		return false
+	}
+	if strings.HasPrefix(v, "-----BEGIN") {
+		return true // PEM 私钥/证书块
+	}
+	if awsAccessKeyPattern.MatchString(v) {
+		return true
+	}
+	if jwtValuePattern.MatchString(v) {
+		return true
+	}
+	return hasKnownCredentialPrefix(v)
+}
+
+// looksLikePath 判定一个值是否更像路径(而不是凭据)。
+//
+// 含 "/" 或 "\" 的值通常是路径:路径里也可能有高熵串(目录名、文件名),
+// 但路径本身不是凭据。
+func looksLikePath(v string) bool {
+	return strings.Contains(v, "/") || strings.Contains(v, `\`)
+}
+
+// isPathSegment 判定一个裸值是否处在路径语境(紧邻 "/")。
+func isPathSegment(text string, start, end int) bool {
+	if start > 0 && text[start-1] == '/' {
+		return true
+	}
+	if end < len(text) && text[end] == '/' {
+		return true
+	}
+	return false
+}
+
+// isCamelIdentifier 判定一个高熵长串更像"驼峰标识符"(类名 / 测试名)
+// 而不是随机凭据。
+//
+// 驼峰标识符的特征:大写字母后紧跟小写字母连续出现(每个词的首字母)。
+// 随机凭据的字母与数字交错,这种起伏很少出现。
+func isCamelIdentifier(v string) bool {
+	humps := 0
+	for i := 1; i < len(v); i++ {
+		if v[i-1] >= 'A' && v[i-1] <= 'Z' && v[i] >= 'a' && v[i] <= 'z' {
+			humps++
+			if humps >= 4 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasKnownCredentialPrefix 判定值是否带已知的凭据前缀。
+func hasKnownCredentialPrefix(v string) bool {
+	lower := strings.ToLower(v)
+	for _, p := range strictCredentialPrefixes {
+		if !strings.HasPrefix(lower, p) {
+			continue
+		}
+		tail := v[len(p):]
+		if len(tail) >= minStrictTail && credentialTailChars(tail) {
+			return true
+		}
+	}
+	for _, p := range looseCredentialPrefixes {
+		if !strings.HasPrefix(lower, p) {
+			continue
+		}
+		if len(v) >= minLooseLen && hasDigit(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialTailChars 判定前缀之后的尾巴是否只由凭据字符组成
+// (字母/数字/下划线/连字符)。
+//
+// 点号与斜杠被排除:"sk-config.yaml" / "sk-my/path" 是文件名或路径,
+// 不是凭据。
+func credentialTailChars(tail string) bool {
+	for i := 0; i < len(tail); i++ {
+		c := tail[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// highEntropy 判定一个值是不是"高熵长串"。
+//
+// 判据:够长 + 同时含字母与数字 + 大小写混合(或超长的纯字母数字)。
+//
+// loose=true(键名语境):≥16 字符,且(大小写混合 或 ≥32 字符)。
+// loose=false(裸值语境):≥24 字符 + 大小写混合 + 含数字 ——
+// 更严的门槛是为了不误伤 git SHA 与 base64 夹具。
+//
+// 刻意**不**判定的形态(它们在代码/配置里极常见,误伤会毁掉 diff):
+//
+//	token = getToken()        ← 函数调用
+//	const apiKey = cfg.apiKey ← 成员引用
+//	password = "hunter2"      ← 短字符串(长度不足高熵门槛)
+func highEntropy(v string, loose bool) bool {
+	if len(v) < 16 || !hasLetter(v) || !hasDigit(v) {
+		return false
+	}
+	if loose {
+		return (hasUpper(v) && hasLower(v)) || len(v) >= 32
+	}
+	return len(v) >= 24 && hasUpper(v) && hasLower(v)
+}
+
+// ---------------------------------------------------------------------------
+// 认证方案
+// ---------------------------------------------------------------------------
+
+// authSchemeWord 判断一个值是不是认证方案单词(Bearer/Basic)。
+func authSchemeWord(raw string) (string, bool) {
+	w := strings.ToLower(strings.TrimSpace(raw))
+	if authSchemeWords[w] {
+		return w, true
+	}
+	return "", false
+}
+
+// schemeTokenIsCredential 判定认证方案后面的 token 是不是凭据。
+//
+// key 非空表示这个形态来自"键名 + 值"语境(如 Authorization: Bearer x);
+// key 为空表示裸形态("... Bearer x")。
+//
+// 判定:
+//   - Authorization 头形态:一律是凭据(方案词后面跟的就是凭据,不看形状);
+//   - Bearer:token 本身呈凭据形态;
+//   - Basic:token 是 base64 形态的 user:pass。
+func schemeTokenIsCredential(scheme, key, tok string) bool {
+	if key != "" && isAuthorizationKey(key) {
+		return true
+	}
+	switch scheme {
+	case "bearer":
+		return credentialShape(tok, true)
+	case "basic":
+		return basicAuthToken(tok)
+	}
+	return false
+}
+
+// basicAuthToken 判定一个 token 是不是 Basic 认证的 base64 凭据。
+//
+// 刻意要求较强的信号(base64 里含数字 / 有 '=' 填充 / 大小写混合且够长):
+// "Basic authentication" 这类英文短语不能被当成凭据。
+func basicAuthToken(tok string) bool {
+	if len(tok) < 8 {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		c := tok[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '+' || c == '/' || c == '=' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	if strings.HasSuffix(tok, "=") {
+		return true // 有 base64 填充
+	}
+	if hasDigit(tok) {
+		return len(tok) >= 12
+	}
+	return hasUpper(tok) && hasLower(tok) && len(tok) >= 16
+}
+
+// isAuthorizationKey 判定键名是不是 Authorization 头(这类键后面的值
+// 一律是凭据,不看值的形状)。
+func isAuthorizationKey(key string) bool {
+	return strings.Contains(strings.ToLower(key), "authorization")
+}
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+
+// splitQuotes 拆出值的引号与引号内的内容。
+func splitQuotes(raw string) (body string, quote byte) {
+	if len(raw) >= 2 && (raw[0] == '"' || raw[0] == '\'') && raw[len(raw)-1] == raw[0] {
+		return raw[1 : len(raw)-1], raw[0]
+	}
+	return raw, 0
+}
+
+// isValueTerminator 判断字符是否是值的终止符。
+func isValueTerminator(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', ',', ';', ')', ']', '}', '"', '\'':
+		return true
+	}
+	return false
+}
+
+func hasLetter(s string) bool {
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDigit(s string) bool {
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasUpper(s string) bool {
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLower(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			return true
+		}
+	}
+	return false
+}

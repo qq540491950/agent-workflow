@@ -116,3 +116,81 @@ func TestMaskCredentialValuesEmpty(t *testing.T) {
 		t.Errorf("普通文本应原样返回: %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 迭代 12:裸值形态(Bearer / JWT / 已知前缀 / PEM)此前谁都不管 ——
+// 第十一轮终审实测到 `Bearer <JWT>` 原样落进 execution_nodes.output 与
+// executions.state_json,并经所有 API 出口外泄。
+// ---------------------------------------------------------------------------
+
+// bearerJWT 是终审实测泄漏的那个 JWT。
+const bearerJWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+	"eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ." +
+	"SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+
+// TestMaskCredentialValuesCoversBareShapes 裸值形态必须被脱敏。
+//
+// 这一组在迭代 12 之前**全部漏掉**:agent.MaskCredentialValues 的规则要求
+// "键名 + 值"形态,裸值没有键名 —— 于是谁都不管。
+func TestMaskCredentialValuesCoversBareShapes(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		secret string
+	}{
+		{"裸 Bearer + JWT", "cli stderr: Bearer " + bearerJWT, bearerJWT},
+		{"裸 JWT", "value: " + bearerJWT, bearerJWT},
+		{"裸 sk-ant", "value: sk-ant-supersecretvalue", "sk-ant-supersecretvalue"},
+		{"裸 ghp_", "value: ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+			"ghp_16C7e42F292c6912E7710c838347Ae178B4a"},
+		{"裸 AKIA", "id: AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"},
+		{"Authorization 头", "Authorization: Bearer " + bearerJWT, bearerJWT},
+		{"Basic 头", "Authorization: Basic YWRtaW46cGFzc3dvcmQxMjM=",
+			"YWRtaW46cGFzc3dvcmQxMjM="},
+		{"PEM 私钥块", "-----BEGIN RSA PRIVATE KEY-----\n" +
+			"MIIEowIBAAKCAQEA7Zx9mQ2pL7vR4tY6uZ8c1d0eF3gH5jK\n" +
+			"-----END RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA7Zx9mQ2pL7vR4tY6uZ8c1d0eF3gH5jK"},
+	}
+	for _, c := range cases {
+		got := agent.MaskCredentialValues(c.in)
+		if strings.Contains(got, c.secret) {
+			t.Errorf("[%s] 凭据明文未脱敏: %q → %q", c.name, c.in, got)
+		}
+		if !strings.Contains(got, agent.MaskedValue) {
+			t.Errorf("[%s] 期望出现脱敏占位符: %q → %q", c.name, c.in, got)
+		}
+	}
+}
+
+// TestMaskCredentialValuesKeepsEnglishSentences 英文句子不得被误伤。
+//
+// 方案词 bearer / basic 在普通句子里是英文单词,不是凭据。
+func TestMaskCredentialValuesKeepsEnglishSentences(t *testing.T) {
+	cases := []string{
+		"The bearer of this document is unknown.",
+		"Basic authentication is supported by the API.",
+		"Please send the Bearer.",
+		"This is a task-management-system for teams.",
+	}
+	for _, c := range cases {
+		if got := agent.MaskCredentialValues(c); got != c {
+			t.Errorf("英文句子被改动 %q → %q", c, got)
+		}
+	}
+}
+
+// TestMaskCredentialValuesIdempotentOnBareShapes 裸值形态的脱敏也必须幂等。
+func TestMaskCredentialValuesIdempotentOnBareShapes(t *testing.T) {
+	for _, in := range []string{
+		"cli stderr: Bearer " + bearerJWT,
+		"value: sk-ant-supersecretvalue",
+		"Authorization: Basic YWRtaW46cGFzc3dvcmQxMjM=",
+		"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
+	} {
+		once := agent.MaskCredentialValues(in)
+		twice := agent.MaskCredentialValues(once)
+		if once != twice {
+			t.Errorf("脱敏不幂等:\n输入: %q\n一次: %q\n两次: %q", in, once, twice)
+		}
+	}
+}
