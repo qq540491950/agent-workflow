@@ -6,23 +6,41 @@
 #
 # 用法: ./scripts/verify.sh   (任一步失败即非零退出)
 #
-# ---- 包列表为什么要过滤 ------------------------------------------------
-# `go list ./...` 会把两类**不属于本项目**的目录也列进来:
+# ---- 路径排除规则:三处判断的**单一事实来源** ---------------------------
+# 门禁有三处需要判断"哪些目录不参与检查",三处**必须**用同一套规则:
+#   ① 包列表(`go list ./...` 的结果)—— 决定 vet / build / race 测试 /
+#      "每个包必须有真实用例"四道防线的检查范围;
+#   ② gofmt 文件清单(git 跟踪 + 新增未忽略的 .go 文件);
+#   ③ 孤儿包候选目录(由 ② 推导)—— 决定跨平台交叉 vet 的范围。
 #
-#   1. build/          —— Wails 脚手架。build/ios 带 `//go:build ios`,
-#                         但 `go list` 仍会枚举它;在 macOS 上
-#                         `go build ./...` 直接失败:
-#                         "function main is undeclared in the main package"。
-#                         (`go test` 把它当 "no test files" 侥幸通过。)
-#   2. node_modules/   —— 根目录误装的 npm 产物里夹带了 Go 代码
-#                         (node_modules/flatted/golang/pkg/flatted),
-#                         `go test ./...` 会把它捎带进去。
+# 三处口径不一致 = 某个目录只在其中一处被剔掉 → 它从另外两处的视野里
+# 消失 → 没有任何一道防线看得见它。**第十八轮终验 #279 就是这么发生的**:
+# 根级 `build/` 同时被 ① 与 ② 剔掉 → 连带从 ③ 消失 → 放在那里的包对
+# 整条门禁**完全隐形**(实测:类型错误 + 零用例 + 伪造 PASS 输出的包,
+# 9 步门禁全绿,而 `go build ./build/evilpkg/` 明确报错)。
 #
-# 两者都没有测试、也不参与本项目构建,必须排除,否则:
-#   - 门禁第一步 `go build` 必然失败(与被测代码无关);
-#   - `go test` 的包列表里混进两个空包,掩盖"哪几个包真的跑了测试"。
-# 这不是把问题藏起来:Wails 脚手架的跨平台编译问题已登记在
-# docs/OPTIMIZATION.md 的"仍然开放"一节,见那里的说明。
+# 规则分三类,**每类都写清理由与边界**:
+#
+#   A. **Go 工具链约定**(不可见是**正确行为**,不是绕过):
+#      任意一级以 "_" 或 "." 开头的目录、任意一级叫 "testdata" 的目录。
+#      go 工具**整体忽略**它们(`go help packages`:"Directory and file
+#      names that begin with "." or "_" are ignored by the go tool, as are
+#      directories named "testdata")→ 它们不属于任何包,本来就不会被编译。
+#      这类目录里的代码"隐形"是**约定使然**,门禁不查它们是**对的**。
+#   B. **第三方产物**(不是本项目代码):任意一级叫 "node_modules" 的目录。
+#      根目录误装的 npm 依赖里夹带了 Go 代码
+#      (node_modules/flatted/golang/pkg/flatted),`go list ./...` 会捎带进去。
+#   C. **Wails 平台脚手架**(框架产物,**不能**当项目代码编译):
+#      模块根下 `build/<平台模板根>/**`,平台模板根 = ios android darwin
+#      windows linux(Wails v3 的 build/ 平台模板布局,见 build/Taskfile.yml)。
+#      必须排除的原因:`build/ios` 是 `package main`,只有 `//go:build ios`
+#      下才有 func main(其余平台只剩 app_options_default.go)→ 在 macOS 上
+#      编译必失败("function main is undeclared in the main package");
+#      `build/android` 需要 NDK。**已登记项 #120**
+#      (docs/OPTIMIZATION.md 的"仍然开放"一节)。
+#      边界:**只**排除这 5 个平台模板根,**不再排除整棵 `build/` 树** ——
+#      整棵排除正是 #279 的根因;`build/` 下其它位置、以及任何**嵌套**的
+#      `<dir>/build/` 都是项目代码,必须进入检查范围。
 # ------------------------------------------------------------------------
 set -e
 set -o pipefail
@@ -107,14 +125,56 @@ if [ ! -d frontend/dist ] || [ -z "$(ls -A frontend/dist 2>/dev/null)" ]; then
 	echo "提示: frontend/dist 缺失或为空,已放占位文件让 //go:embed 能解析(前端构建后会被真实产物替换)"
 fi
 
-# ---- 本项目的包列表(排除 build/ 与 node_modules/)-----------------------
-if ! PKGS=$(go list ./... | grep -vE '(^|/)(build|node_modules)/'); then
+# ---- 路径排除规则(单一事实来源)--------------------------------------
+# 正则,作用于**模块内相对路径**:包列表先用相对路径判定、再还原成导入路径;
+# gofmt 文件清单本来就是相对路径;孤儿包候选由文件清单推导 → 同一口径。
+#
+#   A. Go 工具链约定("_"/"." 前缀、testdata)不在这里 —— 那些目录
+#      **不属于任何包**,`go list` 本来就不会列出来;孤儿包候选按同一约定
+#      另行过滤(见 orphan_candidates)。
+#   B. node_modules —— 第三方产物,不是本项目代码。
+#   C. Wails 平台脚手架 —— 理由与边界见文件头注释。
+PATH_EXCLUDE_RE='(^|/)node_modules/|^build/(ios|android|darwin|windows|linux)(/|$)'
+
+# pkg_rel_paths <模块目录> → 该模块下**所有**包的模块内相对路径
+# ("." 表示模块根)。失败(不是模块 / go list 失败)返回非 0。
+pkg_rel_paths() {
+	pr_mod="$1"
+	pr_mp=$(cd "$pr_mod" && go list -m 2>/dev/null) || return 1
+	pr_list=$(cd "$pr_mod" && go list ./...) || return 1
+	printf '%s\n' "$pr_list" | awk -v mp="$pr_mp" '
+		{
+			if ($0 == "") next
+			if (mp != "" && $0 == mp) { print "."; next }
+			if (mp != "" && index($0, mp "/") == 1) { print substr($0, length(mp) + 2); next }
+			print $0
+		}'
+}
+
+# gate_pkg_rels <模块目录> → 门禁**纳入检查**的包(模块内相对路径)
+gate_pkg_rels() {
+	gp_mod="$1"
+	gp_rel=$(pkg_rel_paths "$gp_mod") || return 1
+	printf '%s\n' "$gp_rel" | grep -vE "$PATH_EXCLUDE_RE" || true
+}
+
+# gate_pkgs <模块目录> → 门禁纳入检查的包(**导入路径**,供 go 命令使用)
+gate_pkgs() {
+	gp_mod="$1"
+	gp_mp=$(cd "$gp_mod" && go list -m 2>/dev/null) || return 1
+	gp_rel=$(gate_pkg_rels "$gp_mod") || return 1
+	printf '%s\n' "$gp_rel" | awk -v mp="$gp_mp" '
+		{ if ($0 == ".") print mp; else print mp "/" $0 }'
+}
+
+# ---- 本项目的包列表(按上面的排除规则)--------------------------------
+if ! PKGS=$(gate_pkgs "$ROOT"); then
 	echo "❌ VERIFY FAIL: go list ./... 失败(代码树当前不可编译?),先修代码再跑门禁" >&2
 	exit 1
 fi
 PKG_COUNT=$(printf '%s\n' "$PKGS" | grep -c . || true)
 [ "$PKG_COUNT" -gt 0 ] || fail "包列表为空(go list ./... 过滤后一个包都不剩?)"
-echo "包列表: $PKG_COUNT 个(已排除 build/ 与 node_modules/)"
+echo "包列表: $PKG_COUNT 个(已排除 node_modules/ 与 Wails 平台脚手架 build/<平台模板根>/)"
 
 # ---- 每个包都必须有真实用例(自动推导,不手写清单)--------------------
 # 此前这里是一份手写的 KEY_PKGS 清单。它防不住自己要防的场景:
@@ -158,7 +218,9 @@ step "1/9" "gofmt"
 # 前提说明(避免误解):
 #   - 被 .gitignore 忽略的目录(bin/、frontend/node_modules/)不在检查
 #     范围 —— 里面不是源码,这是有意的。
-#   - build/ 是 Wails 脚手架,按 AGENTS.md 的约定排除。
+#   - 路径排除用**同一条规则**(PATH_EXCLUDE_RE):只排除 node_modules/ 与
+#     Wails 平台脚手架 build/<平台模板根>/;**build/ 下的其它位置不再被
+#     整棵排除**(第十八轮终验 #279 的根因)。
 #   - 因此"文件已 git add"不再是前提:未跟踪的新增 .go 文件同样会被检查。
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 	fail "不在 git 工作树里,无法枚举 Go 文件(gofmt 清单依赖 git ls-files)"
@@ -167,7 +229,7 @@ GOFMT_FILES=$(
 	{
 		git ls-files '*.go'
 		git ls-files --others --exclude-standard '*.go'
-	} | grep -vE '^(build|node_modules)/' | while IFS= read -r f; do
+	} | grep -vE "$PATH_EXCLUDE_RE" | while IFS= read -r f; do
 		# git ls-files 列的是**索引**里的条目:工作区已删、尚未提交删除的
 		# 文件仍会出现在清单里 —— 按存在性过滤掉,免得 gofmt 报
 		# "no such file"(其余文件仍会被检查,但报错被吞掉很难看)。
@@ -338,6 +400,25 @@ echo "目标平台全集: $ALL_TARGET_COUNT 个(go tool dist list,含 GOOS/GOARC
 # 返回 0 = 全部候选包都被覆盖(或所有平台都没有它的文件,正常跳过);
 # 返回 1 = 有候选包在它**声称支持**的平台上编译不过(真实错误)。
 #
+# ---- "所有目标平台都没有它的文件"= 什么?边界登记 ----------------------
+# 候选包在 `go tool dist list` 的**全部**目标上都"没有可编译文件"时,
+# 门禁**打印一行"跳过"**(不是静默忽略)。这有两种成因,**都不是绕过**:
+#
+#   ① **自定义 build tag**(例:`//go:build awo_custom_tag`):
+#      Go 工具链的约定 —— 约束不满足的文件**本来就不参与构建**
+#      (`go build` 对它直接报 "build constraints exclude all Go files")。
+#      门禁枚举的是**目标平台**,不是任意自定义 tag → 这类包的**类型错误
+#      不会被本门禁抓到**。但:① 它的**语法错误仍会被第 1 步抓到**
+#      (gofmt 不看 build tag);② 它在门禁日志里是**可见的**("跳过: …")。
+#      若将来要收紧,可行的做法是"对被跳过的候选,用该文件自己的
+#      `//go:build` 表达式再 vet 一次" —— 需要解析布尔表达式,容易误红,
+#      属于独立的工程决策,不在本轮范围内。
+#   ② **嵌套 go.mod**(子模块):子模块**不属于**父模块
+#      (`go list ./...` 不含它 —— Go 工具链的约定)。
+#      实测(隔离副本):仓库里出现嵌套 go.mod 时,门禁会**红**在孤儿包检查
+#      (把"父模块不包含该包"当成解析失败)—— fail closed,不是绕过,
+#      但错误信息有误导性。**本仓库不得引入嵌套 go.mod**。
+#
 # 性能(目标平台从 3 个涨到 47 个,实测耗时见报告):
 #   - **常态零开销**:当前平台全部可见(没有孤儿包)→ 直接 return,
 #     连一次额外探测都不做;
@@ -470,15 +551,26 @@ orphan_check() {
 #   - 任意一级叫 "testdata" 的目录(go 工具约定:测试夹具,允许故意写坏)。
 # 否则这些目录会被当成"孤儿包"而误报。
 #
+# **口径说明**:这里**不再**单独排除 build/ —— 排除规则已经统一到
+# PATH_EXCLUDE_RE(第 1 步的 gofmt 文件清单用的是**同一条**规则)→ build/
+# 下的**项目代码**会同时出现在"gofmt 清单"与"候选目录"里,被跨平台交叉
+# vet 覆盖;Wails 平台脚手架 build/<平台模板根>/ 已在 PATH_EXCLUDE_RE 里
+# 剔掉,不会在这里复活。
+#
 # 注意:这里**不能**在 $( ) 里写 case —— macOS 自带的 bash 3.2 解析不了
 # (实测:bash: syntax error near unexpected token `;;')。用 awk + grep 代替。
-ORPHAN_CANDIDATES=$(
-	printf '%s\n' "$GOFMT_FILES" |
+#
+# 抽成函数是为了让**门禁自检**与真正的门禁走**同一条代码路径** ——
+# 自检若自己另写一套目录推导,将来有人把排除规则改回"整棵 build/",
+# 自检照样绿,盲区就又回来了。
+orphan_candidates() {
+	printf '%s\n' "$1" |
 		awk -F/ 'NF==1 {print "."; next} {d=$1; for (i=2;i<NF;i++) d=d"/"$i; print d}' |
 		sort -u |
 		grep -vE '(^|/)[_.]' |
 		grep -vE '(^|/)testdata(/|$)' || true
-)
+}
+ORPHAN_CANDIDATES=$(orphan_candidates "$GOFMT_FILES")
 ORPHAN_COUNT=$(printf '%s\n' "$ORPHAN_CANDIDATES" | grep -c . || true)
 echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推导)"
 
@@ -499,7 +591,7 @@ echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推�
 # 计数变量的赋值发生在**函数体内**(不是子 shell),因此计数能真正累加。
 selfcheck_count=0
 # 期望的自检场景条数。**新增或删除任何一条自检场景,都必须同步改这里** ——
-# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 16 条:
+# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 23 条:
 #   1-3  交叉检查:windows 测试文件对照 / 测试文件类型错 / 源文件类型错
 #   4-9  孤儿包检查:windows·freebsd·js 各一条绿 + 一条红
 #   10   孤儿包检查:目录混包(两个 package 名)必须被抓
@@ -507,7 +599,12 @@ selfcheck_count=0
 #   12   目标平台枚举断言的反向对照:三平台手写清单必须通不过
 #   13-17 第 6 步"真实用例"判定:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓
 #          / 伪造输出包被抓 / 反向对照(对正常包断言"必须在报告里"必须失败)
-SELFCHECK_EXPECTED=17
+#   18-21 路径排除规则(第十八轮终验 #279):build/ 下的项目代码包必须在门禁
+#          包集合里 / 类型正确时必须能过编译 / 类型错误时必须被抓 /
+#          Wails 平台脚手架(build/ios)必须继续被排除
+#   22-23 孤儿包候选:build/ 下的包必须在候选里 / testdata/ 下的包必须不在
+#          候选里(Go 工具链约定 —— 夹具目录不可见是正确行为)
+SELFCHECK_EXPECTED=23
 
 # selfcheck_ok <标签> <命令...> —— 断言命令必须**成功**(绿方向)。
 selfcheck_ok() {
@@ -666,6 +763,80 @@ linux/amd64
 darwin/amd64"
 
 echo "OK(自检:类型正确的孤儿包通过 / 含类型错误的孤儿包被抓 / 混包被抓 / 平台枚举是全集)"
+
+# ---- 门禁自检:build/ 下的项目代码不得对门禁隐形(第十八轮终验 #279)------
+# 绕过场景:在**根级** build/ 下放一个包(类型错误 + 零用例 + 伪造
+# "=== RUN" / "--- PASS" 输出)→ 旧门禁的包列表与 gofmt 清单**同时**把它
+# 剔掉 → 连带从孤儿包候选里消失 → vet / build / race 测试 / "每个包必须
+# 有真实用例"**四道防线全部不查它** → 9 步门禁全绿。
+#
+# 本自检用**同一个**路径排除规则与**同一个**包集合推导函数
+# (gate_pkg_rels / gate_pkgs / orphan_candidates),在隔离模块里验证五件事:
+#   1. build/ 下的**类型正确**的包**必须**在门禁包集合里(绿方向:
+#      没有这一条,下面第 3 条就是恒真断言);
+#   2. build/ 下的**类型正确**的包必须能通过门禁**自己**的编译检查
+#      (绿方向:证明新规则没有把正常代码也挡在门外);
+#   3. build/ 下的**类型错误**的包 → 用门禁自己的包集合跑 vet **必须失败**
+#      (红方向:证明漏洞被堵住了);
+#   4. Wails 平台脚手架(build/ios)**必须不在**门禁包集合里(红方向:
+#      证明新规则没有把脚手架放进来 —— 放进来门禁会因 #120 必红);
+#   5. 孤儿包候选:build/ 下的包**必须**在候选里(绿方向:平台专属的
+#      build/ 包靠这条交叉 vet 覆盖),而 testdata/ 下的包**必须不在**
+#      候选里(红方向:Go 工具链约定 —— 夹具目录允许故意写坏,不可见是
+#      **正确行为**,不是绕过)。
+#
+# 全部在隔离模块里造(/tmp),不碰工作区。
+
+# pkg_in_gate_set <模块目录> <相对包路径> → 该包**在**门禁包集合里则返回 0
+pkg_in_gate_set() {
+	pi_dir="$1"
+	pi_rel="$2"
+	gate_pkg_rels "$pi_dir" | grep -qxF "$pi_rel"
+}
+
+# selftest_vet_gate_pkgs <模块目录> → 用**门禁自己的**包集合跑 go vet
+# (返回 vet 的退出码;失败=非 0)
+selftest_vet_gate_pkgs() {
+	sv_dir="$1"
+	sv_pkgs=$(gate_pkgs "$sv_dir") || return 1
+	( cd "$sv_dir" && go vet $sv_pkgs ) >/dev/null 2>&1
+}
+
+# orphan_candidate_in_set <文件清单> <候选目录> → 该目录**在**候选里则返回 0
+orphan_candidate_in_set() {
+	orphan_candidates "$1" | grep -qxF "$2"
+}
+
+# 1) 类型正确的 build/ 包 → 必须在门禁包集合里(绿方向)
+mkdir -p "$WIN_CHECK_DIR/build/evilpkg"
+printf 'package evilpkg\n\nvar Good string = "ok"\n' >"$WIN_CHECK_DIR/build/evilpkg/evilpkg.go"
+selfcheck_ok "路径排除规则:build/ 下的项目代码包必须进入门禁的包集合(否则它对四道防线全都隐形 —— 第十八轮终验 #279 的绕过本身)" \
+	pkg_in_gate_set "$WIN_CHECK_DIR" "build/evilpkg"
+
+# 2) 类型正确的 build/ 包 → 必须能通过门禁自己的编译检查(绿方向)
+selfcheck_ok "路径排除规则:build/ 下类型正确的包必须能通过门禁自己的编译检查(否则新规则把正常代码也挡在门外)" \
+	selftest_vet_gate_pkgs "$WIN_CHECK_DIR"
+
+# 3) 类型错误的 build/ 包 → 门禁自己的 vet 必须失败(红方向)
+printf 'package evilpkg\n\nvar Bad string = 42\n' >"$WIN_CHECK_DIR/build/evilpkg/evilpkg.go"
+selfcheck_red "路径排除规则:build/ 下类型错误的包必须被门禁抓到(用门禁自己的包集合跑 vet 必须失败)" \
+	selftest_vet_gate_pkgs "$WIN_CHECK_DIR"
+rm -rf "$WIN_CHECK_DIR/build"
+
+# 4) Wails 平台脚手架 → 必须继续被排除(红方向;放进来门禁会因 #120 必红)
+mkdir -p "$WIN_CHECK_DIR/build/ios"
+printf 'package main\n\nfunc main() {}\n' >"$WIN_CHECK_DIR/build/ios/main_ios.go"
+selfcheck_red "路径排除规则:Wails 平台脚手架(build/ios)必须继续被排除(否则门禁会因脚手架在宿主平台编译失败而必红 —— #120)" \
+	pkg_in_gate_set "$WIN_CHECK_DIR" "build/ios"
+rm -rf "$WIN_CHECK_DIR/build"
+
+# 5) 孤儿包候选:build/ 下的包必须在候选里;testdata/ 下的包必须不在
+selfcheck_ok "孤儿包候选:build/ 下的包必须在候选目录里(平台专属的 build/ 包靠这条交叉 vet 覆盖)" \
+	orphan_candidate_in_set "build/evilpkg/only.go" "build/evilpkg"
+selfcheck_red "孤儿包候选:testdata/ 下的包必须不在候选目录里(Go 工具链约定:夹具目录允许故意写坏,不可见是正确行为不是绕过)" \
+	orphan_candidate_in_set "pkg/testdata/fixture.go" "pkg/testdata"
+
+echo "   自检通过:build/ 下的项目代码进入门禁包集合 / 类型错误被抓 / Wails 脚手架仍被排除 / testdata 仍不可见"
 
 # ---- 真正的孤儿包检查(工作区) -------------------------------------------
 if ! orphan_check "$ROOT" "$PKGS" $ORPHAN_CANDIDATES; then
