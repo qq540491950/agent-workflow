@@ -28,6 +28,7 @@ import (
 	"go/printer"
 	"go/token"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -451,13 +452,23 @@ const minScannedStateKeys = 15
 // 形态数有下限断言。
 func TestStateWritesAreClassified(t *testing.T) {
 	g := newStateGuard()
-	// 扫描范围:编排层(compiler)+ 运行期(runtime)+ 上下文层(contextx)。
+	// 扫描范围:编排层(compiler)+ 运行期(runtime)+ 上下文层(contextx)
+	// + 模型层(model)。
 	//
 	// contextx 必须在内:跨节点上下文链的键(plan/review/issues/
 	// test_result/last_output)是在 contextx.SaveNodeOutput 里写进会话
 	// 状态的(第 19 轮)。不扫它 = 这批写入点对守卫不可见 = 守卫只覆盖
 	// 一部分写入点,却宣称"每个写入点都已分类"(恒真的假保护)。
-	if err := g.scan([]string{filepath.Join("..", "compiler"), ".", filepath.Join("..", "..", "contextx")}); err != nil {
+	//
+	// model 必须在内:状态键常量**别名化**的指向目标在 model 里
+	// (const StateKeyPlan = model.ContextSlotPlan)。不扫它 = 别名解析不出
+	// 来 → 写入点"无法解析"被跳过 → 守卫对 contextx 层失去牙齿
+	// (第二轮 P1-2 / 已登记 #305)。model 自身没有状态写入点,扫它只是
+	// 为了拿到常量表。
+	if err := g.scan([]string{
+		filepath.Join("..", "compiler"), ".",
+		filepath.Join("..", "..", "contextx"), filepath.Join("..", "model"),
+	}); err != nil {
 		t.Fatalf("扫描状态写入点: %v", err)
 	}
 
@@ -505,6 +516,93 @@ func TestStateWritesAreClassified(t *testing.T) {
 			continue
 		}
 		t.Errorf("登记的状态键 %q 在源码里已找不到写入点(登记与实现漂移:该键是否已改名/删除/搬出了扫描范围?)", k)
+	}
+}
+
+// ---- 跨包常量别名的解析(第二轮 P1-2 / 已登记 #305)--------------------
+//
+// 背景:第二十二轮把 contextx 的状态键常量改成了 **model 别名**
+// (`const StateKeyPlan = model.ContextSlotPlan`),但本扫描器的常量表
+// 只收字符串字面量 → 别名被跳过 → 6 个写入点"无法解析"被 continue
+// 跳过 → 守卫对 contextx 层**失去牙齿**,同时门禁直接变红。
+//
+// 修法:resolveAliases 跟随**一层跨包别名**取到目标常量的字面量值。
+// 下面两条用例分别锁住"能解析"与"漂移仍能发现"。
+
+// writeAliasFixture 造一个两包的夹具:alpha 定义常量,beta 用**别名**
+// 引用它并写进状态 map。返回夹具根目录。
+//
+// alphaConst 是 alpha 包里那个常量的字面量值(可改 —— 用来模拟漂移)。
+func writeAliasFixture(t *testing.T, alphaConst string) string {
+	t.Helper()
+	root := t.TempDir()
+	alphaDir := filepath.Join(root, "alpha")
+	betaDir := filepath.Join(root, "beta")
+	for _, d := range []string{alphaDir, betaDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("建夹具目录: %v", err)
+		}
+	}
+	alphaSrc := "package alpha\n\nconst KeyBeta = \"" + alphaConst + "\"\n"
+	if err := os.WriteFile(filepath.Join(alphaDir, "consts.go"), []byte(alphaSrc), 0o644); err != nil {
+		t.Fatalf("写 alpha 夹具: %v", err)
+	}
+	betaSrc := `package beta
+
+import "example.com/fixture/alpha"
+
+// 别名:值不是字面量,而是另一个包的常量。
+const KeyAlias = alpha.KeyBeta
+
+type exec struct{ StateData map[string]any }
+
+func (e *exec) write() {
+	e.StateData[KeyAlias] = 1
+}
+`
+	if err := os.WriteFile(filepath.Join(betaDir, "consumer.go"), []byte(betaSrc), 0o644); err != nil {
+		t.Fatalf("写 beta 夹具: %v", err)
+	}
+	return root
+}
+
+// TestStateGuardResolvesCrossPackageConstantAlias 跨包别名必须能被解析出
+// 键形态 —— 否则这个写入点会被当成"无法解析"跳过,守卫对它没有牙齿。
+func TestStateGuardResolvesCrossPackageConstantAlias(t *testing.T) {
+	root := writeAliasFixture(t, "beta-key")
+	g := newStateGuard()
+	if err := g.scan([]string{root}); err != nil {
+		t.Fatalf("扫描夹具: %v", err)
+	}
+	if len(g.writes) != 1 {
+		t.Fatalf("夹具里应扫到 1 个写入点,实际 %d 个(写入点识别退化了)", len(g.writes))
+	}
+	if g.writes[0].key != "beta-key" {
+		t.Errorf("跨包别名必须解析成目标常量的值,实际 key=%q expr=%q",
+			g.writes[0].key, g.writes[0].expr)
+	}
+}
+
+// TestStateGuardDetectsCrossPackageAliasDrift 目标包的常量改了,别名解析
+// 结果必须**跟着变** —— 否则守卫对别名形态就完全失明了(漂移查不出来)。
+func TestStateGuardDetectsCrossPackageAliasDrift(t *testing.T) {
+	root := writeAliasFixture(t, "drifted-key")
+	g := newStateGuard()
+	if err := g.scan([]string{root}); err != nil {
+		t.Fatalf("扫描夹具: %v", err)
+	}
+	if len(g.writes) != 1 {
+		t.Fatalf("夹具里应扫到 1 个写入点,实际 %d 个", len(g.writes))
+	}
+	// 守卫的判据是"扫到的键形态必须在 expectedStateKeyClass 里登记"。
+	// 这里断言的是**解析结果跟着目标变**:漂移后的键形态是 drifted-key,
+	// 而不是旧值(旧值说明别名被冻结了,漂移查不出来)。
+	if g.writes[0].key != "drifted-key" {
+		t.Errorf("别名解析必须跟随目标常量的当前值,实际 key=%q(冻结成旧值 = 漂移查不出来)",
+			g.writes[0].key)
+	}
+	if _, ok := expectedStateKeyClass[g.writes[0].key]; ok {
+		t.Errorf("漂移后的键 %q 不应已登记(登记表与实现漂移时守卫必须报出来)", g.writes[0].key)
 	}
 }
 
@@ -578,6 +676,12 @@ type stateGuard struct {
 	fset *token.FileSet
 	// pkgConsts 包名 → 包级字符串常量。
 	pkgConsts map[string]map[string]string
+	// pkgAliases 包名 → 该包里"指向别的包常量的别名"(别名名 → 目标)。
+	//
+	// 为什么要单独一张表:常量表只收**字面量**值,而跨包别名
+	// (const X = pkg.Y)的值是 selector 表达式,得等所有包的常量都收齐
+	// 之后才能解析(见 resolveAliases)。
+	pkgAliases map[string]map[string]pkgConstRef
 	// accessors 状态访问器的类型名(小写)。
 	accessors map[string]bool
 	// forwarders 转发键参数的函数:函数标识 → 键参数序号。
@@ -590,10 +694,19 @@ type stateGuard struct {
 	fileImports map[string]map[string]string
 }
 
+// pkgConstRef 指向另一个包的常量(跨包别名的目标)。
+type pkgConstRef struct {
+	// pkg 目标**包名**(import 别名 → 包名,由 importAliases 解析)。
+	pkg string
+	// name 目标常量名。
+	name string
+}
+
 func newStateGuard() *stateGuard {
 	return &stateGuard{
 		fset:        token.NewFileSet(),
 		pkgConsts:   map[string]map[string]string{},
+		pkgAliases:  map[string]map[string]pkgConstRef{},
 		accessors:   map[string]bool{},
 		forwarders:  map[string]int{},
 		filePkgs:    map[string]string{},
@@ -625,6 +738,11 @@ func (g *stateGuard) scan(roots []string) error {
 	for _, p := range files {
 		g.collectScope(p.file)
 	}
+	// 第一遍之二:解析跨包常量别名。
+	//
+	// 必须在**所有**包的常量都收齐之后做:别名的目标常量可能定义在
+	// 另一个包里(第二十二轮把 contextx 的状态键改成了 `= model.ContextSlotPlan`)。
+	g.resolveAliases()
 	// 第二遍:写入点(含转发函数的登记)。
 	for _, p := range files {
 		for _, decl := range p.file.Decls {
@@ -699,6 +817,14 @@ func (g *stateGuard) collectScope(f *ast.File) {
 	for name, val := range constStringValues(f) {
 		g.pkgConsts[pkg][name] = val
 	}
+	// 跨包别名(const X = pkg.Y):先登记,等所有包的常量收齐后统一解析
+	// (见 resolveAliases)。
+	if g.pkgAliases[pkg] == nil {
+		g.pkgAliases[pkg] = map[string]pkgConstRef{}
+	}
+	for name, ref := range constAliases(f, importAliases(f)) {
+		g.pkgAliases[pkg][name] = ref
+	}
 	// 状态访问器:带 Set(key string, val any) error 方法的类型
 	// (接口 StateAccess 与实现 stateAccess)。
 	for _, decl := range f.Decls {
@@ -726,6 +852,51 @@ func (g *stateGuard) collectScope(f *ast.File) {
 			if t := recvTypeName(d.Recv); t != "" {
 				g.accessors[strings.ToLower(t)] = true
 			}
+		}
+	}
+}
+
+// resolveAliases 把**跨包常量别名**解析成字面量值。
+//
+// 为什么必须有这一步(第二轮 P1-2 / 已登记 #305):本扫描器的常量表原本
+// 只收 `*ast.BasicLit`(token.STRING)——**别名**形态
+// (`const StateKeyPlan = model.ContextSlotPlan`)会被整个跳过。
+//
+// 后果有两层,都很严重:
+//
+//   - 第二十二轮把 contextx 的状态键常量改成 model 别名时,6 个写入点
+//     变成"无法解析"被 continue 跳过 → 守卫对 contextx 层**失去牙齿**
+//     ("新增状态键必须登记"这条防线在那一层形同虚设);
+//   - 门禁直接变红(扫到的形态数下限 + 未登记键),把正确的改动挡在门外。
+//
+// 解析规则(一层跨包别名;别名链迭代到不动点):
+//
+//	const X = pkg.Y  →  取 pkg 包里常量 Y 的字面量值
+//
+// 目标包的常量必须也在**扫描范围**内(所以 workflow/model 也要被扫)。
+// 目标值改了,解析结果跟着改 → 守卫照样能发现漂移(见
+// TestStateGuardDetectsCrossPackageAliasDrift)。
+//
+// 轮数上限防环(A=B,B=A)导致死循环。
+func (g *stateGuard) resolveAliases() {
+	const maxRounds = 8
+	for round := 0; round < maxRounds; round++ {
+		changed := false
+		for pkg, aliases := range g.pkgAliases {
+			for name, ref := range aliases {
+				if _, done := g.pkgConsts[pkg][name]; done {
+					continue // 已经是字面量(或上一轮已解析)
+				}
+				v, ok := g.pkgConsts[ref.pkg][ref.name]
+				if !ok {
+					continue // 目标不在扫描范围,或目标本身解析不出来
+				}
+				g.pkgConsts[pkg][name] = v
+				changed = true
+			}
+		}
+		if !changed {
+			return
 		}
 	}
 }
@@ -1085,6 +1256,10 @@ func funcIdent(fd *ast.FuncDecl) string {
 }
 
 // constStringValues 收集文件里 const 块的字符串常量(name → 值)。
+//
+// **只收字面量**:值是 `*ast.BasicLit`(token.STRING)才算。
+// 跨包别名(const X = pkg.Y)的值是 selector 表达式,由 constAliases
+// 单独收集(见 resolveAliases)。
 func constStringValues(f *ast.File) map[string]string {
 	out := map[string]string{}
 	for _, d := range f.Decls {
@@ -1119,4 +1294,50 @@ func exprString(fset *token.FileSet, expr ast.Expr) string {
 	var b strings.Builder
 	_ = printer.Fprint(&b, fset, expr)
 	return b.String()
+}
+
+// constAliases 收集文件里 const 块里**指向另一个包常量**的别名。
+//
+// 形态:const StateKeyPlan = model.ContextSlotPlan
+//
+// 返回:别名名 → 目标(包名 + 常量名)。
+//
+// 只认**跨包**别名(值是 selector 表达式 pkg.Name,且 pkg 是本文件的
+// import 别名)。同包别名(const A = B)不在此列 —— 它的目标与它同包,
+// 常量表里已经有值,解析时会被 resolveShape 的 Ident 分支直接命中。
+//
+// imports 是 import 别名 → 包名的映射(importAliases 的产物)。
+func constAliases(f *ast.File, imports map[string]string) map[string]pkgConstRef {
+	out := map[string]pkgConstRef{}
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					continue
+				}
+				sel, ok := vs.Values[i].(*ast.SelectorExpr)
+				if !ok {
+					continue
+				}
+				x, ok := sel.X.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				pkg, ok := imports[x.Name]
+				if !ok {
+					continue // 不是 import 别名 → 不是跨包别名
+				}
+				out[name.Name] = pkgConstRef{pkg: pkg, name: sel.Sel.Name}
+			}
+		}
+	}
+	return out
 }

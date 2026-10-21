@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
+import { createRequestGuard } from "@/lib/request-guard";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -31,23 +32,53 @@ const categories = [
 
 export default function EventsAudit() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  // draft = 输入框里**正在编辑**的前缀;filter = **已生效**的前缀。
+  //
+  // 为什么要拆成两个(第二轮 P2-1):此前只有一个 filter,输入一变它就变,
+  // 而 refresh 依赖 filter → useEffect 重跑 → **每次按键都发一次请求**,
+  // 且旧前缀的迟到响应会覆盖新前缀的结果(输入框是 "node.",列表却是
+  // "n" 的结果)。拆开后:输入只改 draft(不发请求),回车/点分类才把它
+  // 提交成 filter 并发一次请求。
+  const [draft, setDraft] = useState("");
   const [filter, setFilter] = useState("");
+  // filterRef 持有**已生效**的前缀:实时事件触发的刷新要用它,又不能
+  // 让 refresh 依赖 filter(依赖它 → 改前缀就重建 refresh → effect 重跑
+  // → 多发一次请求)。在事件处理器里更新,不在渲染期写 ref。
+  const filterRef = useRef("");
+  // 请求序号守卫:迟到的旧响应直接丢弃(见 lib/request-guard.ts)。
+  const guard = useMemo(() => createRequestGuard(), []);
 
   const refresh = useCallback(
     async (prefix?: string) => {
-      const f = prefix ?? filter;
+      const f = prefix ?? filterRef.current;
+      const seq = guard.next();
       try {
         const q = f ? `?type=${encodeURIComponent(f)}&limit=300` : "?limit=300";
-        setEvents(asArray<AuditEvent>(await api.allEvents(q)));
+        const data = asArray<AuditEvent>(await api.allEvents(q));
+        // 旧响应(已经有更新的请求在飞):丢弃,否则会覆盖新前缀的结果。
+        if (!guard.isCurrent(seq)) return;
+        setEvents(data);
       } catch (e) {
+        if (!guard.isCurrent(seq)) return;
         toast.error((e as Error).message);
       }
     },
-    [filter],
+    [guard],
+  );
+
+  // applyFilter 让一个前缀**立即生效**:提交状态 + 按新前缀拉一次。
+  const applyFilter = useCallback(
+    (prefix: string) => {
+      filterRef.current = prefix;
+      setFilter(prefix);
+      setDraft(prefix);
+      void refresh(prefix);
+    },
+    [refresh],
   );
 
   useEffect(() => {
-    refresh();
+    void refresh();
     // 实时事件防抖刷新:agent.output 等高频事件不应逐条触发全量拉取
     // (约定 7:一律 200ms)
     const trigger = createRefreshDebounce(() => {
@@ -59,8 +90,10 @@ export default function EventsAudit() {
     return () => {
       unsub();
       trigger.cancel();
+      // 组件卸载:作废在飞请求,避免对已卸载组件 setState。
+      guard.invalidate();
     };
-  }, [refresh]);
+  }, [refresh, guard]);
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -75,10 +108,7 @@ export default function EventsAudit() {
           {categories.map((c) => (
             <button
               key={c.prefix}
-              onClick={() => {
-                setFilter(c.prefix);
-                refresh(c.prefix);
-              }}
+              onClick={() => applyFilter(c.prefix)}
               className={
                 "rounded-md border px-2.5 py-1.5 text-xs " +
                 (filter === c.prefix
@@ -92,11 +122,16 @@ export default function EventsAudit() {
           <Input
             className="w-48 font-mono text-xs"
             placeholder="自定义前缀…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && refresh()}
+            value={draft}
+            // 输入**不发请求**(此前每次按键都发一次,见上面的说明);
+            // 回车才提交。
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              applyFilter(draft);
+            }}
           />
-          <Button variant="outline" size="sm" onClick={() => refresh()}>
+          <Button variant="outline" size="sm" onClick={() => void refresh()}>
             <RefreshCw className="mr-1 h-4 w-4" /> 刷新
           </Button>
         </div>

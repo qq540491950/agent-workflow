@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CheckCircle2, XCircle, Circle, PauseCircle, Ban } from "lucide-react";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
+import { createRequestGuard } from "@/lib/request-guard";
 import type { Artifact, Execution, ExecutionNode, UIEvent } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -111,8 +112,14 @@ export default function ExecutionMonitor() {
   // 重试/跳过互斥:此前这两个按钮无 disabled,连点会并发打多次
   // /retry —— 后端 CAS 只让一路成功,用户却看到多个 toast 混杂。
   const [recoveryBusy, setRecoveryBusy] = useState(false);
+  // 请求序号守卫(第二轮 P2-3):切换 :id 时,旧执行的迟到响应会把
+  // **上一条执行**的数据覆盖上来 —— 页面显示的不是用户正在看的那条执行,
+  // 而"取消执行"/"重试失败节点"是按 exec.id 操作的 → 可能作用在用户
+  // 以为不是的那条执行上。守卫让旧响应直接丢弃。
+  const guard = useMemo(() => createRequestGuard(), []);
 
   const refresh = useCallback(async () => {
+    const seq = guard.next();
     try {
       const [e, ns, evs, arts] = await Promise.all([
         api.getExecution(id),
@@ -120,6 +127,8 @@ export default function ExecutionMonitor() {
         api.executionEvents(id),
         api.executionArtifacts(id),
       ]);
+      // 已经切换到别的执行(或发起了更新的请求):旧响应丢弃,不得覆盖。
+      if (!guard.isCurrent(seq)) return;
       setExec(e);
       // 一律过 asArray:桌面 IPC 与 SPA fallback 异常路径下可能返回
       // null 或被解析成 HTML 兜底页的对象,直接 setNodes(ns) 会在
@@ -136,11 +145,19 @@ export default function ExecutionMonitor() {
       );
       setArtifacts(asArray<Artifact>(arts));
     } catch (err) {
+      if (!guard.isCurrent(seq)) return;
       toast.error((err as Error).message);
     }
-  }, [id]);
+  }, [id, guard]);
 
   useEffect(() => {
+    // 切换执行:先清空上一条执行的数据。留着它的话,"取消执行"/
+    // "重试失败节点"按钮(按 exec.id 操作)在新的响应到达之前仍然
+    // 作用在**上一条执行**上 —— 用户以为操作的是当前这条。
+    setExec(null);
+    setNodes([]);
+    setEvents([]);
+    setArtifacts([]);
     refresh();
     // 实时事件:匹配当前执行则刷新。
     // 防抖窗口统一走 createRefreshDebounce(约定 7:一律 200ms)——
@@ -156,8 +173,10 @@ export default function ExecutionMonitor() {
     return () => {
       unsub();
       trigger.cancel();
+      // 组件卸载/切换执行:作废在飞请求。
+      guard.invalidate();
     };
-  }, [id, refresh]);
+  }, [id, refresh, guard]);
 
   if (!exec) {
     return <div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>;

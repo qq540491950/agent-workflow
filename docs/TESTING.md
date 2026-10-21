@@ -3,10 +3,9 @@
 > 共 8 轮测试验证(超过最低 5 轮要求),其中轮次 2-8 为浏览器视觉测试(GUI 黑盒)。
 > 每次功能完成与 Bug 修复均有独立 git 提交(见提交号)。
 >
-> **当前状态(轮次 71-83,对应 commit `3e4a5b3` + 本轮工作区改动)**:
-> Go 测试文件 **141** 个 / 有测试的包 **21** 个 / 顶层 `func Test*` **789** 个;
-> 前端测试文件 **22** 个 / 用例 **268** 条;门禁 **9 步** + **27** 条自检场景,
-> 实测 **113s**。
+> **当前状态(轮次 71-86,对应 commit `6d76873` + 本轮工作区改动)**:
+> Go 测试文件 **158** 个 / 有测试的包 **21** 个 / 顶层 `func Test*` **851** 个;
+> 前端测试文件 **24** 个 / 用例 **293** 条;门禁 **9 步** + **29** 条自检场景。
 > (第十四轮**已落地** commit `91fe3e2`;第十五轮(迭代 21B)**已落地**
 > commit `908ba0b` —— 取消终态语义 / ExtraArgs 值形态 / 门禁第 6 步判据;
 > 第十六轮(迭代 17)**已落地** commit `e62f4ff` —— 单源回归锁去恒真 /
@@ -1437,10 +1436,12 @@ vitest **233/233**(0 → 233);门禁 9 步通过。
 
 ### 轮次 78:第十四轮(迭代 18)—— 门禁自检的完备性加固 + 剩余开放项收口
 
-> **当前自检场景总数:27 条**(`scripts/verify.sh` 的 `SELFCHECK_EXPECTED`)。
+> **当前自检场景总数:29 条**(`scripts/verify.sh` 的 `SELFCHECK_EXPECTED`)。
 > 第十四轮(轮次 78)加了 5 条(共 14 条);第十五轮(轮次 79)加 1 条(伪造输出,
 > 17 条);第十六~十八轮(轮次 80-82)加了 6 条(路径排除规则 4 条 + 孤儿包候选
-> 2 条,23 条);**第十九轮(轮次 83)加 4 条(第 6 步"断言扫描"判定,27 条)** ——
+> 2 条,23 条);第十九轮(轮次 83)加 4 条(第 6 步"断言扫描"判定,27 条);
+> **第二十二轮(轮次 86)加 2 条(第 6 步"断言**强度**"判定,29 条** ——
+> 恒不触发的断言必须被抓 + 运行期才成立的正常断言不得误判)——
 > 逐条见下表与各轮次小节。
 >
 > 这一轮的**主体**是**门禁自检本身的完备性加固**(门禁脚本的判定逻辑,
@@ -1655,7 +1656,7 @@ go 指令 → 门禁**红**。
 | 新判据 | 第 6 步除"有真实执行并通过的顶层用例"(框架事件)外,**再加一条**:该包的 `*_test.go` 里**必须真的有断言**(静态扫描)。**按包**判定:包里有一处断言即达标 |
 | 为什么不用 `go vet` | 实测 `go vet -tests` 对一个**零断言**的包 **exit 0** —— vet 的 tests 分析器查的是**测试函数签名/示例命名**,**不是断言数**;断言数**不在 `go test -json` 的事件里**。所以只能静态扫源码 |
 | 口径 | 断言 = 惯例接收者(t/tb/tt/t2…)上的 `Error/Errorf/Fatal/Fatalf/Fail/FailNow` 或第三方 `assert./require.` 的调用;扫描范围**只限该包的 `*_test.go`**(生产代码里 `err.Error()` / `fmt.Errorf()` 本仓库实测 73 + 71 处,扫生产代码等于没有判据) |
-| **先剥注释** | `strip_go_comments`(字符串/字符常量状态感知):注释里的 `t.Errorf` **不是断言**。**实测**:一个只在注释里提到 `t.Fatal` 的零断言包,若不剥注释会被判成"有断言"而放行 —— 本项目的测试文件**大量**在注释里写着"这里应该 t.Errorf(...)",不剥注释等于判据当场失效 |
+| **先剥注释** | `strip_go_comments`(字符串/字符常量状态感知):注释里的 `t.Errorf` **不是断言**。**实测**:一个只在注释里提到 `t.Fatal` 的零断言包,若不剥注释会被判成"有断言"而放行 —— 本项目的测试文件**大量**在注释里写着"这里应该 t.Errorf(...)",不剥注释等于判据当场失效。**注**:第二十二轮(轮次 86)已把整个断言扫描换成 **go/ast 静态分析** —— 注释天然不算断言(AST 里没有注释节点),`strip_go_comments` 随之删除;新增的判据是"**恒假分支里的断言不算数**"(见轮次 86 小节) |
 | 自检(+4 条,23 → **27**) | ① 有断言的包**不得**被误报(绿方向);② 零断言的包**必须**被抓(红方向,#289 的绕过本身);③ **只在注释里**提到断言的包**必须**被抓(证明剥注释真的生效);④ 反向对照(对有断言的包断言"必须在报告里"**必须失败** —— 证明这个判定函数真的在区分,不是恒真) |
 | 实测证据 | 隔离副本里放一个只含 `func TestNothingRuns(t *testing.T) { _ = 1 }` 的包 → **修前**:9 步门禁 **exit 0**(110s,全绿);**修后**:红在第 6 步("以下包的测试代码里没有任何断言");**真实仓库**:9 步 **全绿**(误报率实测 **0** —— 21 个包逐个扫,无一被报出) |
 
@@ -1704,6 +1705,63 @@ vitest **268/268**、`./scripts/verify.sh` **9 步通过**(实测 **113s**)、
 `go test -race -count=1 ./...` **21 个包全绿**、前端 `npm run lint` +
 `npx tsc --noEmit` + `npx vitest run` **285/285**、
 `./scripts/verify.sh` **9 步通过**(实测 **113s**)。
+
+### 轮次 86:第二十二轮(迭代 25 收口)—— 数值有限性三层防线 / 门禁断言强度 / 跨包常量别名 / 前端请求竞态 / timeout 上界
+
+> 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 86"小节(**#306-#311 全部关闭**,
+> 另登记 3 条开放项 **#312-#314**,精确改法见该节)。
+>
+> 本轮是**收口轮**:第二十四轮扫描与第二轮终验各抓到一条**独立**的新问题,
+> 连同第三、四、五轮扫出的 P2 一起收掉。
+>
+> **本轮的一条方法论**:"**存在**断言"与"断言**可能触发**"是两件事 ——
+> 第二轮终验实测:一个包里唯一的用例是 `if 1 != 1 { t.Fatal("不可能") }`
+> 时,断言**永远不执行**,而第 6 步的判据只看**存在性** → 9 步门禁全绿
+> = 绕过。本轮把判据升级为"**可能触发**",并给门禁自己补了红场景 + 绿对照。
+>
+> 新增 Go 顶层用例 **+20 例**、**新增测试文件 3 个**;前端 **+8 例**、
+> **新增测试文件 1 个**。
+
+**本轮新增/修改的测试**:
+
+| 测试文件 | 覆盖的缺陷与断言 |
+| --- | --- |
+| `persistence/finite_json_test.go`(**新,8 例**) | **#306**:`SaveWorkflow` 遇 NaN → **返回错误**且**一行都不落库**(工作流行 0 + 版本快照行 0);节点配置含 Inf → 同样失败(否则整个 `nodes_json` 变空串);`SaveExecution` 遇 NaN → 失败且不落行;**老库兼容**:库里 `variables_json = ""` → `GetWorkflow` / `ListWorkflows` 读成**空 map**、**不报错**;事件载荷含 NaN → 落**占位载荷**(`__unserializable__`)而不是空串。**#307**:导入含 `.nan` 的 DSL → 校验期**必须失败**且错误码是 `INVALID_NODE` |
+| `workflow/validator/finite_test.go`(**新,6 例**) | **#307**:变量表里的 NaN / +Inf / -Inf → 校验失败且错误码 `INVALID_NODE`、错误信息指出 `variables.env`;**嵌套**在 map / 数组里的非有限值(`variables.cfg.deep[2]`)同样被抓住;节点配置 / permissions 段里的非有限值同样被抓住;**正常值不得误报**(含 `int64(1)<<40`、嵌套 map);**字符串形态的 "NaN" / "Inf" / ".nan" 不得误报** |
+| `workflow/validator/timeout_seconds_test.go`(**新,4 例**) | **#311**:`timeout_seconds` = 10000000000 / 4611686018427387904 / 1e20 / -1 / 86401 / "30" / 1.5 / true → **一律校验失败**(`INVALID_NODE`);0 / 1 / 30 / 3600 / 86400 → **一律通过**(0 = 不设节点超时,与运行期口径一致);script 节点同样适用 |
+| `workflow/runtime/state_mask_test.go`(**改,+2 例**) | **#309**:跨包别名常量(`const KeyAlias = alpha.KeyBeta`)**能被解析**成目标常量的字面量值(否则该写入点会被当成"无法解析"跳过 → 守卫对它没有牙齿);**别名漂移**(目标包的常量改了)**仍能被发现**(解析结果跟着目标变,而不是冻结成旧值)。扫描范围同时加上 `workflow/model`(别名的指向目标必须也在范围内) |
+| `frontend/src/lib/request-guard.test.ts`(**新,4 例**) | **#310**:序号单调递增;只有最新一次请求的响应算数;`invalidate` 作废所有在飞请求;`invalidate` 之后取到的新序号仍然算数 |
+| `frontend/src/pages/EventsAudit.test.tsx`(**改,+2 例**) | **#310**:**旧请求的迟到响应不得覆盖新前缀的结果**(旧响应回来后,新前缀的事件仍在、旧的不得出现);**输入框每次按键不得发请求**(两次按键后仍只有 1 次请求,回车才提交第 2 次) |
+| `frontend/src/pages/ExecutionMonitor.test.tsx`(**改,+2 例**) | **#310**:切换执行后**旧执行的迟到响应不得覆盖新执行**;**切换执行时先清空上一条执行的数据**(页面回到"加载中…",按钮无从作用在上一条执行上) |
+
+**门禁自检的增量(第 6 步)**:
+
+| 自检场景 | 断言 | 现在 |
+| --- | --- | --- |
+| 红:恒不触发的断言必须被抓 | `usage_expect "awo/usagecheck/deadassert" "$ASSERT_REPORT" "yes" "恒假分支"` | 断言扫描报"测试代码里的断言都在恒假分支里,永远不会被触发(等价于没有断言)" |
+| 绿:运行期才成立的正常断言不得误判 | `usage_expect "awo/usagecheck/liveassert" "$ASSERT_REPORT" "no"` | 不被报出(新判据**不能过严**) |
+| 绿:对照组夹具换成真断言 | `asserted` 夹具由 `if 1 != 1 { t.Fatal(...) }` 改成 `got := 1 + 1; if got != 2 { t.Fatalf(...) }` | **原夹具正是绕过形态本身**(断言永不触发)—— 判据升级后必须换掉,否则绿对照变成红场景 |
+
+`SELFCHECK_EXPECTED` **27 → 29** 条(场景计数守卫同步);第 6 步的断言扫描由
+**文本级**(`grep -E` + awk 去注释)改为 **go/ast 静态分析**(内嵌在
+`scripts/verify.sh` 里的 `assertscan`):注释天然不算断言,恒假分支里的断言
+**不算数**。**真实仓库误报 0**:全仓 158 个测试文件 / 3098 条断言,**全部可触发**。
+
+**红 → 绿证据(修前实测)**:
+
+| # | 旧代码上的实测输出 | 现在 |
+| --- | --- | --- |
+| #306 | `marshal err=json: unsupported value: NaN bytes="" len=0`;`DB variables_json="" len=0`;`DB snapshot_json="" len=0` | `SaveWorkflow` 返回 `PersistenceError(DB_ERROR): 序列化失败…`;一行都不落库 |
+| #307 | `IMPORT code=200`(工作流里一个变量都没有) | `IMPORT code=400` + "variables.env 的值必须是有限数值";工作流**根本没被创建** |
+| #308 | 恒不触发的断言包 → 判"有断言" → 9 步门禁**全绿** | 报"断言都在恒假分支里" → 门禁**红** |
+| #309 | 别名化后:8 条"状态键写法无法解析" + 6 条"登记与实现漂移" | 别名解析出目标值;守卫**全绿**;漂移仍被报出 |
+| #310 | 迟到响应把 "workflow.started" 覆盖成 "node.started"(断言非空 → 红) | 旧响应被丢弃;新结果保留 |
+| #311 | `timeout_seconds: 10000000000` → 校验**通过** | 校验失败:`INVALID_NODE` + "必须在 0..86400 之间" |
+
+**本轮验证**:`gofmt -l` 干净(改过的文件)、`go vet` 干净、
+`go test -race -count=1 ./...` **全绿**、前端 `npm run lint` +
+`npx tsc --noEmit` + `npx vitest run` **293/293**、
+`./scripts/verify.sh` **9 步通过**、`docs/check-numbering.sh` 通过。
 
 ### 轮次 84:第二十轮(迭代 21 收口)—— mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决
 
@@ -2398,6 +2456,7 @@ await new Promise((r) => setTimeout(r, 0));   // ×2
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
 | 85 | **第二十一轮(迭代 22 收口)**:跨文件动作落地(8 项)/ 守卫能力边界登记 | ✅ 已落地(工作区,待提交) | **#297-#304 共 8 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 85):**#297**(P1)`contextx` 自带 mode → 槽位映射表(与 `workflow/model.ModeSpec` 各演各的 → model 认了而 contextx 没认的 mode **产物静默丢弃**)→ 分派改由 `model.ModeSpecFor(mode).ContextSlot` 决定,`skill` 伪 mode 单列,`submit` 什么都不写,**新增 fail-closed 默认分支**(槽位不认识 → 显式报错,不再静默丢弃);**#298**(P1)mode 取值域没有对外出口(前端硬编码一份 → 后端加了 mode 用户选不到)→ `GET /api/modes` + `WorkflowService.Modes()` + 前端 `modes()` 双分支 + Designer 下拉改后端派生(加载中用 `FALLBACK_MODES` 兜底,控件不留空)+ **跨语言守卫**(前端兜底清单必须与 `model.AllModes()` 逐项一致);**#299**(P2)版本页显示的是重新编码的 YAML(整数 `3` → `3.0`,**内容差异不是排版差异**)→ 改读 `Repo.GetWorkflowVersionDSL` 原文,老库 `dsl_text` 为空 → 回退重编码;**#300**(P3)`template` 的 6 个零引用死常量(看着像清单 → 诱导后来者多抄一份)→ 删除 + 源码级守卫;**#301**(P2)备份 `version` **只写不读**(任何 JSON 都被当备份,"恢复成功"却什么也没恢复)→ 缺失/不识别 → `BAD_REQUEST`;备份**缺 `skill_configs`**(禁用的技能换机器后又可用)→ 导出补齐 + 恢复写回(按本机已有 Skill 过滤)+ 前端文案;**#302**(P3)前端 `types.ts` 的 `"PAUSED"` → 删;**#303**(P3)Wails 绑定过期 → 重新生成(先隔离副本实测:结构性差异只有 `cancelled: number` 一行);**#304**(P3)`api.ts` 的 `stats()` 类型缺 `cancelled` → 补。**另登记有意边界 #305**:运行期状态脱敏守卫的常量表只收**字符串字面量**常量 → 把 `contextx.StateKey*` 改成 `model.ContextSlot*` 的**别名会打掉那道守卫**(实测 8 条"无法解析" + 6 条"登记与实现漂移")→ 改用"字面量 + 两道跨包守卫"达成同一目的。**红→绿证据**:① contextx 源码扫描 6 条 mode 字面量 → 0 ② `/api/modes` 404 → 200 且逐项一致 ③ `VersionDSL` 返回 `max_iter: 3.0` → `3` ④ template 6 个常量 → 0 ⑤ 缺 `version` 的备份**不报错** → `BAD_REQUEST` ⑥ 导出无 `skill_configs` → 有且恢复后禁用状态还原。新增测试文件 **5 个 Go**(`contextx/mode_source_test.go` 5 / `app/application/version_dsl_test.go` 3 / `app/application/backup_skill_test.go` 7 / `api/modes_test.go` 3 / `template/dead_const_test.go` 1)+ 改 2 个既有前端文件(`api.test.ts` +2 / `Settings.test.tsx` +3)+ 新增前端测试文件 1 个(`designer.modes.test.tsx` 8);Go 测试文件 150 → **155**、顶层 `func Test*` 814 → **833**;前端 22 → **23** 文件 / 272 → **285** 用例;门禁 9 步通过(实测 **113s**) |
+| 86 | **第二十二轮(迭代 25 收口)**:数值有限性三层防线 / 门禁断言强度 / 跨包常量别名 / 前端请求竞态 / timeout 上界 | ✅ 已落地(工作区,待提交) | **#306-#311 共 6 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 86):**#306**(P1)持久层把 `json.Marshal` 的错误吞掉 → 列被写成**空串**(一个 `.nan` **连坐清空整张 map** + 版本快照变空)→ 新增 `persistence.marshalJSON`(唯一出口),7 处调用点全部**失败即报错**;**读出口不放宽**(老库的空串 `variables_json` 读成空 map);事件列走**可见降级**(占位载荷 + WARN,理由见 #313);**#307**(P1)校验期不查"数值必须有限" → 含 `.nan` 的工作流能存能跑,**条件恒假**、静默走错分支 → 新增 `validator.findNonFinite`(变量表 / 节点配置 / permissions 段递归查)→ 导入返回 **400** + 明确文案,工作流根本没被创建;**#308**(P2)门禁第 6 步的断言判据只看**存在性** → `if 1 != 1 { t.Fatal }` 恒不触发却能骗过整条门禁 → 判据升级为"**可能触发**"(go/ast 静态分析恒假分支;注释天然不算断言),自检 27 → **29** 条,真实仓库**误报 0**(3098 条断言全部可触发);**#309**(P2)状态脱敏守卫的常量解析不支持跨包别名(轮次 85 的 #305)→ 新增 `constAliases` + `resolveAliases`(一层跨包别名,别名链迭代到不动点),扫描范围加 `workflow/model`;**别名漂移仍能被发现**;**#310**(P2)前端请求竞态(旧前缀 / 旧执行的迟到响应覆盖新结果)→ 新增 `frontend/src/lib/request-guard.ts`,`EventsAudit`(输入不再每次按键发请求)+ `ExecutionMonitor`(守卫 + 切换时先清空上一条执行)接入;**#311**(P2)`timeout_seconds` 无上界 → `time.Duration` 溢出(立即超时 / 静默改用适配器默认 600s)→ 范围常量收敛到 `workflow/compiler`(`TimeoutSecondsMin/Max` = 0..86400,约定 13),校验期加上下界(**下界取 0** = 不设节点超时,与运行期口径一致)。另登记 3 条开放项:**#312**(运行期钳制 `timeout_seconds`,`executor.go` 不归本轮所有)、**#313**(`SaveEvent` 改回"失败即报错" + `api/sse_marshal_test.go` 的粗判据精化,`api/**` 不归本轮所有)、**#314**(导入期有限性预检,`workflow/dsl` 不归本轮所有,校验期已拦住故可省)。**红→绿证据**:① `variables_json="" len=0` → `SaveWorkflow` 报错且一行不落 ② 导入 200 → **400 + 明确文案** ③ 恒不触发的断言 → 门禁**红** ④ 别名化后 8+6 条报错 → 守卫**全绿** ⑤ 迟到响应覆盖 → 被丢弃 ⑥ `timeout_seconds: 10000000000` 校验通过 → 校验失败。新增测试文件 **3 个 Go**(`persistence/finite_json_test.go` 7 / `workflow/validator/finite_test.go` 6 / `workflow/validator/timeout_seconds_test.go` 4)+ 改 1 个既有 Go 文件(`workflow/runtime/state_mask_test.go` +2)+ 新增前端测试文件 **1 个**(`frontend/src/lib/request-guard.test.ts` 4)+ 改 2 个既有前端文件(`EventsAudit.test.tsx` +2 / `ExecutionMonitor.test.tsx` +2);Go 顶层 `func Test*` 833 → **853**;前端 23 → **24** 文件 / 285 → **293** 用例;门禁 9 步通过 |
 | 84 | **第二十轮(迭代 21 收口)**:mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决 | ✅ 已落地(工作区,待提交) | **#291-#296 共 6 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 84):**#291**(P1)`mode` 取值域有**三份**清单(校验期只查必填不查取值 / 运行期不校验 / `ModeRequiresWrite` 对未知 mode 返回 false → **写权限检查被跳过**)→ 取值域收敛到 `workflow/model`(`AllModes`/`ModeSpecFor`/`IsValidMode`),校验期报 `INVALID_NODE`、运行期 fail closed(排在写权限检查**之后**,两道门都不绕),`ModeRequiresWrite(未知)=true`(fail closed,**有意**改掉旧断言);**#292** `compiler.KeyTask` 与 `contextx.StateKeyTask` 两份字面量 → compiler 消费 contextx 的定义 + 守卫测试;**#293** 统计把 FAILED 与 CANCELLED 混在一列 → 分列 + 成功率分母排除 CANCELLED + "各列之和 == 总数";**#294** 取消 WAITING_USER 后节点永远停在"等待中" → 非终态节点落 SKIPPED + `execution_nodes` 同步;**#295** `PAUSED` **从来不可达** → 状态机/运行期/持久层/前端徽章/事件常量整条移除,老库的遗留行**读出口归一为 CANCELLED**(不写库改数据);**#296** 8 个"只写不读"的列 → 逐列裁决(5 删 + 2 加读点 + 1 本就有读点),老库兼容靠**按表实际拥有的列拼 INSERT**(`persistence.configUpsert`,老库的 NOT NULL 无默认值列照常补齐)。**红→绿证据**:隔离副本实测旧代码下 ① 非法 mode `valid=true` ② 未知 mode 的写权限检查被跳过(节点跑成 SUCCESS)③ `ModeRequiresWrite("unknown")=false` ④ `failed` 列把 CANCELLED 也算进去 ⑤ 取消后节点停在 WAITING ⑥ 遗留 PAUSED 行原样读出 ⑦ 新库仍建着 5 个死列 ⑧ Dashboard 成功率 60%(应为 75%)。新增测试文件 **9 个 Go**(`workflow/validator/mode_domain_test.go` 3 / `workflow/runtime/mode_domain_test.go` 3 / `workflow/runtime/mode_contract_test.go` 3 / `workflow/runtime/cancel_skip_test.go` 2 / `workflow/model/execution_state_test.go` 1 / `workflow/compiler/taskkey_contract_test.go` 2 / `persistence/stats_test.go` 2 / `persistence/legacy_state_test.go` 3 / `persistence/dead_columns_test.go` 5)+ 改 4 个既有文件(`agent/mode_test.go` / `workflow/model/model_test.go` / `persistence/exec_state_guard_test.go` / `persistence/repo_cas_test.go`);前端 `Dashboard.test.tsx` +3 例 / `state-badge.test.tsx` +1 例;Go 测试文件 141 → **150**、顶层 `func Test*` 790 → **814**;前端 22 文件 / 268 → **272** 用例;门禁 9 步通过(实测 **112s**) |
 | 83 | **第十九轮(迭代 20 收口)**:空上下文可见 / 门禁第 6 步的断言维度 | ✅ 已落地(工作区,待提交) | **#280 关闭**:"上游什么都没产出"曾是**静默空上下文**(`contextx.Build` 总是把链键写进数据表 → 模板引擎按"键存在 = 可解析"判缺失 → `{{plan}}` 永远不被报成缺失 → 下游拿到空串、节点照常 SUCCESS、**零告警**)→ 改**上下文层报"空槽位"**(`contextx.BuildWithSlots` 产出"键存在但值为空"的链槽位清单;运行期把**被提示词引用到的**空槽位报成 `node.warning` / `reason="empty_context_slots"`),**可见但不阻断**;`template` 包的"键存在 = 可解析"口径**不动**(渲染层口径 ≠ 上下文层事实)。**#289 关闭**:门禁第 6 步只看"**有代码跑过**"→ 一个**零断言**的用例(`{ _ = 1 }`)真的执行、真的 pass → **9 步门禁全绿**(隔离副本实测 exit 0)→ 第 6 步加**第二个判据**:包里必须**真的有断言**(静态扫描;实测 `go vet -tests` **检测不出**零断言测试,断言数不在框架事件里);扫描**只限 `*_test.go`**且**先剥注释**(注释里的 `t.Errorf` 不是断言 —— 实测不剥注释会让只提注释的零断言包溜过去);自检 +4 条(23 → **27**)。**#290 新登记**:断言判据"按包 + 文本级"的粒度与实现 —— **有意边界,不修**(细到"每个用例"必然误报)。新增顶层用例 **+7 例**(`contextx/context_test.go` 4 / `workflow/runtime/context_chain_test.go` 3),**未新增测试文件**(141 → **141**),顶层 `func Test*` 782 → **789**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **113s**),新判据在真实仓库上**误报 0** |
 | 82 | **第十八轮(迭代 20)**:设置读失败可观测 / 内置 Agent 注册失败上抛 / Set 白名单化 | ✅ 已进主干(`3e4a5b3`) | #281-#283 共 **3 条**,**全部关闭**:**#281** `Settings.Info()` 吞掉 `git_working_dir` 的**读错误** → 静默回落到内存态目录,界面显示的不是库里那个,**用户一保存就把损坏行覆盖成内存值**(损坏事实消失)→ 改**三态分开**(读到 / `NOT_FOUND` 正常初始态 / 其它读失败)+ 记 ERROR + 响应新增 `git_working_dir_read_failed` 标记(`omitempty`,正常响应形状不变);启动路径同样留痕;**#282** `reloadAgents` 里 4 处 `_ = a.Agents.Register(...)` → 内置 Agent 注册失败**一行日志都没有**(此前不可达,但"不可达"不等于"永远不可达")→ 改 **ERROR 日志 + 上抛**(`NewApp` 启动即失败,零误伤风险);**#283** `SettingsService.Set(key, value)` **任意键写入**经 Wails IPC 暴露(`main.go:310` 的 `wails.NewService(app.Settings)` + 生成绑定 `settingsservice.ts:48`)→ 可绕过 `permMu` 写 `agent_policies`(并发保护失效)、绕过 `git_working_dir` 存在性与 `log_level` 校验 → 改**白名单三键** + **复用 `Update` 的同一套校验** + **值类型校验**(此前 `value any` 可把字符串 `"true"` 写进 `allow_script_nodes`),`agent_policies` **刻意排除**;`Update` 自己也改为复用 `Set`(设置写入的**唯一实现**)。新增测试文件 **3 个 Go**(`app/application/settings_read_failure_test.go` 6 例 / `app/application/agent_registration_test.go` 2 例 / `app/application/settings_set_whitelist_test.go` 8 例);新增专节"轮次 82"一节;Go 测试文件 138 → **141**,顶层 `func Test*` 766 → **782**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **118s**) |

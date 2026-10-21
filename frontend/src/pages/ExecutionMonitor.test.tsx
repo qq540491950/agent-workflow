@@ -5,7 +5,7 @@
 // 锁住,于是"统一 200ms"这条约定只能靠人工维持。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import ExecutionMonitor from "./ExecutionMonitor";
 import { advance, emit, makeEvent, settle } from "@/test/helpers";
 
@@ -82,6 +82,77 @@ function renderMonitor() {
     </MemoryRouter>,
   );
 }
+
+// 第二轮 P2-3:请求竞态。
+//
+// 切换 :id 时旧执行的迟到响应会覆盖新执行 → 页面显示**上一条执行**的
+// 数据;而"取消执行"/"重试失败节点"按 exec.id 操作 → 可能作用在用户
+// 以为不是的那条执行上。
+describe("ExecutionMonitor 请求竞态", () => {
+  // 用**同一个路由**跳转(不是换 key 重挂载):组件实例不变,只有 :id 变 ——
+  // 这正是真实场景(用户点另一条执行),也正是竞态会发生的地方。
+  function NavMonitor() {
+    const navigate = useNavigate();
+    return (
+      <>
+        <button onClick={() => navigate("/executions/ex-2")}>切到 ex-2</button>
+        <Routes>
+          <Route path="/executions/:id" element={<ExecutionMonitor />} />
+        </Routes>
+      </>
+    );
+  }
+
+  it("切换执行后,旧执行的迟到响应不得覆盖新执行", async () => {
+    // 第一个执行(ex-1)的请求挂起,第二个(ex-2)先回来。
+    let resolveOld: (v: unknown) => void = () => {};
+    const oldReq = new Promise((r) => {
+      resolveOld = r;
+    });
+    m.getExecution.mockReturnValueOnce(oldReq as never);
+
+    render(
+      <MemoryRouter initialEntries={["/executions/ex-1"]}>
+        <NavMonitor />
+      </MemoryRouter>,
+    );
+    await settle();
+    expect(m.getExecution).toHaveBeenCalledTimes(1);
+
+    // 切到 ex-2:第二次请求必须发出去。
+    m.getExecution.mockResolvedValue(exec({ id: "ex-2", workflow_name: "新执行" }));
+    fireEvent.click(screen.getByText("切到 ex-2"));
+    await settle();
+    expect(m.getExecution).toHaveBeenCalledTimes(2);
+    // 新执行已渲染。
+    expect(screen.getByText("新执行")).toBeTruthy();
+
+    // 旧执行(ex-1)的响应现在才回来 —— 必须被丢弃。
+    resolveOld(exec({ id: "ex-1", workflow_name: "旧执行" }));
+    await settle();
+    expect(screen.queryByText("旧执行")).toBeNull();
+    expect(screen.getByText("新执行")).toBeTruthy();
+  });
+
+  it("切换执行时先清空上一条执行的数据(按钮不得作用在上一条执行上)", async () => {
+    m.getExecution.mockResolvedValue(exec({ id: "ex-1", workflow_name: "旧执行" }));
+    render(
+      <MemoryRouter initialEntries={["/executions/ex-1"]}>
+        <NavMonitor />
+      </MemoryRouter>,
+    );
+    await settle();
+    expect(screen.getByText("旧执行")).toBeTruthy();
+
+    // 切换到 ex-2,但它的响应**还没回来**。
+    m.getExecution.mockReturnValue(new Promise(() => {}) as never);
+    fireEvent.click(screen.getByText("切到 ex-2"));
+    await settle();
+    // 旧执行的数据必须已经清空(页面回到"加载中…"),按钮无从作用在它上面。
+    expect(screen.queryByText("旧执行")).toBeNull();
+    expect(screen.getByText("加载中…")).toBeTruthy();
+  });
+});
 
 describe("ExecutionMonitor 实时刷新防抖", () => {
   it("SSE 触发的刷新按 200ms 防抖(120ms 窗口会提前触发)", async () => {

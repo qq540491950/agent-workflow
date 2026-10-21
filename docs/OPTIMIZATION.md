@@ -1124,7 +1124,46 @@ float64 陷阱)已经用解码归一拿到了。
 | #301 | 恢复一份没有 `version` 的备份 → **返回"恢复成功"**;导出结果里没有 `skill_configs` 键 | 缺 `version` → `ValidationError(BAD_REQUEST)`;导出含 `skill_configs`;恢复后禁用状态还原;老备份仍能恢复且不改动技能状态 |
 | #304 | `stats()` 的内联类型无 `cancelled` | 已有 `cancelled: number` |
 
-## 十四、仍然开放(轮次 61-83 之后)
+### 轮次 86:第二十二轮(迭代 25 收口)—— 数值有限性三层防线 / 门禁断言强度 / 跨包常量别名 / 前端请求竞态 / timeout 上界
+
+> **本轮是"收口轮"**:第二十四轮扫描与第二轮终验各抓到一条**独立**的新问题,
+> 本轮把它们连同第三、四、五轮扫出的 P2 一起收掉。
+>
+> **本轮的一条方法论**:"**存在**断言"与"断言**可能触发**"是两件事。
+> 第二轮终验实测:一个包里唯一的用例是 `if 1 != 1 { t.Fatal("不可能") }`
+> 时,断言**永远不执行**,而第 6 步的判据只看**存在性** → 9 步门禁全绿
+> = 绕过。本轮把判据升级为"**可能触发**"(go/ast 静态分析恒假分支),
+> 并给门禁自己补了红场景 + 绿对照。
+
+| 编号 | 来源 | 缺陷 | 触发路径与影响 | 修复(已落地) |
+| --- | --- | --- | --- | --- |
+| **#306** | 第二十二轮(迭代 25) | **P1** 持久层把 `json.Marshal` 的错误**吞掉**,列被写成**空串** | `persistence/repo.go` 的 7 处 `_ = json.Marshal(...)`(`SaveWorkflow` 的 variables/nodes/edges/settings/permission + 版本快照、`SaveExecution` 的 variables/snapshot、`SaveEvent` 的 data、`SaveSetting` 的 value)把错误全吞了 —— 而 `json.Marshal` 遇到 NaN/Inf 会**报错并返回空字节**(不是部分 JSON)。后果:**一个坏值连坐清空整张 map**(旁边合法的 `limit: 10` 一起丢)、版本快照变空串。实测(隔离副本,基线 `73c02eb`):导入 `variables: {env: .nan, limit: 10}` → DB 里 `variables_json = "" (len=0)`、`workflow_versions.snapshot_json = "" (len=0)`、读回 `variables = map[] (len=0)` | **序列化失败即报错**:新增 `persistence.marshalJSON`(唯一出口),7 处调用点全部改为**失败即返回错误**;`SaveWorkflow` / `SaveExecution` 因此**不写任何行**(事务回滚)。**读出口不放宽**:老库里上一轮 bug 写进去的**空串 `variables_json` 读成空 map**(不是错误)—— 向后兼容是硬要求。**事件列例外**:`SaveEvent` 走"**可见降级**"(落一条写明"原始载荷未保存"的占位载荷 + 一条 WARN)而不是"整条事件不落库"—— 理由见该函数注释(失败会触发运行期既有的 `runtime.error` 机制,改变 `api/sse_marshal_test.go` 断言的 SSE 契约,而 `api/**` 本轮归别的子代理所有)。**验证**:`persistence/finite_json_test.go`(8 例,新文件) |
+| **#307** | 第二十二轮 | **P1** 校验期**不查**"数值必须有限" → 含 `.nan` 的工作流能存能跑,**条件恒假** | `goccy/go-yaml` 按 YAML 1.1 **合法**解析 `.nan` / `.inf`(解析器不报错),`dsl.Parse` → `ToModel` → 校验期 → 保存一路畅通。运行期 `exec.Variables` 为空 → 模板变量渲染空串(有 `node.warning`),**条件变量则零告警** → 条件恒假 → **静默走错分支**,执行仍 `COMPLETED`(约定 14:"该失败却成功"等同 P0)。实测:导入返回 **200**,工作流里一个变量都没有 | **校验期三层拦**:① `workflow/validator` 新增 `findNonFinite`(递归查 float32/float64/json.Number 里的 NaN/Inf)→ 变量表 / 节点配置 / permissions 段任一命中即报 `INVALID_NODE`(前端 `CODE_HINTS` 已有该码,不必同步前端);② 持久层兜底(#306);③ 导入期预检(`workflow/dsl/parser.go` **不归本轮所有**,精确改法见交付报告)—— 校验期已拦住,导入期那一层可省。**实测**:导入含 `.nan` 的 DSL → **400 `WORKFLOW_INVALID`** + 明确文案("variables.env 的值必须是有限数值"),且工作流**根本没被创建**(GET → 404) |
+| **#308** | 第二十二轮 | **P2** 门禁第 6 步的断言判据只看**存在性** → **恒不触发的断言**可骗过整条门禁 | 第二轮终验实测:造一个包里**唯一**的用例是 `if 1 != 1 { t.Fatal("不可能") }` 的新包 → 断言扫描判"有断言" → 9 步门禁**全绿**。这类包**什么都没验证**,却穿着测试外衣 | **判据从"存在"升级为"可能触发"**:第 6 步的断言扫描改用 **go/ast 静态分析**(新增内嵌在 `scripts/verify.sh` 里的 `assertscan`):一条断言若处在**恒假分支**里(`false` / `1 != 1` / `!true` / `true && false` / 包级布尔常量 false)就**不算数**。**注释天然不算断言**(AST 里没有注释节点)—— 此前的 `strip_go_comments` 去注释机制随之删除。**真实仓库误报 0**(全仓 158 个测试文件 / 3098 条断言,全部可触发)。**门禁自检**:新增红场景(恒不触发的断言必须被抓)+ 绿对照(运行期才成立的正常断言不得误判),自检场景 27 → **29** 条 |
+| **#309** | 第二十二轮 | **P2** 运行期状态脱敏守卫的常量解析**不支持跨包别名**(轮次 85 登记的 #305) | `workflow/runtime/state_mask_test.go` 的 `constStringValues` 只收 `*ast.BasicLit`(token.STRING)→ 别名(`const StateKeyPlan = model.ContextSlotPlan`)被跳过 → 6 个写入点"无法解析"被 `continue` 跳过 → 守卫"新增状态键必须登记"对 contextx 层**失去牙齿**;同时门禁直接变红(把正确的别名化改动挡在门外) | **守卫跟随一层跨包别名**:新增 `constAliases`(收集 `const X = pkg.Y` 形态)+ `stateGuard.resolveAliases`(在所有包的常量收齐后统一解析,别名链迭代到不动点,轮数上限防环);扫描范围加上 `workflow/model`(别名的指向目标必须也在范围内)。**别名漂移仍能被发现**:目标包的常量改了 → 解析结果跟着变 → 守卫照样报"未登记"。**验证**:`workflow/runtime/state_mask_test.go` 新增 2 例(别名可解析 / 别名漂移仍被发现)+ **隔离副本实测**:把 `contextx.StateKeyPlan` 改成 `= model.ContextSlotPlan` → 旧守卫报 **8 条"无法解析" + 6 条"登记与实现漂移"**,新守卫**全绿** |
+| **#310** | 第二十二轮 | **P2** 前端**请求竞态**:旧请求的迟到响应覆盖新请求的结果 | ① `EventsAudit.tsx`:自定义前缀**每次按键**发一次请求(`refresh` 依赖 `filter` → 输入一变 effect 重跑),旧前缀的迟到响应覆盖新前缀 —— 实测输入框是 "node."、列表却是 "n" 的结果;② `ExecutionMonitor.tsx`:切换 `:id` 时旧执行的响应覆盖新执行 → 页面显示**上一条执行**的数据,而"取消执行"/"重试失败节点"按 `exec.id` 操作 → 可能作用在用户以为不是的那条执行上。全仓 grep `AbortController|reqId|requestId` **零命中**(此前没有任何守卫) | **新增共享的请求序号守卫** `frontend/src/lib/request-guard.ts`(与 `lib/debounce.ts` 并列,同一风格):发请求前取号、响应回来比对号,不是最新就**整条丢弃**(连错误提示也不弹 —— 旧请求的失败与当前页面无关)。`EventsAudit`:**输入不再发请求**(拆 `draft` / `filter` 两个状态,回车或点分类才提交)+ 守卫;`ExecutionMonitor`:守卫 + **切换执行时先清空上一条执行的数据**(按钮无从作用在上一条执行上)。**验证**:`frontend/src/lib/request-guard.test.ts`(4 例,新文件)+ `EventsAudit.test.tsx`(+2 例:迟到响应不得覆盖 / 每次按键不得发请求)+ `ExecutionMonitor.test.tsx`(+2 例:迟到响应不得覆盖 / 切换时先清空) |
+| **#311** | 第二十二轮 | **P2** `timeout_seconds` **没有上界** → `time.Duration` 溢出 | `workflow/compiler/nodeconfig.go` 的契约表只声明"有这个键",不声明取值范围 → 运行期 `time.Duration(raw)*time.Second` 溢出:实测 `raw=10000000000` → `-2346317h47m53.7s`(负数)→ **立即超时**;`raw=4611686018427387904` → `0s` → **立即超时**;`1e20`(float)→ `int(1e20)` 为负 → `req.Timeout > 0` 判假 → **静默改用适配器默认 600s**(用户配的值根本没生效,且无任何告警) | **校验期加上界**:取值范围只有一份来源 —— `workflow/compiler/nodeconfig.go` 新增 `TimeoutSecondsKey` / `TimeoutSecondsMin(0)` / `TimeoutSecondsMax(86400)` / `HasTimeoutSecondsKey`(约定 13:校验期与运行期同源);`workflow/validator` 新增 `validateTimeoutSeconds`:必须是**整数秒**、必须在 **0..86400** 内。**下界取 0**:0 的语义是"**不设节点超时**"(运行期按 `req.Timeout > 0` 判断,走适配器默认)—— 判成非法就是"用户被自己的校验器挡住"(约定 13 的反例),存量工作流里显式写 0 的会直接存不下去。**运行期钳制**在 `workflow/runtime/executor.go`(**不归本轮所有**),精确改法见交付报告 |
+
+#### 本轮的**红 → 绿**证据(逐条)
+
+| # | 旧代码上的实测输出 | 现在 |
+| --- | --- | --- |
+| #306 | `marshal err=json: unsupported value: NaN bytes="" len=0`;`DB variables_json="" len=0`;`DB snapshot_json="" len=0`;`read-back variables=map[] len=0` | `SaveWorkflow` 返回 `PersistenceError(DB_ERROR): 序列化失败(值不可 JSON 化,常见于 NaN/Inf)`;**一行都不落库** |
+| #307 | `IMPORT code=200 body={...}`(工作流里**一个变量都没有**) | `IMPORT code=400 body={"code":"WORKFLOW_INVALID",...,"variables.env 的值必须是有限数值(不能是 NaN 或 Inf)"}`;`GET /api/workflows/wf-nan` → **404**(根本没创建) |
+| #308 | 恒不触发的断言包 → 断言扫描判"有断言" → 9 步门禁**全绿** | 断言扫描报 `测试代码里的断言都在恒假分支里,永远不会被触发(等价于没有断言)` → 门禁**红** |
+| #309 | 别名化后:`状态键写法 "StateKeyPlan" 无法解析`(8 条)+ `登记的状态键 "plan" 在源码里已找不到写入点`(6 条) | 别名解析出 `plan`;守卫**全绿**;别名漂移仍被报出 |
+| #310 | 迟到响应把 "workflow.started" 覆盖成 "node.started"(断言 `queryByText("node.started")` 非空 → 红) | 旧响应被丢弃;`queryByText("node.started")` 为 null,新结果保留 |
+| #311 | `timeout_seconds: 10000000000` → 校验**通过**(运行期溢出成负数 → 立即超时) | 校验失败:`INVALID_NODE` + "timeout_seconds 必须在 0..86400 之间" |
+
+#### 本轮登记的**开放项**(需主代理接手,精确改法已给出)
+
+| 编号 | 开放项 | 精确改法(本轮的文件不归本代理所有,只能把改法写下来) |
+| --- | --- | --- |
+| **#312** | **运行期**没有钳制 `timeout_seconds`(校验期只拦**新写/新改**的工作流;**存量**工作流里已经写着超大值的,运行期仍会溢出) | `workflow/runtime/executor.go`:新增 `timeoutSecondsOf(node *model.Node) int` —— 取 `node.Config["timeout_seconds"]`(**保持字面量**:契约探针 `workflow/compiler/nodeconfig_contract_test.go` 只认 `cfg*(node, "字面量")` 形态,换成常量会让契约表判"运行期不再读这个键"),**先按浮点取值再钳制**(避免 `int(1e20)` 先溢出成负数),超出 `compiler.TimeoutSecondsMax` → 钳到上界(不是 fail closed:超大的超时原本表现为"立即超时",钳到 24h 是修复而不是失败),小于 0 → 0(= 不设节点超时)。把 `executor.go:484` 的 `Timeout: cfgInt(node, "timeout_seconds")` 与 `executor.go:1071` 的 `if s := cfgInt(node, "timeout_seconds"); s > 0` 改用这个助手。**范围常量只从 `workflow/compiler` 取**(约定 13) |
+| **#313** | `persistence.SaveEvent` 目前走"**可见降级**"(占位载荷 + WARN)而不是"失败即返回错误" | 与 `api/**` 的所有者一并处理:① 把 `persistence/repo.go` 的 `SaveEvent` 改回"序列化失败即返回错误";② 把 `api/sse_marshal_test.go` 的 `TestSSEMarshalFailureIsVisible` 里那条**字面断言**(`!strings.Contains(out, "exec-bad")`)精化成"失败的**事件**不得被当作**正常事件**发出"(运行期对落库失败的既定反应是一条带执行 ID 的 `runtime.error` —— 那是**显式的失败信号**,不是被当作正常事件发出);③ 顺带把 `api/**` 里其它"流里不得出现执行 ID"式的粗判据一并复核 |
+| **#314** | 导入期(DSL 解析期)对 variables 的**有限性预检**未做(校验期已拦住,导入期那一层可省) | `workflow/dsl/parser.go` 的 `parse()`:YAML / JSON 两条路径解析完之后,对 `doc.Variables` 递归查一遍非有限值(`math.IsNaN` / `math.IsInf`),命中即返回 `model.NewError(model.KindValidationError, "DSL_PARSE_ERROR", …)`。**当前不做的理由**:校验期(`workflow/validator`)已经在保存前拦住,导入路径必然经过校验 → 用户看到的仍是明确的错误;这一层只是"更早一点失败",不是"修好了什么"。**做的话收益有限、风险不小**(`dsl` 包是所有路径的入口,多一处判断就多一处可能误伤) |
+
+## 十四、仍然开放(轮次 61-86 之后)
 
 > 下面是**当前**的完整开放清单。前面各轮登记过的开放项,**已修的划掉并
 > 注明去向**,真正还开着的留在下面。编号沿用正文。
@@ -1496,14 +1535,18 @@ float64 陷阱)已经用解码归一拿到了。
     (渲染层口径与上下文层事实正交)。验证:`workflow/runtime/context_chain_test.go`
     (3 例)+ `contextx/context_test.go`(4 例)。
     **本轮新登记的边界**:见第 72 条(#290,断言判据的粒度与实现)。
-72. **门禁第 6 步的"断言"判据是按包 + 文本级的(#290)** ——
+72. **门禁第 6 步的"断言"判据是按包的(#290)** ——
     **有意边界,登记在案**(不是待修的缺陷)。
     第十九轮给第 6 步加了第二个判据(#289):包里必须**真的有断言**。
     它的口径是:① **按包**判定 —— "1 个真断言 + 9 个零断言用例"的包照样通过;
-    ② **文本级**扫描(`strip_go_comments` + 正则)—— 接收者名不遵循
-    t/tb/tt 惯例的 `testing.T`、以及写在**非测试文件**里的 testing 助手
-    (本仓库零命中)认不出来;字符串**内容**已被剥成空串,但同形的源码文本
-    仍可能命中。
+    ② 第二十二轮(轮次 86)把实现从**文本级**(`strip_go_comments` + 正则)
+    换成 **go/ast 静态分析**(内嵌在 `scripts/verify.sh` 里的 `assertscan`):
+    注释天然不算断言(AST 里没有注释节点),**恒假分支**里的断言也不算数
+    (#308:断言**永远不触发**的包此前能骗过整条门禁)。
+    **剩下的边界**:接收者名不遵循 t/tb/tt 惯例的 `testing.T`、以及写在
+    **非测试文件**里的 testing 助手(本仓库零命中)认不出来;恒假判定只覆盖
+    **常量**表达式 —— 条件里一旦出现运行期变量,就保守地认为该分支**可能**
+    触发(偏松不偏严,不会误报)。
     **为什么不修**:判据再细到"每个用例"**必然误报**(表格驱动测试把断言
     放在子函数/辅助函数里是常态),而门禁**误报**的代价(逼人加豁免、加恒真
     断言来消音)比漏报更大;两道判据保持同一粒度(按包)也更自洽。

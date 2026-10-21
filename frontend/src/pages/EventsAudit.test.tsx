@@ -100,3 +100,61 @@ describe("EventsAudit 列表防御", () => {
     expect(m.allEvents).toHaveBeenCalledWith("?type=workflow.&limit=300");
   });
 });
+
+// 第二轮 P2-3:请求竞态。
+//
+// 旧实现的 refresh 依赖 filter → 输入一变 effect 就重跑 → 每次按键发一次
+// 请求,且旧前缀的迟到响应会覆盖新前缀的结果(输入框是 "node.",列表却是
+// "n" 的结果)。
+describe("EventsAudit 请求竞态", () => {
+  function ev(seq: number, type: string) {
+    return {
+      seq,
+      execution_id: "ex-1",
+      node_id: "n1",
+      type,
+      data: {},
+      created_at: "2026-01-01T00:00:00Z",
+    };
+  }
+
+  it("旧请求的迟到响应不得覆盖新前缀的结果", async () => {
+    // 第一个请求(初始加载)挂起,第二个(按分类过滤)先回来。
+    let resolveFirst: (v: unknown) => void = () => {};
+    const first = new Promise((r) => {
+      resolveFirst = r;
+    });
+    m.allEvents
+      .mockReturnValueOnce(first as never)
+      .mockResolvedValueOnce([ev(2, "workflow.started")]);
+
+    renderAudit();
+    await settle();
+    fireEvent.click(screen.getByText("Workflow"));
+    await settle();
+    // 新前缀的结果已经渲染。
+    expect(screen.getByText("workflow.started")).toBeTruthy();
+
+    // 旧请求现在才回来 —— 它必须被丢弃,不得覆盖。
+    resolveFirst([ev(1, "node.started")]);
+    await settle();
+    expect(screen.queryByText("node.started")).toBeNull();
+    expect(screen.getByText("workflow.started")).toBeTruthy();
+  });
+
+  it("输入框每次按键不得发请求(回车才提交)", async () => {
+    renderAudit();
+    await settle();
+    expect(m.allEvents).toHaveBeenCalledTimes(1);
+    const input = screen.getByPlaceholderText("自定义前缀…");
+    fireEvent.change(input, { target: { value: "node." } });
+    fireEvent.change(input, { target: { value: "node.x" } });
+    await settle();
+    // 两次按键都不得发请求。
+    expect(m.allEvents).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await settle();
+    expect(m.allEvents).toHaveBeenCalledTimes(2);
+    expect(m.allEvents).toHaveBeenLastCalledWith("?type=node.x&limit=300");
+  });
+});

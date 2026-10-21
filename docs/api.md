@@ -146,6 +146,7 @@ HTTP 状态码语义:
 | `UNKNOWN_FIELD` | 400(保存/校验) | 请求体含**未知顶层字段**。允许的键集合由 `model.Workflow` 的 json tag **反射派生**(模型加字段自动生效),错误信息里会列出允许的键 |
 | `INVALID_NODE_ENABLED` | 校验错误 | 节点的 `enabled` 不是布尔值。运行期同样 fail closed(节点失败),两边结论一致 |
 | `INVALID_NODE`(mode 取值) | 校验错误 | agent 节点的 `mode` **不在取值域内**(唯一来源:`model.AllModes()` —— `plan` / `execute` / `review` / `fix` / `test` / `submit`)。此前只查"必填"不查"取值",拼错的 mode(`exectue`)能存能跑,还会**跳过写权限检查**。运行期同样 fail closed(节点失败),两边结论一致(轮次 84) |
+| `INVALID_NODE`(数值非有限 / timeout 越界) | 校验错误 | ① 工作流里的数值**不是有限数**(NaN / ±Inf)—— 落库会连坐清空整张 map(#306 / #307,轮次 86);② 节点的 `timeout_seconds` **不在 0..86400** 或不是整数秒(#311,轮次 86) |
 | `UNKNOWN_NODE_CONFIG` | 校验**警告** | 节点配置里有**未被识别**的键(典型:`timeout_seconds` 拼成 `timeout_second`)。该设置**不会生效**,但**不阻断保存** |
 | `DEPRECATED_NODE_CONFIG` | 校验**警告** | 节点配置键已废弃(如 condition 节点的 `expression`)。仍可保存,运行期按边上的条件走 |
 | `UNSUPPORTED_AGENT_SETTING` | 400(保存 Agent 配置) | 该 Agent 设置**不生效**(运行期从不读取它)。典型:`default_working_dir` —— 后端**拒绝新值**并说明原因(请改用节点级 `working_dir`,或清空该字段)。**已存的老值仍可原样回存**(不阻断存量工作流) |
@@ -644,6 +645,59 @@ GET /api/modes  →  ["plan", "execute", "review", "fix", "test", "submit"]
 
 **验证**:`api/modes_test.go`(3 例)、`frontend/src/lib/api.test.ts`(+2 例)、
 `frontend/src/pages/designer.modes.test.tsx`(8 例)。
+
+### 18. 落库前的数值必须**有限**(轮次 86 / 第二十二轮变更)
+
+工作流定义里出现 **NaN / ±Inf** 时,导入与保存**一律拒绝**。
+
+```
+POST /api/workflows/import
+  DSL: variables: { env: .nan, limit: 10 }
+→ 400
+  { "code": "WORKFLOW_INVALID",
+    "kind": "ValidationError",
+    "error": "ValidationError(WORKFLOW_INVALID): [{\"code\":\"INVALID_NODE\",\"message\":\"variables.env 的值必须是有限数值(不能是 NaN 或 Inf)\"}]" }
+```
+
+| 变化 | 修前 | 修后(轮次 86) |
+| --- | --- | --- |
+| 含 `.nan` / `.inf` 的工作流 | **导入成功(200)**,但 `variables_json` 被写成**空串** → 读回来是**空 map**(旁边合法的 `limit: 10` 一起丢)→ 运行期条件恒假 → **静默走错分支**,执行仍 `COMPLETED` | **400 `WORKFLOW_INVALID`**,错误信息指出出问题的变量路径;工作流**根本不被创建**(`GET /api/workflows/{id}` → 404) |
+| 错误码 | — | `INVALID_NODE`(复用既有码:前端 `CODE_HINTS` 已有该码,不必同步前端) |
+| 检查范围 | — | `variables` / 每个节点的 `config` / `permissions` 段,**递归**查 `float32` / `float64` / `json.Number` 里的 NaN/Inf |
+| 持久层兜底 | `json.Marshal` 的错误被吞 → 列写成空串 | **序列化失败即报错**(`persistence.marshalJSON`):`SaveWorkflow` / `SaveExecution` 失败且**一行都不落库** |
+| 老库兼容 | — | 老库里上一轮 bug 写进去的**空串 `variables_json`** 读成**空 map**,**不报错**(读出口不放宽,写出口收紧) |
+
+> **为什么是 400 而不是 500**:这是**用户输入**的问题(DSL 里写了非法数值),
+> 与"内部错误"无关 —— 与既有的 `WORKFLOW_INVALID` 同口径。
+
+**验证**:`persistence/finite_json_test.go`(7 例)、
+`workflow/validator/finite_test.go`(6 例)。
+
+### 19. `timeout_seconds` 的取值范围(轮次 86 / 第二十二轮变更)
+
+节点级 `timeout_seconds`(agent / script 节点)的取值必须是 **0..86400 的整数秒**。
+
+```
+节点配置: { timeout_seconds: 10000000000 }
+→ 校验失败: INVALID_NODE
+  "节点 \"n1\" 的 timeout_seconds 必须在 0..86400 之间(实际是 1e+10)"
+```
+
+| 值 | 含义 | 修前的后果 |
+| --- | --- | --- |
+| `0` | **不设节点超时**(运行期按 `req.Timeout > 0` 判断,走适配器默认超时) | — |
+| `1..86400` | 节点级超时秒数 | — |
+| `> 86400` | — | `time.Duration(raw) * time.Second` **溢出成负数** → **立即超时** |
+| `1e20`(float) | — | `int(1e20)` 溢出成负 → 运行期 `req.Timeout > 0` 判假 → **静默改用适配器默认 600s**(用户配的值根本没生效,无任何告警) |
+| 非整数 / 非数值 | — | 运行期静默取 0 / 截断 |
+
+- 范围常量只有一份来源:`workflow/compiler` 的 `TimeoutSecondsMin/Max`
+  (约定 13:校验期与运行期同源)。**下界取 0** 是刻意的:0 的语义是
+  "不设节点超时",判成非法就是"用户被自己的校验器挡住"。
+- **运行期钳制**(把超出上界的值钳到 24h)尚未落地 —— 精确改法见
+  `docs/OPTIMIZATION.md` 轮次 86 的开放项 **#312**。
+
+**验证**:`workflow/validator/timeout_seconds_test.go`(4 例)。
 
 ## SSE 实时事件流(GET /api/events)
 

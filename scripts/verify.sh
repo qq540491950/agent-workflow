@@ -81,6 +81,7 @@ WIN_LOG=""
 WIN_VET_LOG=""
 WIN_CHECK_DIR=""
 USAGE_CHECK_DIR=""
+ASSERT_SCAN_DIR=""
 GOFMT_OUT=""
 GOFMT_ERR=""
 EMBED_PLACEHOLDER=""
@@ -93,6 +94,7 @@ cleanup() {
 	if [ -n "$WIN_OUT" ]; then rm -rf "$WIN_OUT"; fi
 	if [ -n "$WIN_CHECK_DIR" ]; then rm -rf "$WIN_CHECK_DIR"; fi
 	if [ -n "$USAGE_CHECK_DIR" ]; then rm -rf "$USAGE_CHECK_DIR"; fi
+	if [ -n "$ASSERT_SCAN_DIR" ]; then rm -rf "$ASSERT_SCAN_DIR"; fi
 	if [ -n "$GOFMT_OUT" ]; then rm -f "$GOFMT_OUT"; fi
 	if [ -n "$GOFMT_ERR" ]; then rm -f "$GOFMT_ERR"; fi
 	# 占位文件:只在它**仍是**我们放的那一个时才清掉(按内容比对)。
@@ -591,7 +593,7 @@ echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推�
 # 计数变量的赋值发生在**函数体内**(不是子 shell),因此计数能真正累加。
 selfcheck_count=0
 # 期望的自检场景条数。**新增或删除任何一条自检场景,都必须同步改这里** ——
-# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 27 条:
+# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 29 条:
 #   1-3  交叉检查:windows 测试文件对照 / 测试文件类型错 / 源文件类型错
 #   4-9  孤儿包检查:windows·freebsd·js 各一条绿 + 一条红
 #   10   孤儿包检查:目录混包(两个 package 名)必须被抓
@@ -599,15 +601,16 @@ selfcheck_count=0
 #   12   目标平台枚举断言的反向对照:三平台手写清单必须通不过
 #   13-17 第 6 步"真实用例"判定:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓
 #          / 伪造输出包被抓 / 反向对照(对正常包断言"必须在报告里"必须失败)
-#   18-21 第 6 步"断言扫描"判定(#289):有断言的包不误报 / 零断言的包被抓 /
-#          只在注释里提到断言的包被抓 / 反向对照(有断言的包断言"必须在
+#   18-23 第 6 步"断言扫描"判定(#289 + 第二轮终验 P2-1):有断言的包不误报 /
+#          零断言的包被抓 / 只在注释里提到断言的包被抓 / 恒不触发的断言被抓 /
+#          运行期才成立的正常断言不误报 / 反向对照(有断言的包断言"必须在
 #          报告里"必须失败)
-#   22-25 路径排除规则(第十八轮终验 #279):build/ 下的项目代码包必须在门禁
+#   24-27 路径排除规则(第十八轮终验 #279):build/ 下的项目代码包必须在门禁
 #          包集合里 / 类型正确时必须能过编译 / 类型错误时必须被抓 /
 #          Wails 平台脚手架(build/ios)必须继续被排除
-#   26-27 孤儿包候选:build/ 下的包必须在候选里 / testdata/ 下的包必须不在
+#   28-29 孤儿包候选:build/ 下的包必须在候选里 / testdata/ 下的包必须不在
 #          候选里(Go 工具链约定 —— 夹具目录不可见是正确行为)
-SELFCHECK_EXPECTED=27
+SELFCHECK_EXPECTED=29
 
 # selfcheck_ok <标签> <命令...> —— 断言命令必须**成功**(绿方向)。
 selfcheck_ok() {
@@ -1053,7 +1056,7 @@ MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
 	fail "第 6 步判定执行失败(拿不到 go test -json 事件 —— 必须红,不能静默跳过)"
 [ -z "$MISSING" ] || fail "以下包缺少真实执行的用例:$MISSING"
 
-# ---- 第 6 步的第二个判据:包里必须真的有"断言"(不只是"跑过的用例")----
+# ---- 第 6 步的第二个判据:包里必须真的有"**可能触发**的断言" -------------
 #
 # 上面的判据证明的是"**有代码跑过**";它证明不了"**验证过什么**"。
 # 一个**零断言**的用例(只调用函数、不断言)照样会拿到框架的顶层 pass
@@ -1071,9 +1074,9 @@ MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
 # (`go test -json` 不报告),只能静态扫源码。
 #
 # 口径(**必须写清,否则会误报**):
-#   - **按包**判定:包里只要有**一处**断言调用就算达标 —— 不是"每个用例
-#     都要有断言"(那必然误报:表格驱动测试把断言放在子函数/辅助函数里
-#     是常态)。
+#   - **按包**判定:包里只要有**一处**可能触发的断言调用就算达标 ——
+#     不是"每个用例都要有断言"(那必然误报:表格驱动测试把断言放在
+#     子函数/辅助函数里是常态)。
 #   - 断言调用 = ① 惯例接收者(t / tb / tt / t2 …)上的
 #     Error/Errorf/Fatal/Fatalf/Fail/FailNow 方法调用,或
 #     ② 第三方断言包 assert./require. 的调用。
@@ -1081,66 +1084,539 @@ MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
 #     `err.Error()` / `fmt.Errorf()` 满地都是(本仓库实测 73 + 71 处),
 #     扫生产代码等于没有判据。
 #
+# **"可能触发"这条(第二轮终验 P2-1)**:只判"**存在**断言"是不够的 ——
+# 一个包里唯一的用例是
+#     func TestX(t *testing.T) { if 1 != 1 { t.Fatal("不可能") } }
+# 时,断言**永远不会被执行**,但"存在性"判据照样放行 → 9 步门禁全绿
+# = 绕过(终审实测)。所以判据升级为"断言必须**可能触发**":
+# 处在**恒假分支**里的断言不算数(恒假 = 条件能被静态求值成 false:
+# `false` / `1 != 1` / `!true` / `true && false` / 包级布尔常量 false)。
+#
+# 实现:用 go/ast 做静态分析(见下面的 assertscan)。**注释天然不算断言**
+# (AST 里没有注释节点)—— 此前靠 strip_go_comments 去注释,现在不再需要。
+#
 # 已知边界(**有意取舍**,登记在案,不是缺陷):
 #   - 判据是**按包**的:"1 个真断言 + 9 个零断言用例"的包照样通过;
 #   - 接收者名不遵循 t/tb/tt 惯例的 testing.T 认不出来(极罕见);
 #   - 断言写在**非测试文件**里的 testing 助手中(本仓库零命中)认不出来;
-#   - 判据认的是**文本形态**:任何 X.Error( 形态的调用(哪怕 X 不是
-#     testing.T)都算断言 —— **偏松不偏严**,不会造成误报。
-ASSERT_CALL_RE='(^|[^A-Za-z0-9_])(tb|tt|t[0-9]*)\.(Errorf?|Fatalf?|FailNow?|Fail)\(|(^|[^A-Za-z0-9_])(assert|require)\.[A-Za-z_][A-Za-z0-9_]*\('
+#   - 恒假判定只覆盖**常量**表达式:条件里一旦出现运行期变量,就保守地
+#     认为该分支**可能**触发(偏松不偏严,不会造成误报);
+#   - 解析失败的测试文件按"没有断言"计(拿不到证据时偏严 → 门禁红)。
+#
+# 门禁与**自检**走同一个函数 —— 理由同 real_usage_verdict:自检若自己另写
+# 一套判定,将来有人把这里改坏,自检照样绿,盲区就又回来了。
+#
+# 拿不到包清单(go list 失败)→ 返回非 0 → 门禁**红**(fail closed),
+# 绝不"扫不到就当达标"。
 
-# strip_go_comments <文件> → 打印**去掉注释**后的源码(字符串/字符常量里
-# 的内容替换成空串)。
+# ASSERT_SCAN_DIR / ASSERT_SCAN_BIN 是"断言强度扫描器"的编译产物。
+ASSERT_SCAN_DIR=""
+ASSERT_SCAN_BIN=""
+
+# build_assert_scanner 编译断言强度扫描器(go/ast 静态分析)。
 #
-# 为什么必须去注释:本项目的测试文件**大量**在注释里写着"这里应该
-# t.Errorf(...)" —— 文本级扫描会把注释当成断言,判据当场失效(实测:
-# 一个只在注释里提到 t.Fatal 的零断言包,被扫描判成"有断言"而放行)。
-# 注释不是断言,注释里的 t.Errorf **不能**算数。
+# 为什么是"编译一次、多次复用":门禁与自检各要跑一次扫描,每次都
+# `go run` 会重复编译(≈1s/次)。编译产物放在 /tmp,退出时清掉。
 #
-# 为什么不用简单的 sed 's://.*::':字符串里的 "//"(URL、路径)会把
-# **同一行后面真实的断言**一起切掉 —— 判据被削弱(漏报)。这里的 awk
-# 跟踪字符串/字符常量/原始字符串状态:
-#   - 字符串里的 // 与 /* 不算注释;
-#   - 字符串**内容**本身被替换成空串(否则 `msg := "t.Error("` 这种
-#     字符串会被当成断言);
-#   - 跨行的 /* */ 块注释用状态位跨行延续。
-strip_go_comments() {
-	awk '
-	BEGIN { IN_BLOCK = 0; SQ = sprintf("%c", 39) }
-	{
-		out = ""
-		i = 1
-		n = length($0)
-		while (i <= n) {
-			c = substr($0, i, 1)
-			if (IN_BLOCK) {
-				if (c == "*" && substr($0, i + 1, 1) == "/") { IN_BLOCK = 0; i += 2; continue }
-				i++
-				continue
-			}
-			if (c == "/" && substr($0, i + 1, 1) == "/") break
-			if (c == "/" && substr($0, i + 1, 1) == "*") { IN_BLOCK = 1; i += 2; continue }
-			if (c == "\"" || c == SQ || c == "`") {
-				q = c
-				out = out c
-				i++
-				while (i <= n) {
-					c = substr($0, i, 1)
-					if (c == "\\" && q != "`") { i += 2; continue }
-					i++
-					if (c == q) { out = out c; break }
-				}
-				continue
-			}
-			out = out c
-			i++
-		}
-		print out
+# 源码**内嵌在脚本里**:它是门禁判据的一部分,放成仓库里的独立包会
+# 让 `go list ./...` 多出一个包(第 6 步要求每个包都有真实用例 +
+# 有断言)—— 一个"只被门禁调用、自身没有用例"的工具包会与门禁
+# 自己的规则打架。内嵌 + /tmp 编译是这里最省事也最不惹事的做法。
+build_assert_scanner() {
+	[ -n "$ASSERT_SCAN_BIN" ] && [ -x "$ASSERT_SCAN_BIN" ] && return 0
+	[ -n "$SELF_GO_VER" ] || return 1
+	ASSERT_SCAN_DIR=$(mktemp -d /tmp/awo-verify-assertscan.XXXXXX) || return 1
+	printf 'module awo/assertscan\n\ngo %s\n' "$SELF_GO_VER" >"$ASSERT_SCAN_DIR/go.mod"
+	cat >"$ASSERT_SCAN_DIR/main.go" <<'ASSERTSCAN_GOEOF'
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// assertscan:判断测试代码里的断言**是否可能触发**。
+//
+// 输入(manifest):每行 "包导入路径\t测试文件的绝对路径"。
+// 输出:每行 "包导入路径\t断言总数\t可能触发的断言数"。
+
+func main() {
+	pkgs, err := readManifest(os.Stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "assertscan: %v\n", err)
+		os.Exit(1)
 	}
-	' "$1"
+	out := bufio.NewWriter(os.Stdout)
+	defer out.Flush()
+	for _, pkg := range pkgs {
+		total, live := scanPackage(pkg)
+		fmt.Fprintf(out, "%s\t%d\t%d\n", pkg.name, total, live)
+	}
 }
 
-# assert_scan_report <模块目录> <包列表> → 打印"测试代码里没有任何断言"的包
+// readManifest 读入 "包名\t文件" 清单,按包分组(保持出现顺序)。
+func readManifest(r *os.File) ([]*pkgFiles, error) {
+	in := bufio.NewScanner(r)
+	in.Buffer(make([]byte, 1024*1024), 1024*1024)
+	var order []string
+	byName := map[string]*pkgFiles{}
+	for in.Scan() {
+		line := in.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name, path := parts[0], strings.TrimSpace(parts[1])
+		p, ok := byName[name]
+		if !ok {
+			p = &pkgFiles{name: name}
+			byName[name] = p
+			order = append(order, name)
+		}
+		p.paths = append(p.paths, path)
+	}
+	if err := in.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]*pkgFiles, 0, len(order))
+	for _, n := range order {
+		out = append(out, byName[n])
+	}
+	return out, nil
+}
+
+// pkgFiles 是一个包的测试文件列表。
+type pkgFiles struct {
+	name  string
+	paths []string
+}
+
+// constVal 是一个常量(布尔或数值)。
+type constVal struct {
+	isBool bool
+	b      bool
+	isNum  bool
+	n      float64
+}
+
+// scanPackage 扫描一个包的全部测试文件,返回 (断言总数, 可能触发的断言数)。
+//
+// 解析失败的文件按"没有断言"计:拿不到证据时必须偏严(门禁红),
+// 绝不能因为解析失败就当成"有断言"(门禁绿)。
+func scanPackage(pkg *pkgFiles) (int, int) {
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, p := range pkg.paths {
+		f, err := parser.ParseFile(fset, p, nil, 0)
+		if err != nil {
+			continue
+		}
+		files = append(files, f)
+	}
+	// 包级常量(布尔/数值):`if 恒假常量 { ... }` 也是恒假分支。
+	consts := map[string]constVal{}
+	for _, f := range files {
+		for name, v := range fileConsts(f) {
+			consts[name] = v
+		}
+	}
+	total, live := 0, 0
+	for _, f := range files {
+		c := &counter{consts: consts}
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body != nil {
+					c.walk(d.Body, false)
+				}
+			default:
+				c.walk(decl, false)
+			}
+		}
+		total += c.total
+		live += c.live
+	}
+	return total, live
+}
+
+// fileConsts 收集文件里包级 const 的常量值(布尔/数值)。
+func fileConsts(f *ast.File) map[string]constVal {
+	out := map[string]constVal{}
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					continue
+				}
+				if v, ok := constValueOf(vs.Values[i]); ok {
+					out[name.Name] = v
+				}
+			}
+		}
+	}
+	return out
+}
+
+// constValueOf 取一个常量表达式(布尔/数值)。
+func constValueOf(e ast.Expr) (constVal, bool) {
+	switch x := e.(type) {
+	case *ast.Ident:
+		switch x.Name {
+		case "true":
+			return constVal{isBool: true, b: true}, true
+		case "false":
+			return constVal{isBool: true, b: false}, true
+		}
+	case *ast.BasicLit:
+		switch x.Kind {
+		case token.INT:
+			if v, err := strconv.ParseInt(x.Value, 0, 64); err == nil {
+				return constVal{isNum: true, n: float64(v)}, true
+			}
+			if v, err := strconv.ParseUint(x.Value, 0, 64); err == nil {
+				return constVal{isNum: true, n: float64(v)}, true
+			}
+		case token.FLOAT:
+			if v, err := strconv.ParseFloat(x.Value, 64); err == nil {
+				return constVal{isNum: true, n: v}, true
+			}
+		}
+	case *ast.UnaryExpr:
+		if x.Op == token.SUB {
+			if v, ok := constValueOf(x.X); ok && v.isNum {
+				return constVal{isNum: true, n: -v.n}, true
+			}
+		}
+	}
+	return constVal{}, false
+}
+
+// counter 累计断言数。
+type counter struct {
+	consts map[string]constVal
+	total  int
+	live   int
+}
+
+// walk 遍历 AST。dead 表示"当前处在恒假分支里"(该分支里的断言不可能触发)。
+func (c *counter) walk(n ast.Node, dead bool) {
+	if n == nil {
+		return
+	}
+	switch x := n.(type) {
+	case *ast.FuncDecl:
+		if x.Body != nil {
+			c.walk(x.Body, dead)
+		}
+		return
+	case *ast.FuncLit:
+		c.walk(x.Body, dead)
+		return
+	case *ast.IfStmt:
+		if x.Init != nil {
+			c.walk(x.Init, dead)
+		}
+		c.walk(x.Cond, dead)
+		// 条件恒假 → 整个 then 分支不可达。
+		c.walk(x.Body, dead || c.staticallyFalse(x.Cond))
+		if x.Else != nil {
+			// else 分支在 then 不成立时执行:外层的 dead 仍然适用。
+			c.walk(x.Else, dead)
+		}
+		return
+	}
+	ast.Inspect(n, func(m ast.Node) bool {
+		if m == nil {
+			return false
+		}
+		if m == n {
+			return true
+		}
+		switch m.(type) {
+		case *ast.IfStmt, *ast.FuncDecl, *ast.FuncLit:
+			// 交给 walk 处理(它要按 dead 分支传播),不再由 Inspect 下探。
+			c.walk(m, dead)
+			return false
+		}
+		if call, ok := m.(*ast.CallExpr); ok && isAssertionCall(call) {
+			c.total++
+			if !dead {
+				c.live++
+			}
+		}
+		return true
+	})
+}
+
+// isAssertionCall 判断一个调用是不是"断言"。
+//
+// 口径与门禁原有的文本判据一致:
+//
+//   - 惯例接收者(t / tb / tt / t0 / t12 …)上的
+//     Error / Errorf / Fatal / Fatalf / Fail / FailNow;
+//   - assert. / require. 包里的任意函数调用。
+func isAssertionCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	if x.Name == "assert" || x.Name == "require" {
+		return true
+	}
+	if !isTestReceiver(x.Name) {
+		return false
+	}
+	switch sel.Sel.Name {
+	case "Error", "Errorf", "Fatal", "Fatalf", "Fail", "FailNow":
+		return true
+	}
+	return false
+}
+
+// isTestReceiver 判断接收者名是否遵循 testing 惯例(t / tb / tt / tN)。
+func isTestReceiver(name string) bool {
+	if name == "t" || name == "tb" || name == "tt" {
+		return true
+	}
+	if len(name) < 2 || name[0] != 't' {
+		return false
+	}
+	for _, r := range name[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// staticallyFalse 判断条件能否被静态求值成 false。
+func (c *counter) staticallyFalse(e ast.Expr) bool {
+	b := c.evalBool(e)
+	return b.known && !b.v
+}
+
+// boolVal 是一个布尔常量(known=false 表示"求不出来")。
+type boolVal struct {
+	v     bool
+	known bool
+}
+
+// evalBool 静态求值一个布尔表达式。
+//
+// 只处理**常量**运算:布尔字面量、数值字面量的比较、包级布尔常量、
+// ! / && / ||。遇到变量一律返回"求不出来"(→ 保守地认为分支可能触发)。
+func (c *counter) evalBool(e ast.Expr) boolVal {
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return c.evalBool(x.X)
+	case *ast.Ident:
+		switch x.Name {
+		case "true":
+			return boolVal{v: true, known: true}
+		case "false":
+			return boolVal{v: false, known: true}
+		}
+		if v, ok := c.consts[x.Name]; ok && v.isBool {
+			return boolVal{v: v.b, known: true}
+		}
+	case *ast.UnaryExpr:
+		if x.Op == token.NOT {
+			b := c.evalBool(x.X)
+			if b.known {
+				return boolVal{v: !b.v, known: true}
+			}
+		}
+	case *ast.BinaryExpr:
+		switch x.Op {
+		case token.LAND:
+			l := c.evalBool(x.X)
+			if l.known && !l.v {
+				return boolVal{v: false, known: true}
+			}
+			r := c.evalBool(x.Y)
+			if l.known && l.v {
+				return r
+			}
+			if r.known && !r.v {
+				return boolVal{v: false, known: true}
+			}
+			return boolVal{}
+		case token.LOR:
+			l := c.evalBool(x.X)
+			if l.known && l.v {
+				return boolVal{v: true, known: true}
+			}
+			r := c.evalBool(x.Y)
+			if l.known && !l.v {
+				return r
+			}
+			if r.known && r.v {
+				return boolVal{v: true, known: true}
+			}
+			return boolVal{}
+		case token.EQL, token.NEQ, token.LSS, token.GTR, token.LEQ, token.GEQ:
+			return c.evalCompare(x)
+		}
+	}
+	return boolVal{}
+}
+
+// evalCompare 比较两个常量。
+func (c *counter) evalCompare(x *ast.BinaryExpr) boolVal {
+	ln, lok := c.evalNum(x.X)
+	rn, rok := c.evalNum(x.Y)
+	if lok && rok {
+		switch x.Op {
+		case token.EQL:
+			return boolVal{v: ln == rn, known: true}
+		case token.NEQ:
+			return boolVal{v: ln != rn, known: true}
+		case token.LSS:
+			return boolVal{v: ln < rn, known: true}
+		case token.GTR:
+			return boolVal{v: ln > rn, known: true}
+		case token.LEQ:
+			return boolVal{v: ln <= rn, known: true}
+		case token.GEQ:
+			return boolVal{v: ln >= rn, known: true}
+		}
+		return boolVal{}
+	}
+	ls, lsok := c.evalStr(x.X)
+	rs, rsok := c.evalStr(x.Y)
+	if lsok && rsok {
+		switch x.Op {
+		case token.EQL:
+			return boolVal{v: ls == rs, known: true}
+		case token.NEQ:
+			return boolVal{v: ls != rs, known: true}
+		}
+		return boolVal{}
+	}
+	lb := c.evalBool(x.X)
+	rb := c.evalBool(x.Y)
+	if lb.known && rb.known {
+		switch x.Op {
+		case token.EQL:
+			return boolVal{v: lb.v == rb.v, known: true}
+		case token.NEQ:
+			return boolVal{v: lb.v != rb.v, known: true}
+		}
+		return boolVal{}
+	}
+	if isNilIdent(x.X) && isNilIdent(x.Y) {
+		switch x.Op {
+		case token.EQL:
+			return boolVal{v: true, known: true}
+		case token.NEQ:
+			return boolVal{v: false, known: true}
+		}
+	}
+	return boolVal{}
+}
+
+// evalNum 静态求值一个数值表达式。
+func (c *counter) evalNum(e ast.Expr) (float64, bool) {
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return c.evalNum(x.X)
+	case *ast.Ident:
+		if v, ok := c.consts[x.Name]; ok && v.isNum {
+			return v.n, true
+		}
+	case *ast.BasicLit:
+		switch x.Kind {
+		case token.INT:
+			if v, err := strconv.ParseInt(x.Value, 0, 64); err == nil {
+				return float64(v), true
+			}
+			if v, err := strconv.ParseUint(x.Value, 0, 64); err == nil {
+				return float64(v), true
+			}
+		case token.FLOAT:
+			if v, err := strconv.ParseFloat(x.Value, 64); err == nil {
+				return v, true
+			}
+		}
+	case *ast.UnaryExpr:
+		switch x.Op {
+		case token.SUB:
+			if v, ok := c.evalNum(x.X); ok {
+				return -v, true
+			}
+		case token.ADD:
+			return c.evalNum(x.X)
+		}
+	case *ast.BinaryExpr:
+		switch x.Op {
+		case token.ADD, token.SUB, token.MUL, token.QUO:
+			l, lok := c.evalNum(x.X)
+			r, rok := c.evalNum(x.Y)
+			if lok && rok {
+				switch x.Op {
+				case token.ADD:
+					return l + r, true
+				case token.SUB:
+					return l - r, true
+				case token.MUL:
+					return l * r, true
+				case token.QUO:
+					if r != 0 {
+						return l / r, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// evalStr 静态求值一个字符串常量。
+func (c *counter) evalStr(e ast.Expr) (string, bool) {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	v, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return v, true
+}
+
+// isNilIdent 判断表达式是不是 nil 字面量。
+func isNilIdent(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "nil"
+}
+ASSERTSCAN_GOEOF
+	( cd "$ASSERT_SCAN_DIR" && go build -o "$ASSERT_SCAN_DIR/assertscan" . ) || return 1
+	ASSERT_SCAN_BIN="$ASSERT_SCAN_DIR/assertscan"
+	return 0
+}
+
+# assert_scan_report <模块目录> <包列表> → 打印"测试代码里没有**可能触发**的断言"的包
 #   (每行 "  <pkg>: <原因>");空输出 = 全部达标。
 #
 # 门禁与**自检**走同一个函数 —— 理由同 real_usage_verdict:自检若自己另写
@@ -1151,31 +1627,44 @@ strip_go_comments() {
 assert_scan_report() {
 	as_dir="$1"
 	as_pkgs="$2"
+	build_assert_scanner || return 1
 	as_list=$(cd "$as_dir" && go list -f '{{.ImportPath}}{{"\037"}}{{.Dir}}{{"\037"}}{{range .TestGoFiles}}{{.}} {{end}}{{"\037"}}{{range .XTestGoFiles}}{{.}} {{end}}' $as_pkgs 2>/dev/null) || return 1
 	[ -n "$as_list" ] || return 1
+	as_manifest=$(mktemp /tmp/awo-assert-manifest.XXXXXX) || return 1
 	printf '%s\n' "$as_list" | while IFS=$'\037' read -r as_pkg as_pkgdir as_test as_xtest; do
 		[ -n "$as_pkg" ] || continue
-		as_files="$as_test $as_xtest"
 		# **没有测试文件的包不归这里管**:它们由"真实用例"判据报出来
 		# (0 个真实用例 / 没有测试文件),不重复报。
+		as_files="$as_test $as_xtest"
 		[ -n "$(printf '%s' "$as_files" | tr -d ' ')" ] || continue
-		as_hit=""
 		for as_f in $as_files; do
 			# 文件名是**相对于包目录**的(go list 给的是基名)。
 			[ -f "$as_pkgdir/$as_f" ] || continue
-			if strip_go_comments "$as_pkgdir/$as_f" | grep -qE "$ASSERT_CALL_RE"; then
-				as_hit="$as_f"
-				break
-			fi
+			printf '%s\t%s\n' "$as_pkg" "$as_pkgdir/$as_f"
 		done
-		[ -n "$as_hit" ] && continue
-		printf "  %s: 测试代码里没有任何断言(用例跑了,但什么都没验证)\n" "$as_pkg"
-	done
+	done >"$as_manifest"
+	as_scan=$("$ASSERT_SCAN_BIN" <"$as_manifest") || {
+		rm -f "$as_manifest"
+		return 1
+	}
+	rm -f "$as_manifest"
+	printf '%s\n' "$as_scan" | awk -F'\t' '
+		{ tot[$1] += $2; live[$1] += $3; seen[$1] = 1 }
+		END {
+			for (p in seen) {
+				if (live[p] > 0) continue
+				if (tot[p] == 0) {
+					print "  " p ": 测试代码里没有任何断言(用例跑了,但什么都没验证)"
+				} else {
+					print "  " p ": 测试代码里的断言都在恒假分支里,永远不会被触发(等价于没有断言)"
+				}
+			}
+		}' | sort
 }
 
 NO_ASSERT=$(assert_scan_report "$ROOT" "$CHECK_PKGS") ||
 	fail "第 6 步的断言扫描执行失败(拿不到包清单 —— 必须红,不能静默跳过)"
-[ -z "$NO_ASSERT" ] || fail "以下包的测试代码里没有任何断言:$NO_ASSERT"
+[ -z "$NO_ASSERT" ] || fail "以下包的测试代码里没有可能触发的断言:$NO_ASSERT"
 
 # ---- 门禁自检:第 6 步的判定本身必须真的能抓到 0 用例 / 全 skip / 伪造输出 -
 # 为什么必须有这一段:第 6 步是门禁里**最复杂**的一段判定(框架事件 + 顶层/
@@ -1198,7 +1687,8 @@ NO_ASSERT=$(assert_scan_report "$ROOT" "$CHECK_PKGS") ||
 # 成本:两次小模块的 `go test` ≈ 2s(实测)。
 USAGE_CHECK_DIR=$(mktemp -d /tmp/awo-verify-usagecheck.XXXXXX)
 mkdir -p "$USAGE_CHECK_DIR/good" "$USAGE_CHECK_DIR/zero" "$USAGE_CHECK_DIR/skip" "$USAGE_CHECK_DIR/fake" \
-	"$USAGE_CHECK_DIR/noassert" "$USAGE_CHECK_DIR/asserted" "$USAGE_CHECK_DIR/commentonly"
+	"$USAGE_CHECK_DIR/noassert" "$USAGE_CHECK_DIR/asserted" "$USAGE_CHECK_DIR/commentonly" \
+	"$USAGE_CHECK_DIR/deadassert" "$USAGE_CHECK_DIR/liveassert"
 printf 'module awo/usagecheck\n\ngo %s\n' "$SELF_GO_VER" >"$USAGE_CHECK_DIR/go.mod"
 printf 'package good\n\nimport "testing"\n\nfunc TestGood(t *testing.T) { _ = 1 }\n' >"$USAGE_CHECK_DIR/good/good_test.go"
 printf 'package zero\n\nfunc helperOnly() {}\n' >"$USAGE_CHECK_DIR/zero/zero_test.go"
@@ -1210,7 +1700,18 @@ printf 'package fake\n\nimport (\n\t"fmt"\n\t"testing"\n)\n\nfunc TestForged(t *
 # 框架照样给它顶层 pass 事件 → "真实用例"判据放行它(#289 的绕过本身)。
 printf 'package noassert\n\nimport "testing"\n\nfunc TestNoAssert(t *testing.T) {\n\t_ = 1\n}\n' >"$USAGE_CHECK_DIR/noassert/noassert_test.go"
 # 有断言的包:断言扫描的**对照组**(绿方向 —— 没有它,下面两条红断言是恒真的)。
-printf 'package asserted\n\nimport "testing"\n\nfunc TestAsserted(t *testing.T) {\n\tif 1 != 1 {\n\t\tt.Fatal("不可能")\n\t}\n}\n' >"$USAGE_CHECK_DIR/asserted/asserted_test.go"
+#
+# 注意:这里的断言**必须可能触发** —— 值取自运行期变量(got),不是常量
+# 表达式。此前这个夹具写的是 `if 1 != 1 { t.Fatal("不可能") }`,那正是
+# 第二轮终验 P2-1 抓到的**绕过形态本身**:断言永远不触发,判据却只看
+# "存在性" → 放行。判据升级为"可能触发"后,它必须换成一条真断言。
+printf 'package asserted\n\nimport "testing"\n\nfunc TestAsserted(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/asserted/asserted_test.go"
+# 恒不触发的断言包:唯一的断言在**恒假分支**里(永远不会被执行)——
+# 这正是第二轮终验 P2-1 的绕过场景本身,判据必须把它抓出来。
+printf 'package deadassert\n\nimport "testing"\n\nfunc TestDeadAssert(t *testing.T) {\n\tif 1 != 1 {\n\t\tt.Fatal("不可能")\n\t}\n}\n' >"$USAGE_CHECK_DIR/deadassert/deadassert_test.go"
+# 正常断言包(绿对照):断言在**运行期才成立**的 if 分支里 ——
+# 新判据绝不能把这种正常写法误判成"恒不触发"(否则正常代码全被挡在门外)。
+printf 'package liveassert\n\nimport "testing"\n\nfunc TestLiveAssert(t *testing.T) {\n\tcases := []int{1, 2, 3}\n\tfor _, c := range cases {\n\t\tif c <= 0 {\n\t\t\tt.Fatalf("非正数: %%d", c)\n\t\t}\n\t}\n}\n' >"$USAGE_CHECK_DIR/liveassert/liveassert_test.go"
 # 只在**注释里**提到断言的包:注释不是断言 —— 文本级扫描必须先把注释去掉,
 # 否则这个包会被判成"有断言"而放行(实测:本仓库的测试文件大量在注释里
 # 写着"这里应该 t.Errorf(...)",不处理注释等于判据失效)。
@@ -1273,11 +1774,15 @@ selfcheck_red "第 6 步判定必须能区分:正常包不在报告里 → 断�
 #      那条红断言就是恒真的);
 #   2. 零断言的包 → 必须被报出来(红方向:证明判据真的在区分);
 #   3. 反向对照:对有断言的包断言"必须在报告里"必须失败(证明它能判负)。
-ASSERT_REPORT=$(assert_scan_report "$USAGE_CHECK_DIR" "awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip awo/usagecheck/fake awo/usagecheck/noassert awo/usagecheck/asserted awo/usagecheck/commentonly") ||
+ASSERT_REPORT=$(assert_scan_report "$USAGE_CHECK_DIR" "awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip awo/usagecheck/fake awo/usagecheck/noassert awo/usagecheck/asserted awo/usagecheck/commentonly awo/usagecheck/deadassert awo/usagecheck/liveassert") ||
 	fail "门禁自检失败:第 6 步的断言扫描函数自身执行失败(自检环境不可用 —— 必须红,不能静默跳过)"
 selfcheck_ok "第 6 步断言扫描:有断言的包不得被误报(否则新判据把正常代码挡在门外)" usage_expect "awo/usagecheck/asserted" "$ASSERT_REPORT" "no"
 selfcheck_ok "第 6 步断言扫描:零断言的包必须被抓(否则'新增一个恒真测试包'就能绕过门禁 —— #289 的绕过本身)" usage_expect "awo/usagecheck/noassert" "$ASSERT_REPORT" "yes" "没有任何断言"
 selfcheck_ok "第 6 步断言扫描:只在注释里提到断言的包必须被抓(注释不是断言 —— 否则文本扫描等于没有判据)" usage_expect "awo/usagecheck/commentonly" "$ASSERT_REPORT" "yes" "没有任何断言"
+# 第二轮终验 P2-1 的绕过场景本身:断言**存在**,但永远不会被触发。
+selfcheck_ok "第 6 步断言扫描:恒不触发的断言(在恒假分支里)必须被抓(否则'新增一个恒真测试包'就能绕过门禁 —— 终验 P2-1 的绕过本身)" usage_expect "awo/usagecheck/deadassert" "$ASSERT_REPORT" "yes" "恒假分支"
+# 绿对照:正常分支里的断言不得被误判成"恒不触发"(否则新判据把正常代码全挡在门外)。
+selfcheck_ok "第 6 步断言扫描:运行期才成立的正常断言不得被误判成恒不触发(新判据不能过严)" usage_expect "awo/usagecheck/liveassert" "$ASSERT_REPORT" "no"
 selfcheck_red "第 6 步断言扫描必须能区分:有断言的包不在报告里 → 断言'在报告里'必须失败" usage_expect "awo/usagecheck/asserted" "$ASSERT_REPORT" "yes"
 rm -rf "$USAGE_CHECK_DIR"
 USAGE_CHECK_DIR=""

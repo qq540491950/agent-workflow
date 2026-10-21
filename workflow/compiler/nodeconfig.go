@@ -1,6 +1,10 @@
 package compiler
 
-import "agentworkflow/workflow/model"
+import (
+	"slices"
+
+	"agentworkflow/workflow/model"
+)
 
 // 本文件是"节点类型 → 配置契约"的**唯一定义**(AGENTS.md 硬性约定 #13:
 // 校验期与运行期必须同源 —— 条件表达式的可用变量集合、节点类型的必填配置
@@ -214,6 +218,52 @@ var globalConfigKeys = []string{NodeEnabledKey}
 
 // GlobalConfigKeys 返回全局配置键(副本)。
 func GlobalConfigKeys() []string { return append([]string(nil), globalConfigKeys...) }
+
+// TimeoutSecondsKey 是节点级超时配置键(agent / script 节点)。
+const TimeoutSecondsKey = "timeout_seconds"
+
+// timeout_seconds 的取值范围(**唯一来源**,约定 #13:校验期与运行期同源)。
+//
+// 上界的作用是**防止 time.Duration 溢出**。运行期把秒数换算成
+// time.Duration(raw)*time.Second(raw 是 int,乘数是 1e9):
+//
+//   - raw=10000000000        → 换算后是 -2346317h47m53.7s(负数)
+//     → context.WithTimeout 拿到负的 deadline → **立即超时**;
+//   - raw=4611686018427387904 → 换算后是 0s → deadline = 现在 → **立即超时**;
+//   - raw=1e20(float)       → int(1e20) 溢出成负 → 运行期的
+//     `req.Timeout > 0` 判假 → **静默改用适配器默认 600s**
+//     (用户配的值根本没生效,且界面与日志里看不出任何异常)。
+//
+// 三条路径的共同点:用户配的超时**没有按自己配的值生效**。上界取
+// 86400(24h)让换算结果恒为正、且远小于 int64 上限(86400*1e9 = 8.64e13)。
+//
+// 下界取 **0**:0 的语义是"**不设节点超时**"(运行期按 `req.Timeout > 0`
+// 判断,走适配器默认超时)—— 与运行期口径一致。把它判成非法就是
+// "用户被自己的校验器挡住"(约定 13 的反例),存量工作流里显式写 0 的
+// 会直接存不下去。
+const (
+	// TimeoutSecondsMin 是 timeout_seconds 的最小值(0 = 不设节点超时)。
+	TimeoutSecondsMin = 0
+	// TimeoutSecondsMax 是 timeout_seconds 的最大值(24 小时)。
+	TimeoutSecondsMax = 86400
+)
+
+// TimeoutSecondsRange 返回 timeout_seconds 的取值范围(min, max)。
+func TimeoutSecondsRange() (int, int) { return TimeoutSecondsMin, TimeoutSecondsMax }
+
+// HasTimeoutSecondsKey 报告该节点类型的契约里是否声明了 timeout_seconds。
+//
+// 唯一来源:nodeConfigSpecs(约定 #13)。校验期只对**声明了这个键**的节点
+// 类型查取值范围 —— 别处的 timeout_seconds 是"未识别的键",由既有的
+// UNKNOWN_NODE_CONFIG 警告处理(不重复报)。
+func HasTimeoutSecondsKey(t model.NodeType) bool {
+	spec, ok := NodeConfigSpecFor(t)
+	if !ok {
+		return false
+	}
+	return slices.Contains(spec.Required, TimeoutSecondsKey) ||
+		slices.Contains(spec.Optional, TimeoutSecondsKey)
+}
 
 // gitOperations 是 git 节点支持的 operation 取值。
 //

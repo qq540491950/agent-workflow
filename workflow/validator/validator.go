@@ -93,6 +93,33 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 			lv, strings.Join(compiler.LoopLimitStrategies(), "|"))
 	}
 
+	// 落库前的数值必须是**有限**的(第二轮 P1-1)。
+	//
+	// 实测缺陷:导入一份带 `.nan` 的 DSL(goccy/go-yaml 按 YAML 1.1 合法
+	// 解析 `.nan` / `.inf`,解析器不报错)→ json.Marshal 报错并返回
+	// **空字节** → 整张 variables map 与版本快照被写成空串 → 一个坏值
+	// **连坐清空**旁边合法的值 → 运行期 variables 为空 → 模板变量渲染
+	// 空串(有 node.warning),**条件变量则零告警** → 条件恒假 → 静默走错
+	// 分支,执行仍 COMPLETED(约定 14:"该失败却成功"等同 P0)。
+	//
+	// 校验期拦住它,用户导入时就看到明确的错误,而不是"导入成功但变量
+	// 全没了"。持久层是**兜底**(序列化失败即报错,见 persistence 的
+	// marshalJSON),校验期是用户能看见的那一层。
+	//
+	// 错误码复用 INVALID_NODE:前端 CODE_HINTS 已有该码,不必同步前端
+	// (约定 10 的双模式契约)。
+	if path, bad := findNonFinite(wf.Variables, "variables"); bad {
+		addErr("INVALID_NODE", "", "%s 的值必须是有限数值(不能是 NaN 或 Inf)", path)
+	}
+	for _, n := range wf.Nodes {
+		if path, bad := findNonFinite(n.Config, "节点 "+n.ID+" 的配置"); bad {
+			addErr("INVALID_NODE", n.ID, "%s 的值必须是有限数值(不能是 NaN 或 Inf)", path)
+		}
+	}
+	if path, bad := findNonFinite(wf.Permission, "permissions"); bad {
+		addErr("INVALID_NODE", "", "%s 的值必须是有限数值(不能是 NaN 或 Inf)", path)
+	}
+
 	nodeIDs := make(map[string]bool, len(wf.Nodes))
 	nodeByID := make(map[string]model.Node, len(wf.Nodes))
 	for _, n := range wf.Nodes {
@@ -204,6 +231,47 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 	}
 
 	return res
+}
+
+// findNonFinite 递归查找一个值里**第一个**非有限数值(NaN / ±Inf)。
+//
+// 返回 (路径, true) 表示找到了;路径形如 "variables.env" 或
+// "节点 n1 的配置.timeout_seconds",便于用户直接定位。
+//
+// 为什么必须查:不可 JSON 化的值一旦落库,序列化会失败并返回**空字节**
+// → 整列变空串 → 一个坏值连坐清空整张 map(第二轮 P1-1,实测)。
+//
+// 覆盖的数值形态:float32 / float64(NaN/Inf 的实际来源)与 json.Number
+// (字符串里装了 "NaN" 的形态);int 系与 uint 系天然有限,不必查。
+func findNonFinite(v any, path string) (string, bool) {
+	switch t := v.(type) {
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return path, true
+		}
+	case float32:
+		f := float64(t)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return path, true
+		}
+	case json.Number:
+		if f, err := t.Float64(); err == nil && (math.IsNaN(f) || math.IsInf(f, 0)) {
+			return path, true
+		}
+	case map[string]any:
+		for k, item := range t {
+			if p, bad := findNonFinite(item, path+"."+k); bad {
+				return p, true
+			}
+		}
+	case []any:
+		for i, item := range t {
+			if p, bad := findNonFinite(item, fmt.Sprintf("%s[%d]", path, i)); bad {
+				return p, true
+			}
+		}
+	}
+	return "", false
 }
 
 // missingConfigByKey 把"必填配置键"映射到校验错误码与提示语。
@@ -338,6 +406,15 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 	// 逐个子键校验会误伤大量合法写法(见 knownConfigKeys 的说明)。
 	validateRetrySubKeys(n, spec, addErr)
 
+	// timeout_seconds 的取值范围(第二轮 P2-2)。
+	//
+	// 运行期没有上界 → time.Duration 溢出(见 compiler/nodeconfig.go 里
+	// TimeoutSecondsMax 的注释):轻则立即超时,重则静默改用适配器默认超时
+	// —— 用户配的值**没按自己配的生效**,而界面与日志里看不出异常。
+	//
+	// 范围本身只有一份来源:compiler.TimeoutSecondsMin / Max(约定 13)。
+	validateTimeoutSeconds(n, spec, addErr)
+
 	switch n.Type {
 	case model.NodeTypeAgent:
 		if str("agent") != "" && agents != nil && !agents(str("agent")) {
@@ -413,6 +490,95 @@ func validateRetrySubKeys(n model.Node, spec compiler.NodeConfigSpec,
 				"节点 %q 的 retry.backoff 必须是字符串(fixed 或 exponential,实际是 %T)", n.ID, v)
 		}
 	}
+}
+
+// validateTimeoutSeconds 校验 timeout_seconds 的取值范围(约定 13)。
+//
+// 运行期口径(workflow/runtime/executor.go 的 cfgInt + `req.Timeout > 0`):
+//
+//   - 值必须是**整数秒**:运行期按秒换算成 time.Duration,小数会被截断
+//     (静默改写用户配置);
+//   - 值必须是**数值**:字符串 "30" 运行期读成 0 = 静默改用适配器默认
+//     超时(用户配的 30 秒根本没生效,且没有任何告警);
+//   - 取值范围 0..86400(唯一来源:compiler.TimeoutSecondsMin / Max):
+//     上界防 time.Duration 溢出,下界 0 = "不设节点超时"(与运行期口径
+//     一致,不能判成非法)。
+//
+// 错误码复用 INVALID_NODE:前端 CODE_HINTS 已有该码 —— 不新增码就不用
+// 同步前端(约定 10 的双模式契约)。
+//
+// 只对**声明了 timeout_seconds** 的节点类型查(唯一来源:契约表的
+// Required / Optional):别处的同名键属于"未识别的键",由既有的
+// UNKNOWN_NODE_CONFIG 警告处理,不重复报。
+func validateTimeoutSeconds(n model.Node, spec compiler.NodeConfigSpec,
+	addErr func(code, node, format string, args ...any)) {
+	if !slices.Contains(spec.Required, compiler.TimeoutSecondsKey) &&
+		!slices.Contains(spec.Optional, compiler.TimeoutSecondsKey) {
+		return
+	}
+	raw, present := n.Config[compiler.TimeoutSecondsKey]
+	if !present {
+		return
+	}
+	f, ok := numericValue(raw)
+	if !ok {
+		addErr("INVALID_NODE", n.ID,
+			"节点 %q 的 %s 必须是整数秒(实际是 %T)", n.ID, compiler.TimeoutSecondsKey, raw)
+		return
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		// 非有限值由"数值必须有限"那条规则报(不重复报)。
+		return
+	}
+	if f != math.Trunc(f) {
+		addErr("INVALID_NODE", n.ID,
+			"节点 %q 的 %s 必须是整数秒(实际是 %v)", n.ID, compiler.TimeoutSecondsKey, f)
+		return
+	}
+	if int64(f) < compiler.TimeoutSecondsMin || int64(f) > compiler.TimeoutSecondsMax {
+		addErr("INVALID_NODE", n.ID,
+			"节点 %q 的 %s 必须在 %d..%d 之间(实际是 %v)",
+			n.ID, compiler.TimeoutSecondsKey, compiler.TimeoutSecondsMin, compiler.TimeoutSecondsMax, f)
+	}
+}
+
+// numericValue 取一个配置值的数值(int / uint / float / json.Number 形态)。
+//
+// ok=false 表示"这个值不是数值"(字符串 / 布尔 / nil …)。
+func numericValue(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int8:
+		return float64(n), true
+	case int16:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint8:
+		return float64(n), true
+	case uint16:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case float32:
+		return float64(n), true
+	case float64:
+		return n, true
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	}
+	return 0, false
 }
 
 // isNonNegativeInt 判定一个值是不是非负整数。

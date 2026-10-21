@@ -22,15 +22,34 @@ import (
 // version(POST /api/workflows 直接反序列化客户端 JSON),伪造 99 会写出
 // v100 并留下伪造的版本快照,重复提交还会因 workflow_versions 的唯一
 // 约束被 INSERT OR REPLACE 静默覆盖,版本历史失真且无任何告警。
+//
+// **序列化失败即报错**:落库的每一列都由 marshalJSON 产出,任何一个值
+// 不可 JSON 化(NaN/Inf/循环引用)都会让**整次保存失败**,绝不写出
+// 半截或空串(见 marshalJSON 的注释)。
 func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 	now := nowStr()
 	wf.UpdatedAt = now
 
-	variables, _ := json.Marshal(orEmpty(wf.Variables))
-	nodes, _ := json.Marshal(wf.Nodes)
-	edges, _ := json.Marshal(wf.Edges)
-	settings, _ := json.Marshal(wf.Settings)
-	permData, _ := json.Marshal(orEmpty(wf.Permission))
+	variables, err := marshalJSON(orEmpty(wf.Variables))
+	if err != nil {
+		return wrap(err)
+	}
+	nodes, err := marshalJSON(wf.Nodes)
+	if err != nil {
+		return wrap(err)
+	}
+	edges, err := marshalJSON(wf.Edges)
+	if err != nil {
+		return wrap(err)
+	}
+	settings, err := marshalJSON(wf.Settings)
+	if err != nil {
+		return wrap(err)
+	}
+	permData, err := marshalJSON(orEmpty(wf.Permission))
+	if err != nil {
+		return wrap(err)
+	}
 	enabled := 0
 	if wf.Enabled {
 		enabled = 1
@@ -90,7 +109,10 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 	if bumpVersion || existing == 0 {
 		doc := dsl.FromModel(wf)
 		dslText, _ := doc.EncodeYAML()
-		snapshot, _ := json.Marshal(wf)
+		snapshot, err := marshalJSON(wf)
+		if err != nil {
+			return wrap(err)
+		}
 		_, err = tx.Exec(`INSERT INTO workflow_versions (workflow_id,version,dsl_text,snapshot_json,created_at) VALUES (?,?,?,?,?)`,
 			wf.ID, wf.Version, string(dslText), string(snapshot), now)
 		if err != nil {
@@ -226,6 +248,11 @@ type rowScanner interface{ Scan(dest ...any) error }
 // 空串 = 空值(某些列的默认值就是空串,例如 executions.snapshot_json
 // DEFAULT ”),不算损坏。
 //
+// **空串特别要当"空"而不是"坏"**:上一轮的 bug(序列化失败被吞)往老库里
+// 写进了空串的 variables_json / snapshot_json。读出口若把它判成损坏,
+// 那些老工作流会**直接打不开**(向后兼容是硬要求)—— 所以这里宽容,
+// 由**写**出口保证不再产生空串(见 marshalJSON)。
+//
 // 非法 JSON → 返回错误,**不**静默退化成零值。
 //
 // 损坏的后果分两类,决定"失败"还是"降级":
@@ -354,17 +381,32 @@ func execUpsertSetClause() string {
 // API,其冲突分支必须有一个确定的、"不推翻既有裁决"的语义,而不是
 // "最后写入者赢"。详见 execStateGuardSQL 的注释。
 func (d *DB) SaveExecution(e *model.Execution) error {
-	variables, _ := json.Marshal(orEmpty(e.Variables))
-	iterations := anyMapInt(e.Iterations)
-	nodeStates := anyMapStr(e.NodeStates)
-	stateData := anyMapAny(e.StateData)
+	variables, err := marshalJSON(orEmpty(e.Variables))
+	if err != nil {
+		return wrap(err)
+	}
+	iterations, err := anyMapInt(e.Iterations)
+	if err != nil {
+		return wrap(err)
+	}
+	nodeStates, err := anyMapStr(e.NodeStates)
+	if err != nil {
+		return wrap(err)
+	}
+	stateData, err := anyMapAny(e.StateData)
+	if err != nil {
+		return wrap(err)
+	}
 	var snapshot []byte
 	if e.Snapshot != nil {
-		snapshot, _ = json.Marshal(e.Snapshot)
+		snapshot, err = marshalJSON(e.Snapshot)
+		if err != nil {
+			return wrap(err)
+		}
 	}
 	// 占位符由列清单推导:列数与占位符数不可能再各自漂移。
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(execColumns(ExecInsertColumns))), ",")
-	_, err := d.sql.Exec(`INSERT INTO executions (`+ExecInsertColumns+`)
+	_, err = d.sql.Exec(`INSERT INTO executions (`+ExecInsertColumns+`)
 		VALUES (`+placeholders+`)
 		ON CONFLICT(id) DO UPDATE SET
 			state=`+execStateGuardSQL+`, `+execUpsertSetClause(),
@@ -672,9 +714,33 @@ func (d *DB) ListExecutionNodes(executionID string) ([]*model.ExecutionNode, err
 }
 
 // SaveEvent 持久化 UI 事件(审计与恢复)。
+//
+// **载荷不可 JSON 化时(NaN/Inf)不写空串**:写空串会让审计记录凭空变成
+// "没有载荷",与"载荷本来就是空的"无法区分(约定 14:静默丢数据)。
+// 改为落一条**自带说明**的占位载荷 + 一条 WARN:事件本身仍在审计流里
+// (审计流缺一条记录比记录里少一个字段更糟),且"载荷丢了"这件事在表里
+// 与日志里都看得见。
+//
+// 为什么这里**不**用"失败即返回错误"(其它列都用它):运行期对"事件落库
+// 失败"已有既定反应(计数 + ERROR 日志 + 发一条 runtime.error 事件,
+// 见 workflow/runtime/engine.go 的 onEventPersistFailed),而那条 runtime.error
+// 会改变 SSE 流的可见内容 —— api/sse_marshal_test.go 正是按"流里不得
+// 出现该执行 ID"来断言的(SSE 契约归 api 层所有)。本轮 api/** 由别的
+// 子代理在改(不可改动),因此事件列走"可见降级"而不是"失败"。
+//
+// 待办(需与 api 层一并处理):把这里改回"失败即返回错误",并同步把
+// api/sse_marshal_test.go 的断言从"流里不得出现执行 ID"精化成"失败
+// 的事件不得被当作**正常事件**发出"(runtime.error 是显式的失败信号,
+// 带上执行 ID 是它的价值所在)。
 func (d *DB) SaveEvent(ev event.UIEvent) error {
-	data, _ := json.Marshal(ev.Data)
-	_, err := d.sql.Exec(`INSERT INTO events (execution_id,node_id,type,data_json,created_at) VALUES (?,?,?,?,?)`,
+	data, err := marshalJSON(ev.Data)
+	if err != nil {
+		logx.Warn("事件载荷含不可 JSON 化的值(NaN/Inf),已按占位载荷落库",
+			"type", ev.Type, "execution", ev.ExecutionID, "node", ev.NodeID,
+			"error", err.Error())
+		data = []byte(`{"__unserializable__":"事件载荷含 NaN/Inf,无法 JSON 化,已按占位落库(原始载荷未保存)"}`)
+	}
+	_, err = d.sql.Exec(`INSERT INTO events (execution_id,node_id,type,data_json,created_at) VALUES (?,?,?,?,?)`,
 		ev.ExecutionID, ev.NodeID, ev.Type, string(data), ev.Timestamp.Format(time.RFC3339Nano))
 	return wrap(err)
 }
@@ -952,7 +1018,10 @@ func (d *DB) GetSetting(key string, out any) error {
 }
 
 func (d *DB) SaveSetting(key string, value any) error {
-	raw, _ := json.Marshal(value)
+	raw, err := marshalJSON(value)
+	if err != nil {
+		return wrap(err)
+	}
 	stmt := `INSERT OR REPLACE INTO settings (key,value_json) VALUES (?,?)`
 	// 注入点:设置项写入失败必须让调用方感知(见
 	// TestSetSettingFailureDoesNotFakeSuccess)——上层据此保持内存态不变,
@@ -960,11 +1029,38 @@ func (d *DB) SaveSetting(key string, value any) error {
 	if err := d.checkFault(stmt); err != nil {
 		return wrap(err)
 	}
-	_, err := d.sql.Exec(stmt, key, string(raw))
+	_, err = d.sql.Exec(stmt, key, string(raw))
 	return wrap(err)
 }
 
 // ---- helpers ----
+
+// marshalJSON 把一个值序列化成落库用的 JSON 文本。
+//
+// **失败即报错,绝不返回空字节** —— 这是本文件最重要的一条约定。
+//
+// 为什么:json.Marshal 遇到不可 JSON 化的值(NaN / ±Inf / 循环引用)
+// 会**报错并返回空字节**(不是部分 JSON)。此前所有调用点都写成
+// `_ = json.Marshal(...)`,把错误吞掉 → 列被写成 ""。
+//
+// 后果(第二轮 P1-1,实测):YAML 里的一个 `.nan` 让整个 variables map
+// 与版本快照**静默变空串** —— 旁边合法的 `limit: 10` 一起丢(一个坏值
+// 连坐清空整张 map);读回来是空 map;条件变量因此恒假 → 静默走错分支,
+// 执行仍 COMPLETED(约定 14:"该失败却成功"等同 P0)。
+//
+// 现在:序列化失败 → 整次保存失败 → 用户看见明确的错误,而不是一份
+// "看起来保存成功、其实内容全没了"的工作流。
+//
+// **读出口不收紧**:老库里可能已经有空串的 variables_json(上一轮的 bug
+// 写进去的)—— 读时把它当**空 map**,不是错误(见 decodeJSONColumn)。
+// 写必须失败即报错,读必须宽容 —— 两边口径不同是刻意的。
+func marshalJSON(v any) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("序列化失败(值不可 JSON 化,常见于 NaN/Inf): %w", err)
+	}
+	return b, nil
+}
 
 func orEmpty(m map[string]any) map[string]any {
 	if m == nil {
@@ -973,28 +1069,37 @@ func orEmpty(m map[string]any) map[string]any {
 	return m
 }
 
-func anyMapInt(m map[string]int) string {
+func anyMapInt(m map[string]int) (string, error) {
 	if m == nil {
-		return "{}"
+		return "{}", nil
 	}
-	b, _ := json.Marshal(m)
-	return string(b)
+	b, err := marshalJSON(m)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
-func anyMapStr(m map[string]string) string {
+func anyMapStr(m map[string]string) (string, error) {
 	if m == nil {
-		return "{}"
+		return "{}", nil
 	}
-	b, _ := json.Marshal(m)
-	return string(b)
+	b, err := marshalJSON(m)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
-func anyMapAny(m map[string]any) string {
+func anyMapAny(m map[string]any) (string, error) {
 	if m == nil {
-		return "{}"
+		return "{}", nil
 	}
-	b, _ := json.Marshal(m)
-	return string(b)
+	b, err := marshalJSON(m)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 func nowStr() string { return time.Now().Format(time.RFC3339Nano) }
