@@ -43,6 +43,148 @@ func AllNodeTypes() []NodeType {
 	}
 }
 
+// ---- agent 节点的 mode 取值域(唯一定义处) ----
+//
+// mode 是 agent 节点上"这个节点要干什么"的声明。它的取值域此前散落在
+// **三份互不相同的清单**里:
+//
+//   - agent.ModeRequiresWrite:execute|fix|submit —— 决定要不要写权限;
+//   - contextx.SaveNodeOutput/BuildWithSlots:plan|review|execute|fix|skill|test
+//     —— 决定产出进哪个上下文槽位;
+//   - 前端 Designer 的下拉:plan|execute|review|fix|test|submit —— 用户能选的。
+//
+// 三份清单的成员不一样,于是同一个 mode 在不同层的含义不同:
+//   - `mode: submit` 在上下文层没有槽位(产出不进上下文链);
+//   - `mode: skill` 是**节点类型**不是 agent 的 mode,却出现在上下文层;
+//   - 任何**拼错**的 mode(exectue / banana)在校验期与运行期都被放行,
+//     且因为"不在只读清单里"而被跳过写权限检查 —— 用户写错一个词,
+//     节点照常执行,权限收紧对它无效(约定 14)。
+//
+// 现在取值域只有这一份:校验期(validator)、运行期(runtime/executor)、
+// 写权限判定(agent.ModeRequiresWrite)与上下文槽位映射(contextx)全部
+// 引用它(约定 13:校验期与运行期必须同源)。
+//
+// 为什么放在 model:model 是最底层的领域模型,只依赖标准库 ——
+// agent / contextx / compiler / validator / runtime 都能引它而不成环
+// (compiler 依赖 agent,agent 不能再依赖 compiler)。
+
+// agent 节点的合法 mode 取值。
+const (
+	// ModePlan 只出方案。
+	ModePlan = "plan"
+	// ModeReview 只做评审(产出评审结论与问题清单)。
+	ModeReview = "review"
+	// ModeExecute 执行任务(改文件)。
+	ModeExecute = "execute"
+	// ModeFix 修复问题(改文件)。
+	ModeFix = "fix"
+	// ModeTest 只跑测试。
+	ModeTest = "test"
+	// ModeSubmit 提交代码(git commit,伴随写文件)。
+	ModeSubmit = "submit"
+)
+
+// 上下文槽位键(唯一定义处;与 contextx.StateKey* 取值一致)。
+//
+// 这些键是"会话状态"的键名:引擎种入 task,节点产出写入 plan / review /
+// test_result / last_output。contextx 侧的定义(contextx.StateKeyPlan 等)
+// 必须与本表一致 —— 由 workflow/runtime 的守卫测试
+// (mode_contract_test.go)锁住,任何一边单独改都会立刻失败。
+const (
+	// ContextSlotTask 任务文本(引擎种进初始状态)。
+	ContextSlotTask = "task"
+	// ContextSlotPlan 方案:plan 节点产出。
+	ContextSlotPlan = "plan"
+	// ContextSlotReview 评审结论:review 节点产出。
+	ContextSlotReview = "review"
+	// ContextSlotIssues 评审问题清单:review 节点产出。
+	ContextSlotIssues = "issues"
+	// ContextSlotTestResult 测试结果:test 节点产出。
+	ContextSlotTestResult = "test_result"
+	// ContextSlotLastOutput 最近一次节点输出:execute / fix / skill 节点产出。
+	ContextSlotLastOutput = "last_output"
+	// ContextSlotGitDiff Git diff(git 节点产出)。
+	ContextSlotGitDiff = "git_diff"
+	// ContextSlotIteration 当前循环轮数(编译器维护)。
+	ContextSlotIteration = "iteration"
+	// ContextSlotRelevantFiles 相关文件清单。
+	ContextSlotRelevantFiles = "relevant_files"
+	// ContextSlotUserInstruction 人工补充指令。
+	ContextSlotUserInstruction = "user_instruction"
+)
+
+// ModeSpec 描述一个 mode 的语义。
+type ModeSpec struct {
+	// Name mode 取值。
+	Name string
+	// RequiresWrite 该 mode 是否隐含写操作(需要 fs:write 权限)。
+	RequiresWrite bool
+	// ContextSlot 该 mode 的产出写进哪个上下文槽位。
+	//
+	// 空串 = 该 mode 的产出**不进**上下文链(当前只有 submit:上下文层
+	// 此前没有 submit 分支,提交节点的产出不会传给下游节点)。
+	ContextSlot string
+}
+
+// modeSpecs 是 mode → 语义 的唯一定义(顺序即前端下拉的展示顺序)。
+//
+// 新增 mode 时只改这里:校验期取值域、运行期 fail closed、写权限判定、
+// 上下文槽位映射全部随之更新,不会出现"一半认一半不认"(约定 13)。
+var modeSpecs = []ModeSpec{
+	{Name: ModePlan, ContextSlot: ContextSlotPlan},
+	{Name: ModeExecute, RequiresWrite: true, ContextSlot: ContextSlotLastOutput},
+	{Name: ModeReview, ContextSlot: ContextSlotReview},
+	{Name: ModeFix, RequiresWrite: true, ContextSlot: ContextSlotLastOutput},
+	{Name: ModeTest, ContextSlot: ContextSlotTestResult},
+	{Name: ModeSubmit, RequiresWrite: true, ContextSlot: ""},
+}
+
+// AllModes 返回全部合法 mode(副本,顺序与 modeSpecs 一致)。
+func AllModes() []string {
+	out := make([]string, 0, len(modeSpecs))
+	for _, s := range modeSpecs {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
+// ModeSpecFor 返回指定 mode 的语义。第二个返回值为 false 表示该 mode
+// **不在取值域内**(拼错的、别的节点类型专用的、空的)。
+func ModeSpecFor(mode string) (ModeSpec, bool) {
+	for _, s := range modeSpecs {
+		if s.Name == mode {
+			return s, true
+		}
+	}
+	return ModeSpec{}, false
+}
+
+// IsValidMode 判断 mode 是否在取值域内。
+//
+// 校验期用它判非法值(INVALID_NODE),运行期用它 fail closed(节点失败)。
+func IsValidMode(mode string) bool {
+	_, ok := ModeSpecFor(mode)
+	return ok
+}
+
+// ModeRequiresWrite 判断某个 mode 是否隐含**写操作**(需要 fs:write)。
+//
+// **未知/空 mode 一律返回 true(fail closed)**:mode 拼错("exectue")时,
+// 若按"不在只读清单里"处理,写权限检查会被跳过 —— 一个可能要改文件的
+// 节点在权限收紧的工作流里畅通无阻,而用户以为自己写的是 execute
+// (约定 14:用户以为生效了实际没有)。
+//
+// 因此"不认识"一律按"最危险"处理:先问写权限,再判 mode 非法。
+//
+// 唯一来源在 model(校验期/运行期/适配器共用,约定 13)。
+func ModeRequiresWrite(mode string) bool {
+	spec, ok := ModeSpecFor(mode)
+	if !ok {
+		return true
+	}
+	return spec.RequiresWrite
+}
+
 // Position 是节点在画布上的坐标。
 type Position struct {
 	X float64 `json:"x" yaml:"x"`
@@ -141,12 +283,23 @@ type ExecutionState string
 const (
 	ExecutionCreated     ExecutionState = "CREATED"
 	ExecutionRunning     ExecutionState = "RUNNING"
-	ExecutionPaused      ExecutionState = "PAUSED"
 	ExecutionWaitingUser ExecutionState = "WAITING_USER"
 	ExecutionCompleted   ExecutionState = "COMPLETED"
 	ExecutionFailed      ExecutionState = "FAILED"
 	ExecutionCancelled   ExecutionState = "CANCELLED"
 )
+
+// legacyPausedState 是**历史遗留**的执行状态字面量。
+//
+// PAUSED 曾是执行状态(状态机里有分支、运行期 Resume/Cancel 接受它、
+// 崩溃恢复把它当"可恢复"、前端有专属徽章),但**从来不可达**:没有任何
+// 代码路径会把执行迁移到它。它已从状态机里移除,老库里仍可能留有
+// state='PAUSED' 的行 —— 读出口归一为 CANCELLED
+// (见 persistence.NormalizeExecutionState)。
+//
+// 这里保留字面量(而不是常量):它只用于**识别**历史数据,不是可用的
+// 状态 —— 任何"迁移到 PAUSED"的代码都该被评审挡下。
+const legacyPausedState = ExecutionState("PAUSED")
 
 // NodeState 是单个 Node 执行的状态。
 type NodeState string
@@ -162,11 +315,13 @@ const (
 
 // CanTransitionExecution 校验 Execution 状态机的合法转换,禁止非法状态跳转。
 // FAILED→RUNNING 仅允许用户显式重试(Engine.RetryNode)。
+//
+// 注意:PAUSED **不在**状态机里 —— 它从来不可达(没有代码路径会迁移到
+// 它),留着转换分支等于留着一个永远走不到的分支(见 legacyPausedState)。
 func CanTransitionExecution(from, to ExecutionState) bool {
 	allowed := map[ExecutionState][]ExecutionState{
 		ExecutionCreated:     {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
-		ExecutionRunning:     {ExecutionPaused, ExecutionWaitingUser, ExecutionCompleted, ExecutionFailed, ExecutionCancelled},
-		ExecutionPaused:      {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
+		ExecutionRunning:     {ExecutionWaitingUser, ExecutionCompleted, ExecutionFailed, ExecutionCancelled},
 		ExecutionWaitingUser: {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
 		ExecutionCompleted:   {},
 		ExecutionFailed:      {ExecutionRunning}, // 用户显式重试

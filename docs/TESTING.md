@@ -1663,6 +1663,51 @@ go 指令 → 门禁**红**。
 vitest **268/268**、`./scripts/verify.sh` **9 步通过**(实测 **113s**)、
 `docs/check-numbering.sh` 通过(缺陷号区间 1..290 连续)。
 
+### 轮次 84:第二十轮(迭代 21 收口)—— mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决
+
+> 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 84"小节(#291-#296 全部关闭)。
+>
+> 本轮是**清单收敛轮**:五个缺陷形状不同,根子同一条 —— **同一份事实散落
+> 多处、各自演化**。新增 Go 顶层用例 **+24 例**、**新增测试文件 9 个**
+> (141 → **150**),顶层 `func Test*` 790 → **814**;前端 **+4 例**
+> (268 → **272**)。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/validator/mode_domain_test.go`(**新,3 例**) | **非法 mode 必须被校验期拒绝**(#291):`exectue` / `banana` / `PLAN` / `"execute "` / `skill` 全部报 `INVALID_NODE`;**空 mode 报 `MISSING_MODE` 且不再报 `INVALID_NODE`**("没填"与"填错了"是两个问题);**取值域内的 mode 一律放行**(校验期不得把用户挡在合法工作流外面) |
+| `workflow/runtime/mode_domain_test.go`(**新,3 例**) | **运行期对非法 mode fail closed**(#291):`exectue` 的节点 **FAILED**、错误点名该 mode、**Agent 一次都没被调用**;**未知 mode 的写权限检查不得被跳过**(写权限被收紧时失败原因必须是 `fs:write` —— 锁住"写权限检查在前、非法 mode 判定在后"的顺序);**合法 mode 照常执行**(fail closed 不能变成"一律拒绝") |
+| `workflow/runtime/mode_contract_test.go`(**新,3 例**) | **model ↔ contextx 的漂移守卫**(#291):每个 mode 的产出必须写进 `model.ModeSpec` 声明的槽位(声明"不进上下文链"的 mode 必须什么都不写);**10 个槽位键名两边必须一致**(键名是写进 `state_json` 的持久化契约,漂移会让存量数据读不出来);**`skill` 是伪 mode** —— 不在 agent 的取值域里,但上下文层仍按伪 mode 处理(不许被"收敛取值域"顺手踢出上下文链) |
+| `workflow/runtime/cancel_skip_test.go`(**新,2 例**) | **取消后节点必须收尾**(#294):取消一个等待人工的执行后,`approve`/`execute`/`submit` 全部落 **SKIPPED**,而已完成的 `plan` 保持 **SUCCESS**(取消不改写历史);**`execution_nodes` 明细行同步**(仍是"运行中/等待中"的行必须变 SKIPPED —— 同一份事实的两个出口) |
+| `workflow/model/execution_state_test.go`(**新,1 例**) | **`PAUSED` 不可达**(#295):既不能迁入也不能迁出(它是**曾经存在**的状态,现在状态机里没有) |
+| `workflow/compiler/taskkey_contract_test.go`(**新,2 例**) | **任务键只有一份来源**(#292):`compiler.KeyTask` 必须等于 `contextx.StateKeyTask`,且键名本身必须是 `"task"`(`state_json` 存量数据用的是它) |
+| `persistence/stats_test.go`(**新,2 例**) | **统计分列 + 各列之和 == 总数**(#293):`failed` 只算 FAILED、`cancelled` 单列、running 含 CREATED;**遗留 `PAUSED` 行归入 cancelled**(否则它既不在任何一列里又计入总数,表格里的数字加不起来) |
+| `persistence/legacy_state_test.go`(**新,3 例**) | **遗留数据的读法**(#295):`state='PAUSED'` 的行读出来是 **CANCELLED**、**不出现在"运行中列表"**;`NormalizeExecutionState` 的逐值契约 |
+| `persistence/dead_columns_test.go`(**新,5 例**) | **死列裁决 + 老库兼容**(#296):新库**不得**再建 `agent_configs.{name,enabled,updated_at}` / `skill_configs.updated_at` / `workflow_versions.seq`(保留下来的列必须还在);**老库(本轮之前的 schema)必须照常能写**(老库的 `name`/`updated_at` 是 NOT NULL 且**无默认值** → 不写就违反约束);**新库也要能写**;两个新读点(`GetWorkflowVersionDSL` / `ListWorkflowVersionMeta`)返回原文与落库时间;版本不存在 → `NOT_FOUND` |
+| `agent/mode_test.go`(**改,+1 例**) | **fail closed 语义**(#291):未知/空/`exectue` **一律按"会写"处理**;`agent.ModeRequiresWrite` 与 `model.ModeRequiresWrite` **逐个 mode 一致**(单源回归锁) |
+| `workflow/model/model_test.go`(**改**) | 状态机用例里**删掉** PAUSED 的 4 条转换,并把"不能迁入 PAUSED"补进 `denied` 列表(断言方向反转:此前是"允许") |
+| `persistence/exec_state_guard_test.go`(**改**) | 守卫与状态机的关系用例里**删掉** `ExecutionPaused`(它不再是状态机里的状态) |
+| `frontend/src/pages/Dashboard.test.tsx`(**改,+3 例**) | **取消与失败分列**(#293):Cancelled 单独成卡成列;**成功率的分母排除被取消的执行**(6÷8=75%,而不是 6÷10=60%);**旧后端(没有 `cancelled` 字段)不出现 NaN%** |
+| `frontend/src/components/state-badge.test.tsx`(**改,+1 例**) | **`PAUSED` 回退为原始文本**(#295):该状态已从状态机移除,前端不再有它的专属徽章 |
+
+**红 → 绿证据(隔离副本实测旧代码)**:
+
+| # | 旧代码上的实测输出 | 现在 |
+| --- | --- | --- |
+| #291 校验期 | `mode="exectue" 应当判非法,实际 valid=true(无任何错误)`(5 个取值全部放行) | 报 `INVALID_NODE` |
+| #291 运行期 | `非法 mode 的节点必须失败,实际状态: SUCCESS(错误: "")` | FAILED 且点名 mode |
+| #291 写权限 | `未知 mode 必须先过写权限检查,实际状态: SUCCESS(错误: "")` —— 写权限检查**被跳过** | 先撞 `fs:write` |
+| #291 fail closed | `ModeRequiresWrite("") = false, want true` / `("unknown") = false` / `("exectue") = false` | 一律 true |
+| #293 统计 | `failed 应只算 FAILED(=1),实际 2(CANCELLED 被混进了 failed 列)` | 分列,各列之和 == 总数 |
+| #294 取消收尾 | `取消后节点 "approve" 的状态 = "WAITING", want SKIPPED` / `节点明细 "approve" 仍是 WAITING` | 全部 SKIPPED |
+| #295 PAUSED | `不应允许迁移到 PAUSED:该状态不可达` ×4(状态机仍认它) | 状态机里没有它 |
+| #296 死列 | `agent_configs.name 是只写不读的列,新库不该再建它` ×5 | 新库无死列,老库仍可写 |
+| #293 前端 | `Unable to find an element with the text: 75%`(旧 Dashboard 算的是 60%) | 75%,分母排除 cancelled |
+
+**本轮验证**:`gofmt -l` 干净、`go vet` 干净、`go test -race -count=1 ./...`
+**21 个包全绿**(exit 0)、vitest **272/272**、`./scripts/verify.sh`
+**9 步通过**(实测 **112s**)、`docs/check-numbering.sh` 通过(缺陷号区间
+1..296 连续)。
+
 ## 门禁第 6 步:伪造输出绕过 —— 为什么不能用文本解析
 
 > 这是本项目**最独特的一条工程教训**,单独成节。
@@ -2310,6 +2355,7 @@ await new Promise((r) => setTimeout(r, 0));   // ×2
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 84 | **第二十轮(迭代 21 收口)**:mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决 | ✅ 已落地(工作区,待提交) | **#291-#296 共 6 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 84):**#291**(P1)`mode` 取值域有**三份**清单(校验期只查必填不查取值 / 运行期不校验 / `ModeRequiresWrite` 对未知 mode 返回 false → **写权限检查被跳过**)→ 取值域收敛到 `workflow/model`(`AllModes`/`ModeSpecFor`/`IsValidMode`),校验期报 `INVALID_NODE`、运行期 fail closed(排在写权限检查**之后**,两道门都不绕),`ModeRequiresWrite(未知)=true`(fail closed,**有意**改掉旧断言);**#292** `compiler.KeyTask` 与 `contextx.StateKeyTask` 两份字面量 → compiler 消费 contextx 的定义 + 守卫测试;**#293** 统计把 FAILED 与 CANCELLED 混在一列 → 分列 + 成功率分母排除 CANCELLED + "各列之和 == 总数";**#294** 取消 WAITING_USER 后节点永远停在"等待中" → 非终态节点落 SKIPPED + `execution_nodes` 同步;**#295** `PAUSED` **从来不可达** → 状态机/运行期/持久层/前端徽章/事件常量整条移除,老库的遗留行**读出口归一为 CANCELLED**(不写库改数据);**#296** 8 个"只写不读"的列 → 逐列裁决(5 删 + 2 加读点 + 1 本就有读点),老库兼容靠**按表实际拥有的列拼 INSERT**(`persistence.configUpsert`,老库的 NOT NULL 无默认值列照常补齐)。**红→绿证据**:隔离副本实测旧代码下 ① 非法 mode `valid=true` ② 未知 mode 的写权限检查被跳过(节点跑成 SUCCESS)③ `ModeRequiresWrite("unknown")=false` ④ `failed` 列把 CANCELLED 也算进去 ⑤ 取消后节点停在 WAITING ⑥ 遗留 PAUSED 行原样读出 ⑦ 新库仍建着 5 个死列 ⑧ Dashboard 成功率 60%(应为 75%)。新增测试文件 **9 个 Go**(`workflow/validator/mode_domain_test.go` 3 / `workflow/runtime/mode_domain_test.go` 3 / `workflow/runtime/mode_contract_test.go` 3 / `workflow/runtime/cancel_skip_test.go` 2 / `workflow/model/execution_state_test.go` 1 / `workflow/compiler/taskkey_contract_test.go` 2 / `persistence/stats_test.go` 2 / `persistence/legacy_state_test.go` 3 / `persistence/dead_columns_test.go` 5)+ 改 4 个既有文件(`agent/mode_test.go` / `workflow/model/model_test.go` / `persistence/exec_state_guard_test.go` / `persistence/repo_cas_test.go`);前端 `Dashboard.test.tsx` +3 例 / `state-badge.test.tsx` +1 例;Go 测试文件 141 → **150**、顶层 `func Test*` 790 → **814**;前端 22 文件 / 268 → **272** 用例;门禁 9 步通过(实测 **112s**) |
 | 83 | **第十九轮(迭代 20 收口)**:空上下文可见 / 门禁第 6 步的断言维度 | ✅ 已落地(工作区,待提交) | **#280 关闭**:"上游什么都没产出"曾是**静默空上下文**(`contextx.Build` 总是把链键写进数据表 → 模板引擎按"键存在 = 可解析"判缺失 → `{{plan}}` 永远不被报成缺失 → 下游拿到空串、节点照常 SUCCESS、**零告警**)→ 改**上下文层报"空槽位"**(`contextx.BuildWithSlots` 产出"键存在但值为空"的链槽位清单;运行期把**被提示词引用到的**空槽位报成 `node.warning` / `reason="empty_context_slots"`),**可见但不阻断**;`template` 包的"键存在 = 可解析"口径**不动**(渲染层口径 ≠ 上下文层事实)。**#289 关闭**:门禁第 6 步只看"**有代码跑过**"→ 一个**零断言**的用例(`{ _ = 1 }`)真的执行、真的 pass → **9 步门禁全绿**(隔离副本实测 exit 0)→ 第 6 步加**第二个判据**:包里必须**真的有断言**(静态扫描;实测 `go vet -tests` **检测不出**零断言测试,断言数不在框架事件里);扫描**只限 `*_test.go`**且**先剥注释**(注释里的 `t.Errorf` 不是断言 —— 实测不剥注释会让只提注释的零断言包溜过去);自检 +4 条(23 → **27**)。**#290 新登记**:断言判据"按包 + 文本级"的粒度与实现 —— **有意边界,不修**(细到"每个用例"必然误报)。新增顶层用例 **+7 例**(`contextx/context_test.go` 4 / `workflow/runtime/context_chain_test.go` 3),**未新增测试文件**(141 → **141**),顶层 `func Test*` 782 → **789**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **113s**),新判据在真实仓库上**误报 0** |
 | 82 | **第十八轮(迭代 20)**:设置读失败可观测 / 内置 Agent 注册失败上抛 / Set 白名单化 | ✅ 已进主干(`3e4a5b3`) | #281-#283 共 **3 条**,**全部关闭**:**#281** `Settings.Info()` 吞掉 `git_working_dir` 的**读错误** → 静默回落到内存态目录,界面显示的不是库里那个,**用户一保存就把损坏行覆盖成内存值**(损坏事实消失)→ 改**三态分开**(读到 / `NOT_FOUND` 正常初始态 / 其它读失败)+ 记 ERROR + 响应新增 `git_working_dir_read_failed` 标记(`omitempty`,正常响应形状不变);启动路径同样留痕;**#282** `reloadAgents` 里 4 处 `_ = a.Agents.Register(...)` → 内置 Agent 注册失败**一行日志都没有**(此前不可达,但"不可达"不等于"永远不可达")→ 改 **ERROR 日志 + 上抛**(`NewApp` 启动即失败,零误伤风险);**#283** `SettingsService.Set(key, value)` **任意键写入**经 Wails IPC 暴露(`main.go:310` 的 `wails.NewService(app.Settings)` + 生成绑定 `settingsservice.ts:48`)→ 可绕过 `permMu` 写 `agent_policies`(并发保护失效)、绕过 `git_working_dir` 存在性与 `log_level` 校验 → 改**白名单三键** + **复用 `Update` 的同一套校验** + **值类型校验**(此前 `value any` 可把字符串 `"true"` 写进 `allow_script_nodes`),`agent_policies` **刻意排除**;`Update` 自己也改为复用 `Set`(设置写入的**唯一实现**)。新增测试文件 **3 个 Go**(`app/application/settings_read_failure_test.go` 6 例 / `app/application/agent_registration_test.go` 2 例 / `app/application/settings_set_whitelist_test.go` 8 例);新增专节"轮次 82"一节;Go 测试文件 138 → **141**,顶层 `func Test*` 766 → **782**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **118s**) |
 | 81 | **第十七轮(迭代 19)**:跨节点上下文链路修复 / env 第四态 / 权限三态 / argv 凭据告警 | ✅ 已进主干(`e62f4ff`) | #270-#278 共 **9 条**,**全部关闭**:**#270**(**P0**)跨节点上下文整条链是死的(`{{plan}}` / `{{review}}` / `{{issues}}` / `{{test_result}}` **永远渲染成空串** —— 而仓库自带的 `workflows/examples/coding-task.yaml` 就在用 `{{plan}}`,这条示例**从未生效过**却一直报 SUCCESS)→ 改写**活的会话状态**并让写失败显式失败 + 键名统一到 10 个常量 + `pickText` 取第一个**非空**值(同链第二个断点);**#271** env 表的**第四态**缺失(只改模型的请求会顺手删掉全部凭据)→ 缺省 = 不修改 / `{}` = 显式清空 / `{k:v}` = 整表替换;**#272** 权限端点无法区分"缺省"与"false"(缺键 → false → 其余能力**静默吊销**)→ 改局部更新 + 非布尔值 400;**#273** **argv 是凭据的"本机可见"出口**(`extra_args` 原样进子进程 argv)→ 启动 CLI 前按**值形态**告警(只报下标**不回显值**)+ **绝不改写 argv**;**#274** `retry.max_attempts` 非数值 → 重试被静默关闭 → 运行期 **fail closed** + 校验期子键类型校验(两边同源);**#275** mock `behavior` 整体替换 → 改**逐键合并** + 未知键/错类型报错;**#276** 出口分支下标写失败被吞(恢复路径回放分支的**唯一依据**)→ 写失败返回 error;**#277** Git 工作目录不校验存在性("保存成功"但之后每个节点都失败)→ 落库前校验;**#278** 备份恢复的"运行时应用失败"信号前端整个丢掉 → 前端补类型与警告。新增测试文件 **11 个 Go**(`workflow/runtime/context_chain_test.go` 10 例 / `contextx/context_test.go` +5 / `api/agent_config_env_test.go` 2 / `api/agent_permission_patch_test.go` 4 / `app/application/agent_env_contract_test.go` 4 / `app/application/settings_gitdir_test.go` 4 / `app/application/mock_behavior_test.go` 6 / `agent/claude/claude_argv_test.go` 2 / `agent/pi/pi_argv_test.go` 2 / `workflow/runtime/retry_policy_test.go` 5 / `workflow/validator/retry_config_test.go` 5 / `workflow/compiler/route_branch_test.go` 3)+ 改 4 个既有文件(`contextx` / `state_mask_test.go` / `cas_conflict_test.go` / `node_config_test.go`);新增专节"轮次 81"一节;Go 测试文件 126 → **138**,顶层 `func Test*` 711 → **766**;前端 22 文件 / **268** 用例;门禁 9 步通过(97s) |

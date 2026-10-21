@@ -75,8 +75,17 @@ func (d *DB) migrate() error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		// 版本快照。
+		//
+		// 列的取舍(只写不读的列已删除,理由见 docs/OPTIMIZATION.md):
+		//   - seq:只写不读(自增主键,没有任何地方读它)→ 不再建;
+		//     逻辑主键是 UNIQUE(workflow_id, version)。
+		//   - dsl_text / created_at:有读点(见 repo.go 的
+		//     GetWorkflowVersionDSL / ListWorkflowVersionMeta)→ 保留。
+		//
+		// 兼容:老库里多出来的 seq 保留(不做 ALTER TABLE DROP COLUMN),
+		// 写入语句不按列名引用它 → 两种 schema 都能写。
 		`CREATE TABLE IF NOT EXISTS workflow_versions (
-			seq INTEGER PRIMARY KEY AUTOINCREMENT,
 			workflow_id TEXT NOT NULL,
 			version INTEGER NOT NULL,
 			dsl_text TEXT NOT NULL,
@@ -142,17 +151,24 @@ func (d *DB) migrate() error {
 			content TEXT DEFAULT '',
 			created_at TEXT NOT NULL
 		)`,
+		// Agent 配置:只存"读得到的东西"。
+		//
+		// name(恒等于 id)、enabled(恒为 1)、updated_at 都曾**只写不读**
+		// —— 写进去却没有任何地方读,是纯负担(还让人误以为"启用/停用"
+		// 是 Agent 的能力)。已从新库的 CREATE TABLE 里删除。
+		//
+		// 兼容:老库保留这三列,其中 name/updated_at 是 NOT NULL 且**无
+		// 默认值** → 写入语句按"表实际拥有的列"拼(persistence.configUpsert),
+		// 老库上照常补齐这些列,新库上不写。
 		`CREATE TABLE IF NOT EXISTS agent_configs (
 			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			config_json TEXT DEFAULT '{}',
-			updated_at TEXT NOT NULL
+			config_json TEXT DEFAULT '{}'
 		)`,
+		// Skill 配置:enabled 有读点(ListDisabledSkills)→ 保留;
+		// updated_at 只写不读 → 删除(同 agent_configs 的兼容策略)。
 		`CREATE TABLE IF NOT EXISTS skill_configs (
 			id TEXT PRIMARY KEY,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			updated_at TEXT NOT NULL
+			enabled INTEGER NOT NULL DEFAULT 1
 		)`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,

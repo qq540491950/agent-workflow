@@ -171,3 +171,49 @@ describe("Dashboard 失败必须可见", () => {
     expect(toast.error).toHaveBeenCalledTimes(1);
   });
 });
+
+// 被取消(failed 之外)必须单列,并且**不进**成功率的分母。
+//
+// 此前后端把 CANCELLED 算进 failed 列,前端成功率 = completed/total ——
+// 用户点一次取消,成功率就掉一截;"这次是失败还是被取消"在统计页上也
+// 答不出来。现在后端分列(cancelled),前端分列展示,成功率的分母排除
+// 被取消的执行(被用户叫停 ≠ 没做成)。
+describe("Dashboard 取消与失败分列", () => {
+  const stat = {
+    workflow_id: "wf-1",
+    name: "工作流一",
+    total: 10,
+    completed: 6,
+    failed: 2,
+    cancelled: 2,
+    waiting: 0,
+    running: 0,
+  };
+
+  it("Cancelled 单独成卡成列", async () => {
+    m.stats.mockResolvedValue([stat]);
+    renderDashboard();
+    await settle();
+    // 卡片标签与表头各一处
+    expect(screen.getAllByText("Cancelled").length).toBeGreaterThan(0);
+    // 卡片值(2)与表格列值(2)都在
+    expect(screen.getAllByText("2").length).toBeGreaterThan(0);
+  });
+
+  it("成功率的分母排除被取消的执行(6/8 = 75%,而不是 6/10 = 60%)", async () => {
+    m.stats.mockResolvedValue([stat]);
+    renderDashboard();
+    await settle();
+    expect(screen.getByText("75%")).toBeTruthy();
+    expect(screen.queryByText("60%")).toBeNull();
+  });
+
+  it("旧后端(没有 cancelled 字段)不会算出 NaN", async () => {
+    const { cancelled: _dropped, ...legacy } = stat;
+    m.stats.mockResolvedValue([legacy]);
+    renderDashboard();
+    await settle();
+    expect(screen.queryByText("NaN%")).toBeNull();
+    expect(screen.getByText("60%")).toBeTruthy();
+  });
+});

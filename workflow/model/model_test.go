@@ -309,14 +309,10 @@ func TestCanTransitionExecution(t *testing.T) {
 		{ExecutionCreated, ExecutionRunning},
 		{ExecutionCreated, ExecutionCancelled},
 		{ExecutionCreated, ExecutionFailed},
-		{ExecutionRunning, ExecutionPaused},
 		{ExecutionRunning, ExecutionWaitingUser},
 		{ExecutionRunning, ExecutionCompleted},
 		{ExecutionRunning, ExecutionFailed},
 		{ExecutionRunning, ExecutionCancelled},
-		{ExecutionPaused, ExecutionRunning},
-		{ExecutionPaused, ExecutionCancelled},
-		{ExecutionPaused, ExecutionFailed},
 		{ExecutionWaitingUser, ExecutionRunning},
 		{ExecutionWaitingUser, ExecutionCancelled},
 		{ExecutionWaitingUser, ExecutionFailed},
@@ -337,10 +333,13 @@ func TestCanTransitionExecution(t *testing.T) {
 		{ExecutionFailed, ExecutionCancelled},
 		{ExecutionRunning, ExecutionRunning}, // 不允许原地重复
 		{ExecutionCreated, ExecutionCreated},
-		{ExecutionCreated, ExecutionPaused},    // 未运行不能暂停
 		{ExecutionCreated, ExecutionCompleted}, // 未运行不能直接完成
 		{"", ExecutionRunning},                 // 未知状态
 		{ExecutionRunning, ""},
+		// PAUSED 已从状态机移除(它从来不可达):既不能迁入,也不能迁出。
+		{ExecutionRunning, ExecutionState("PAUSED")},
+		{ExecutionState("PAUSED"), ExecutionRunning},
+		{ExecutionCreated, ExecutionState("PAUSED")},
 	}
 	for _, tc := range denied {
 		if CanTransitionExecution(tc[0], tc[1]) {

@@ -7,6 +7,7 @@ import {
   CircleDashed,
   GitBranch,
   ArrowRight,
+  Ban,
 } from "lucide-react";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
@@ -32,6 +33,8 @@ interface WfStats {
   total: number;
   completed: number;
   failed: number;
+  /** 被取消的执行数(用户主动取消)—— 与 failed 分列。 */
+  cancelled: number;
   waiting: number;
   running: number;
 }
@@ -85,6 +88,9 @@ export default function Dashboard() {
   const waiting = stats.reduce((n, s) => n + s.waiting, 0);
   const completed = stats.reduce((n, s) => n + s.completed, 0);
   const failed = stats.reduce((n, s) => n + s.failed, 0);
+  // 被取消与跑失败分列(后端 stats 端点已分列):"失败"是系统没做成,
+  // "取消"是用户自己叫停 —— 混在一列里,成功率会被用户的取消动作拉低。
+  const cancelled = stats.reduce((n, s) => n + (s.cancelled ?? 0), 0);
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -95,7 +101,7 @@ export default function Dashboard() {
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <StatCard
           icon={<GitBranch className="h-4 w-4" />}
           label="Workflows"
@@ -125,6 +131,12 @@ export default function Dashboard() {
           value={failed}
           tone="bad"
         />
+        <StatCard
+          icon={<Ban className="h-4 w-4" />}
+          label="Cancelled"
+          value={cancelled}
+          tone="cancelled"
+        />
       </div>
 
       {stats.length > 0 && (
@@ -137,13 +149,18 @@ export default function Dashboard() {
                   <TableHead>总执行</TableHead>
                   <TableHead>Completed</TableHead>
                   <TableHead>Failed</TableHead>
+                  <TableHead>Cancelled</TableHead>
                   <TableHead>Waiting</TableHead>
                   <TableHead>成功率</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {stats.map((st) => {
-                  const rate = st.total > 0 ? Math.round((st.completed / st.total) * 100) : 0;
+                  // 成功率的分母**排除被取消的执行**:被用户叫停的执行
+                  // 不是"没做成",把它算进分母等于用户点一次取消就掉一截
+                  // 成功率(后端已把 failed 与 cancelled 分列)。
+                  const settled = st.total - (st.cancelled ?? 0);
+                  const rate = settled > 0 ? Math.round((st.completed / settled) * 100) : 0;
                   return (
                     <TableRow key={st.workflow_id}>
                       <TableCell className="text-sm font-medium">
@@ -154,6 +171,9 @@ export default function Dashboard() {
                       <TableCell>{st.total}</TableCell>
                       <TableCell className="text-green-400">{st.completed}</TableCell>
                       <TableCell className={st.failed ? "text-red-400" : ""}>{st.failed}</TableCell>
+                      <TableCell className={st.cancelled ? "text-muted-foreground" : ""}>
+                        {st.cancelled ?? 0}
+                      </TableCell>
                       <TableCell className={st.waiting ? "text-amber-400" : ""}>{st.waiting}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
@@ -274,7 +294,7 @@ function StatCard({
   icon: React.ReactNode;
   label: string;
   value: number;
-  tone?: "running" | "ok" | "bad" | "waiting";
+  tone?: "running" | "ok" | "bad" | "waiting" | "cancelled";
 }) {
   const toneClass =
     tone === "ok"
@@ -285,7 +305,9 @@ function StatCard({
           ? "text-blue-400"
           : tone === "waiting"
             ? "text-amber-400"
-            : "text-foreground";
+            : tone === "cancelled"
+              ? "text-muted-foreground"
+              : "text-foreground";
   return (
     <Card>
       <CardContent className="flex items-center gap-3 p-4">

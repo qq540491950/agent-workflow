@@ -1042,6 +1042,45 @@ float64 陷阱)已经用解码归一拿到了。
 > **判据要么"可判定且不误报",要么就别加** —— 加一条会误报的判据,后果不是
 > "门禁更严",而是"门禁被绕过的路径变多了"(人会加豁免、加恒真断言来消音)。
 
+### 轮次 84:第二十轮(迭代 21 收口)—— mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决
+
+> **本轮是"清单收敛"轮**:五个缺陷的形状完全不同,但根子是同一条 ——
+> **同一份事实散落在多处,各自演化**。mode 的取值域有**三份**清单(校验期/
+> 运行期/前端),任务文本的会话状态键有**两份**字面量,执行状态有**一个
+> 从来不可达**的分支,"失败"与"取消"混在**一列**里,数据库里有**八个**
+> 只写不读的列。
+>
+> **本轮的一条方法论**:收敛"同一份事实"时,**只改 CREATE TABLE 是不够的** ——
+> 列删除必须同时解决"老库的 schema 不动"(硬要求:不许 `ALTER TABLE DROP
+> COLUMN`)与"同一份代码要同时服务两种 schema"。本轮的做法是**按表实际
+> 拥有的列拼写入语句**(`persistence.configUpsert`),而不是写死一份 SQL。
+
+| 编号 | 来源 | 缺陷 | 触发路径与影响 | 修复(已落地) |
+| --- | --- | --- | --- | --- |
+| **#291** | 第二十轮(迭代 21) | **P1** agent 节点的 `mode` 取值域有**三份互不相同的清单** | ① 校验期只查"mode 必填",**不查取值** → `mode: exectue` / `banana` 一律通过;② 运行期**不校验取值** → 拼错的 mode 的节点照常跑完并报 SUCCESS;③ `agent.ModeRequiresWrite` 对**未知 mode 返回 false** → 写权限检查被**跳过** —— 用户在 `permissions` 段收紧写权限,对一个**拼错 mode** 的节点完全无效;④ `contextx` 的 mode 清单里混进了 `skill`(**节点类型**不是 agent 的 mode),又缺了 `submit` → 提交节点的产出不进上下文链 | **取值域收敛到 `workflow/model`**(`AllModes` / `ModeSpecFor` / `IsValidMode` / `ModeRequiresWrite`):model 是最底层的领域模型(只依赖标准库),`agent` / `contextx` / `compiler` / `validator` / `runtime` 都能引它而不成环(compiler 依赖 agent,agent 不能再依赖 compiler)。**校验期**:`INVALID_NODE`(复用前端已有码,不新增码 → 不必同步前端 `CODE_HINTS`),空 mode 仍报 `MISSING_MODE`("没填"与"填错了"分开);**运行期**:非法 mode → **节点失败**(fail closed,不执行任何副作用),且**排在写权限检查之后** —— 未知 mode 的 `ModeRequiresWrite` 恒为 `true`,两道门都不会被绕过;**`ModeRequiresWrite` 语义变更**:未知/空 mode 由 `false` 改为 `true`(fail closed),这是**有意**改掉旧断言(旧断言把"不认识"当"只读")。**验证**:`workflow/validator/mode_domain_test.go`(3 例)、`workflow/runtime/mode_domain_test.go`(4 例)、`workflow/runtime/mode_contract_test.go`(3 例:model↔contextx 的槽位漂移守卫)、`agent/mode_test.go`(2 例) |
+| **#292** | 第二十轮 | **P2** 任务文本的会话状态键有**两份字面量** | `compiler.KeyTask = "task"` 与 `contextx.StateKeyTask = "task"` 各写一份。漂移("task" vs "tasks")的后果极隐蔽:引擎种进会话状态用的是前者,上下文层(`Build`/`BuildWithSlots`)读的是后者 → 键对不上 → `{{task}}` 渲染成空串 → **Agent 收到没有任务的提示词照常执行**,执行报 SUCCESS(第 19 轮实测"整条跨节点上下文链是死的"的同类根因) | **收敛到 `contextx.StateKeyTask`**(contextx 是"上下文构造"层,**明确不反向依赖**编排层 —— 方向只能是 compiler → contextx),`compiler.KeyTask` 直接引用它。**验证**:`workflow/compiler/taskkey_contract_test.go`(2 例:与 contextx 一致 + 键名本身必须是 `"task"`,`state_json` 存量数据用的是它) |
+| **#293** | 第二十轮 | **P2** 统计把"跑失败"与"被取消"混在一列 | `GetWorkflowStats` 的 failed 列是 `state IN ('FAILED','CANCELLED')` → ① Dashboard 的成功率 = `completed/total`,把**用户主动取消**的执行算成"没成功" —— 点一次取消,成功率掉一截;② "这次到底是失败还是被取消"在统计页上**无法回答**(只能逐条翻执行记录) | **分列**:`failed` 只算 `FAILED`,新增 `cancelled` 列;**成功率分母排除 CANCELLED**(前端 Dashboard)。**列的划分穷尽所有执行状态** → "各列之和 == 总数"恒成立(`COMPLETED`/`FAILED`/`CANCELLED`/`WAITING_USER`/`RUNNING`+`CREATED`,外加**历史遗留的 `PAUSED`** 归入 cancelled)。**验证**:`persistence/stats_test.go`(3 例)、`frontend/src/pages/Dashboard.test.tsx`(+3 例:分卡分列 / 6÷8=75% 而非 6÷10=60% / 旧后端无 `cancelled` 字段时不出现 NaN) |
+| **#294** | 第二十轮 | **P2** 取消一个等待人工的执行后,节点永远停在"等待中" | 取消 `WAITING_USER` 走的是"**没有协程会再来收尾**"的那条路(Cancel 的 CAS 分支)→ 人工节点之后的那条路不会再走 → 节点状态停在 `WAITING`/`PENDING`:执行状态是"已取消",节点表里却挂着"等待中" —— **状态与事实不符**(约定 14 的同族),用户在监控页上看到几个永远等不到的"等待中" | **取消落定后收尾节点**:`exec.NodeStates` 里所有**非终态**节点落成 `SKIPPED`(已终结的 SUCCESS/FAILED/SKIPPED 不动 —— 取消不改写历史),`node_states_json` 经 `saveMeta` 落库(**不碰 state 列**,状态仍由 CAS 裁决);**`execution_nodes` 明细行同步**(仍在跑/等待的行 → SKIPPED;**不新建行** —— 没跑过的节点本来就没有明细行,凭空造行等于伪造"执行过一次")。**验证**:`workflow/runtime/cancel_skip_test.go`(2 例) |
+| **#295** | 第二十轮 | **P2** `PAUSED` 是一个**从来不可达**的执行状态 | `model` 里有常量、状态机里有 4 条转换分支、运行期 `Resume`/`Cancel` 接受它、崩溃恢复把它当"可恢复"、持久层"运行中列表"查它、前端还有一枚专属徽章 —— 而**没有任何代码路径**会把执行迁移到它:用户在前端看到"Paused"徽章却永远等不到;运行期那三个分支永远走不到(照着它们写代码 = 照着一个永远不成立的前提) | **整条移除**:状态机常量与转换分支(`model`)、`Resume`/`Cancel`/崩溃恢复(`runtime`)、"运行中列表"(`persistence`)、前端徽章(`state-badge.tsx`)、事件常量 `event.WorkflowPaused`("workflow.paused" 从未发出过 —— 留着等于对外承诺一个不会发生的事)。**遗留数据兼容**:老库里可能有 `state='PAUSED'` 的行 → **读出口归一为 `CANCELLED`**(`persistence.NormalizeExecutionState`,`GetExecution`/`ListExecutions` 两条读路径同口径),**不写库改数据**(启动时静默改写用户历史需要理由);统计 SQL 把遗留 `PAUSED` 计入 cancelled(见 #293)。**验证**:`workflow/model/execution_state_test.go`(1 例)、`persistence/legacy_state_test.go`(3 例)、`frontend/src/components/state-badge.test.tsx`(+1 例:回退为原始文本) |
+| **#296** | 第二十轮 | **P2** 数据库里有 **8 个"只写不读"的列** | `workflow_versions.{dsl_text,created_at,seq}`、`agent_configs.{name,enabled,updated_at}`、`skill_configs.updated_at` —— 写进去却没有任何地方读。其中 `agent_configs.enabled` 恒为 1、`name` 恒等于 id:读代码的人会以为"Agent 有启用/停用能力"和"Agent 有显示名" —— **代码在说谎**。另:列删除若只改 CREATE TABLE,老库(列还在)与新库(列没了)的写入语句会**互相失败**(新库 `no such column` / 老库 `NOT NULL constraint failed`,因为老库的 `name`/`updated_at` 是 NOT NULL 且**无默认值**) | **逐列裁决**并留档:`dsl_text`/`created_at` **保留 + 加读点**(`GetWorkflowVersionDSL` 读"当初那份 YAML 原文" —— `snapshot_json` 重新编码得到的 YAML 与原文未必一致;`ListWorkflowVersionMeta` 读版本落库时间);`seq`/`agent_configs.name`/`agent_configs.enabled`/`agent_configs.updated_at`/`skill_configs.updated_at` **删除**(只改 CREATE TABLE);`skill_configs.enabled` **保留**(有读点:`ListDisabledSkills`)。**老库兼容**:`persistence.configUpsert` 按**表实际拥有的列**(PRAGMA table_info)拼 `INSERT ... ON CONFLICT`,有的列才写 —— 两种 schema 都能写;老库的 `name`/`updated_at` 照常补齐(不丢历史),新库不再有。**验证**:`persistence/dead_columns_test.go`(5 例:新库无死列 / 老库可写 / 新库可写 / 两个读点 / 版本不存在 → NOT_FOUND) |
+
+#### 本轮**未**在本代理内落地、需主代理接手的事项
+
+> 以下几项**不在**本轮代理的写入范围内(`api/**`、`app/**`、`contextx/**`、
+> `template/**`、`frontend/src/lib/types.ts`、`frontend/bindings/**` 归他人所有),
+> 已备好**可直接照抄的改法**,主代理按图施工即可。
+
+| # | 事项 | 精确改法 |
+| --- | --- | --- |
+| 1 | **`contextx` 消费共享的 mode/槽位定义** | `contextx/context.go`:把 `StateKeyTask/Plan/Review/Issues/TestResult/LastOutput/GitDiff/Iteration/RelevantFiles/UserInstruction` 改为引用 `model.ContextSlot*`(值不变,`model` 已在 import 里);`SaveNodeOutput` / `BuildWithSlots` 的 mode switch 改为**按 `model.ModeSpecFor(mode).ContextSlot` 分派**(注意:`skill` 是**伪 mode**,不在 `model.AllModes()` 里,要单列);`submit` 的 `ContextSlot` 现为空 —— 若要让它进上下文链,先在 `model.modeSpecs` 里给它 `ContextSlot: model.ContextSlotLastOutput`,再改 contextx。守卫测试已就位:`workflow/runtime/mode_contract_test.go` 的 `TestModeContextSlotMatchesContextx` 会**在两边不一致时立刻变红** |
+| 2 | **API 暴露 mode 取值域(前端据此渲染下拉)** | `api/server.go` 加一个只读端点(如 `GET /api/modes` → `model.AllModes()` 的 JSON 数组),`app/application` 透传;前端 `frontend/src/lib/api.ts` 加 `modes(): Promise<string[]>`(桌面分支走 Wails 绑定),`frontend/src/pages/Designer.tsx` 的 mode 下拉改为**从后端取**(取不到时退回本地常量)。**在此之前**,前端下拉的清单必须与 `model.AllModes()` **逐项一致**(现在是 plan/execute/review/fix/test/submit —— 与后端一致 ✓);改动后请同步 `docs/api.md` |
+| 3 | **版本页读 `dsl_text` 原文** | `app/application/application.go` 的 `VersionDSL`(约 1008 行)当前用 `dsl.FromModel(wf).EncodeYAML()` 重新编码 → 改为调用**本轮新增的** `Repo.GetWorkflowVersionDSL(workflowID, version)`(读"当初那份 YAML 原文")。`persistence` 侧已就绪并有测试 |
+| 4 | **删除 `template` 包的 6 个死常量** | `template/template.go:38-43` 的 `VarTask`/`VarPlan`/`VarGitDiff`/`VarReview`/`VarTestResult`/`VarIteration` **零引用**(只有自己的定义)且与 `contextx.StateKey*` / `model.ContextSlot*` 重复 → 删除,或改为引用 `model.ContextSlot*` |
+| 5 | **备份的两个已知问题(P2-7/P2-8)** | ① 备份导出的 `version` 字段只写不读;② 备份里**缺 `skill_configs`**(导出了 `agent_configs` 却没有 skill 的启用状态)→ 补齐或明确登记为"不支持备份" |
+| 6 | **前端 `ExecutionState` 联合类型里的 `"PAUSED"`** | `frontend/src/lib/types.ts:77` 仍列着 `"PAUSED"`(该状态本轮已从状态机移除)→ 删掉这一行;后端读出口已把遗留 `PAUSED` 归一为 `CANCELLED`,前端不会再收到它 |
+| 7 | **重新生成 Wails 绑定** | `frontend/bindings/**` 是**生成物**,当前**已过期**(含本轮之前若干 commit 的注释与字段变化)。本轮新增的 `persistence.WorkflowStats.cancelled` 需要重新生成才会出现在类型里:隔离副本实测 `wails3 generate bindings -f '-tags server,production -trimpath -buildvcs=false -ldflags="-w -s"' -clean=true -ts -i` 的**结构性**差异只有 `"cancelled": number;` 一行(其余是别的 commit 的注释)→ 建议由主代理**统一**重新生成一次(避免与他人改动冲突) |
+| 8 | **`api.ts` 的 stats 返回类型** | `frontend/src/lib/api.ts:718` 的 `stats()` 内联类型**缺 `cancelled`**(运行时数据已有,只是类型没跟上)→ 补 `cancelled: number`。(本轮按"api.ts 只许改 CODE_HINTS"的写入边界**未动**该文件;Dashboard 用的是自己的 `WfStats` 接口,功能不受影响) |
+
 ## 十四、仍然开放(轮次 61-83 之后)
 
 > 下面是**当前**的完整开放清单。前面各轮登记过的开放项,**已修的划掉并
@@ -1049,6 +1088,15 @@ float64 陷阱)已经用解码归一拿到了。
 >
 > **本节已按 HEAD(`3e4a5b3`)+ 第十九轮(迭代 20 收口)逐条复核**(读代码 + 实测探针
 > + 跑门禁 + 独立终验),不是从上一版沿抄的。每条后面标注了复核依据。
+>
+> **第二十轮(迭代 21 收口,轮次 84)的增量**:关闭 **6 条**清单收敛类缺陷
+> (**#291** mode 取值域三份清单 / **#292** 任务键两份字面量 /
+> **#293** 失败与取消混列 / **#294** 取消后节点不收尾 /
+> **#295** 不可达的 PAUSED / **#296** 八个只写不读的列 —— 逐条见第十三节末
+> "轮次 84"小节);**新增 8 条"需主代理接手"的事项**(contextx 消费共享定义 /
+> API 暴露 mode 列表 / 版本页读 dsl_text / 删 template 死常量 / 备份两项 /
+> 前端 types.ts 的 PAUSED / 重新生成 Wails 绑定 / api.ts 的 stats 类型)——
+> 改法已写成可直接照抄的形式,见"轮次 84"小节末的表。
 >
 > **第十九轮的增量**:① 关闭了 **#280**(上游没产出时的静默空上下文 ——
 > 见第十三节末"轮次 83"小节);② 关闭了 **#289**(门禁第 6 步看不出零断言

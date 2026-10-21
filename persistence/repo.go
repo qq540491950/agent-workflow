@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -149,6 +150,53 @@ func (d *DB) GetWorkflowVersion(workflowID string, version int) (*model.Workflow
 		return nil, wrap(err)
 	}
 	return wf, nil
+}
+
+// GetWorkflowVersionDSL 读取某版本的**原始 DSL 文本**。
+//
+// 为什么要有这个读点:dsl_text 是版本快照里唯一保存"当初那份 YAML 原文"
+// 的列 —— snapshot_json 是**模型快照**,再编码成 YAML 得到的是重新
+// 序列化的结果(键序、缩进、字段取舍都可能与原文不同)。版本页要展示
+// "当时的 DSL",就得读这一列,而不是拿快照重新编码。
+//
+// 老库同样可读:这一列一直都在(本轮只是给它补上读点,没有删)。
+func (d *DB) GetWorkflowVersionDSL(workflowID string, version int) (string, error) {
+	var text string
+	err := d.sql.QueryRow(`SELECT dsl_text FROM workflow_versions WHERE workflow_id=? AND version=?`,
+		workflowID, version).Scan(&text)
+	if err != nil {
+		// 版本不存在是"资源缺失" → NOT_FOUND(404),与 GetWorkflowVersion 同口径。
+		return "", wrapNotFound(err, "工作流版本", fmt.Sprintf("%s@%d", workflowID, version))
+	}
+	return text, nil
+}
+
+// WorkflowVersionMeta 是版本快照的元信息(版本号 + 落库时间)。
+type WorkflowVersionMeta struct {
+	Version   int    `json:"version"`
+	CreatedAt string `json:"created_at"`
+}
+
+// ListWorkflowVersionMeta 返回某 Workflow 的版本元信息(版本号降序)。
+//
+// created_at 此前只写不读 —— 现在有了读点:版本列表可以显示"这个版本
+// 是什么时候存的"(与 ListWorkflowVersions 的版本号列表同口径,多一个
+// 时间字段)。
+func (d *DB) ListWorkflowVersionMeta(workflowID string) ([]WorkflowVersionMeta, error) {
+	rows, err := d.sql.Query(`SELECT version, created_at FROM workflow_versions WHERE workflow_id=? ORDER BY version DESC`, workflowID)
+	if err != nil {
+		return nil, wrap(err)
+	}
+	defer rows.Close()
+	out := []WorkflowVersionMeta{}
+	for rows.Next() {
+		var m WorkflowVersionMeta
+		if err := rows.Scan(&m.Version, &m.CreatedAt); err != nil {
+			return nil, wrap(err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // ListWorkflowVersions 返回某 Workflow 的版本号列表(降序)。
@@ -351,8 +399,8 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 // 过期副本推翻已落定的终态裁决,而且没有任何提示。
 //
 // 已知边界(未闭合,需调用方配合):
-//   - 守卫挡不住"往合法后继方向"的过期写(例如库中 PAUSED、过期副本写
-//     RUNNING —— PAUSED→RUNNING 本身合法)。彻底堵住需要调用方携带
+//   - 守卫挡不住"往合法后继方向"的过期写(例如库中 WAITING_USER、过期
+//     副本写 RUNNING —— WAITING_USER→RUNNING 本身合法)。彻底堵住需要调用方携带
 //     "我基于哪个版本"的令牌(CAS 返回 claim token、保存时校验),
 //     属于调用方改动,不在持久化层可解范围内。
 var execStateGuardSQL, execStateGuardArgs = buildExecStateGuard()
@@ -393,6 +441,9 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 		}
 		return nil, wrap(err)
 	}
+	// 历史遗留的 PAUSED 行归一为 CANCELLED(PAUSED 已从状态机移除,
+	// 但老库里仍有这种行)—— 见 NormalizeExecutionState。
+	e.State = NormalizeExecutionState(e.State)
 	// 读回即归一数值类型:state_json 里的数字经 JSON 解码全是 float64,
 	// 而执行期内存里是 int。类型随生命周期变化会让每个读取点都得写
 	// 双类型兼容(漏一处就是静默 bug)。在唯一的解码入口钉死一次。
@@ -456,6 +507,8 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 			&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData); err != nil {
 			return nil, wrap(err)
 		}
+		// 历史遗留的 PAUSED 行归一为 CANCELLED(与 GetExecution 同口径)。
+		e.State = NormalizeExecutionState(e.State)
 		// 读回即归一数值类型:state_json 里的数字经 JSON 解码全是 float64,
 		// 而执行期内存里是 int。类型随生命周期变化会让每个读取点都得写
 		// 双类型兼容(漏一处就是静默 bug)。在唯一的解码入口钉死一次。
@@ -499,9 +552,32 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 	return out, rows.Err()
 }
 
+// legacyPausedState 是历史遗留的执行状态字面量(PAUSED 已从状态机移除,
+// 见 workflow/model 的说明)。老库里可能留有 state='PAUSED' 的行。
+const legacyPausedState = model.ExecutionState("PAUSED")
+
+// NormalizeExecutionState 归一**历史遗留**的执行状态。
+//
+// PAUSED 曾是执行状态,但从来不可达:没有任何代码路径会把执行迁移到
+// 它。它已从执行状态机里移除,老库里仍可能留有 state='PAUSED' 的行 ——
+// 读出来时归一为 CANCELLED:它既不是"还在跑"(不该出现在运行中列表),
+// 也不是用户认识的状态(前端没有它的徽章)。
+//
+// 刻意**不写库**改数据:启动时静默改写用户的历史记录需要理由;
+// 读出口归一既够用(用户看到的是自洽的状态),又不碰数据。
+func NormalizeExecutionState(s model.ExecutionState) model.ExecutionState {
+	if s == legacyPausedState {
+		return model.ExecutionCancelled
+	}
+	return s
+}
+
 // ListRunningExecutions 返回未终态的执行(用于崩溃恢复)。
+//
+// 遗留的 PAUSED 行**不在**这里:它不是"还在跑"的执行(它从来不可达),
+// 读出口会把它归一成 CANCELLED(persistence.NormalizeExecutionState)。
 func (d *DB) ListRunningExecutions() ([]*model.Execution, error) {
-	rows, err := d.sql.Query(`SELECT id FROM executions WHERE state IN ('RUNNING','WAITING_USER','PAUSED','CREATED')`)
+	rows, err := d.sql.Query(`SELECT id FROM executions WHERE state IN ('RUNNING','WAITING_USER','CREATED')`)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -552,6 +628,28 @@ func (d *DB) SaveExecutionNode(n *model.ExecutionNode) error {
 		n.ID, n.ExecutionID, n.NodeID, string(n.NodeType), n.NodeName, string(n.State), n.Attempt,
 		n.Output, n.ResultJSON, n.Error, n.StartedAt, n.FinishedAt, n.DurationMS)
 	return wrap(err)
+}
+
+// MarkExecutionNodesSkipped 把某次执行里仍处于**非终态**的明细行标成 SKIPPED。
+//
+// 场景:取消一个等待人工的执行 —— 没有任何协程会再来收尾这些节点,
+// 明细行会永远停在"运行中/等待中",而执行已经是"已取消"(状态与事实
+// 不符,约定 14 的同族)。
+//
+// 只更新**已经存在**的行:没跑过的节点本来就没有明细行,凭空造一行
+// 等于伪造"执行过一次"(监控页会显示一个从没跑过的节点的记录)。
+func (d *DB) MarkExecutionNodesSkipped(executionID string) (int64, error) {
+	res, err := d.sql.Exec(`UPDATE execution_nodes SET state=?, finished_at=?
+		WHERE execution_id=? AND state IN ('PENDING','RUNNING','WAITING')`,
+		string(model.NodeSkipped), nowStr(), executionID)
+	if err != nil {
+		return 0, wrap(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, wrap(err)
+	}
+	return n, nil
 }
 
 // ListExecutionNodes 返回某次执行的全部节点明细(按开始时间)。
@@ -624,25 +722,45 @@ func (d *DB) ListEvents(executionID string, limit int) ([]map[string]any, error)
 }
 
 // WorkflowStats 是某工作流的执行统计。
+//
+// failed 与 cancelled **分列**:此前 failed 用
+// `state IN ('FAILED','CANCELLED')` —— "跑失败"与"被用户取消"混在一列,
+// 于是成功率(completed/total)把用户主动取消的执行算成"没成功",
+// 点一次取消就掉一截成功率;"这次到底是失败还是被取消"在统计页上
+// 也无法回答。
 type WorkflowStats struct {
 	WorkflowID string `json:"workflow_id"`
 	Name       string `json:"name"`
 	Total      int    `json:"total"`
 	Completed  int    `json:"completed"`
 	Failed     int    `json:"failed"`
-	Waiting    int    `json:"waiting"`
-	Running    int    `json:"running"`
+	// Cancelled 被取消的执行数(用户主动取消)。
+	Cancelled int `json:"cancelled"`
+	Waiting   int `json:"waiting"`
+	Running   int `json:"running"`
 }
 
 // GetWorkflowStats 按工作流聚合执行状态。
+//
+// 各列的划分**穷尽**所有执行状态,于是"各列之和 == 总数"恒成立:
+//
+//	COMPLETED   → completed
+//	FAILED      → failed
+//	CANCELLED   → cancelled
+//	PAUSED      → cancelled(**历史遗留**:PAUSED 已从执行状态机移除,
+//	                          老库里仍有这种行;归入 cancelled 而不是
+//	                          悄悄消失,否则总数与各列对不上)
+//	WAITING_USER→ waiting
+//	RUNNING / CREATED → running(都还没终结)
 func (d *DB) GetWorkflowStats() ([]WorkflowStats, error) {
 	rows, err := d.sql.Query(`
 		SELECT w.id, w.name,
 			COUNT(e.id) AS total,
 			COALESCE(SUM(CASE WHEN e.state='COMPLETED' THEN 1 ELSE 0 END),0) AS completed,
-			COALESCE(SUM(CASE WHEN e.state IN ('FAILED','CANCELLED') THEN 1 ELSE 0 END),0) AS failed,
+			COALESCE(SUM(CASE WHEN e.state='FAILED' THEN 1 ELSE 0 END),0) AS failed,
+			COALESCE(SUM(CASE WHEN e.state IN ('CANCELLED','PAUSED') THEN 1 ELSE 0 END),0) AS cancelled,
 			COALESCE(SUM(CASE WHEN e.state='WAITING_USER' THEN 1 ELSE 0 END),0) AS waiting,
-			COALESCE(SUM(CASE WHEN e.state='RUNNING' THEN 1 ELSE 0 END),0) AS running
+			COALESCE(SUM(CASE WHEN e.state IN ('RUNNING','CREATED') THEN 1 ELSE 0 END),0) AS running
 		FROM workflows w
 		LEFT JOIN executions e ON e.workflow_id = w.id
 		GROUP BY w.id, w.name
@@ -654,7 +772,8 @@ func (d *DB) GetWorkflowStats() ([]WorkflowStats, error) {
 	out := []WorkflowStats{}
 	for rows.Next() {
 		var st WorkflowStats
-		if err := rows.Scan(&st.WorkflowID, &st.Name, &st.Total, &st.Completed, &st.Failed, &st.Waiting, &st.Running); err != nil {
+		if err := rows.Scan(&st.WorkflowID, &st.Name, &st.Total, &st.Completed, &st.Failed,
+			&st.Cancelled, &st.Waiting, &st.Running); err != nil {
 			return nil, wrap(err)
 		}
 		out = append(out, st)
@@ -720,10 +839,13 @@ func (d *DB) SaveSkillEnabled(id string, enabled bool) error {
 	if enabled {
 		e = 1
 	}
-	_, err := d.sql.Exec(`INSERT INTO skill_configs (id,enabled,updated_at) VALUES (?,?,?)
-		ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at`,
-		id, e, nowStr())
-	return wrap(err)
+	// 列是拼出来的(见 configUpsert):老库还有 updated_at(只写不读、
+	// 已从新库删除),新库没有 → 两种 schema 都要能写。
+	return d.configUpsert("skill_configs", []configCol{
+		{col: "id", val: id},
+		{col: "enabled", val: e},
+		{col: "updated_at", val: nowStr()},
+	}, []string{"enabled", "updated_at"})
 }
 
 // ListDisabledSkills 返回被禁用的 Skill 集合。
@@ -931,11 +1053,92 @@ func wrapNotFound(err error, what, id string) error {
 
 // SaveAgentConfig 保存某 Agent 的运行配置(模型/端点/环境变量)。
 func (d *DB) SaveAgentConfig(id string, raw []byte) error {
-	_, err := d.sql.Exec(`INSERT INTO agent_configs (id,name,enabled,config_json,updated_at)
-		VALUES (?,?,1,?,?)
-		ON CONFLICT(id) DO UPDATE SET config_json=excluded.config_json, updated_at=excluded.updated_at`,
-		id, id, string(raw), nowStr())
+	// 列是拼出来的(见 configUpsert):
+	//   - name:老库有(恒等于 id),新库已删 → 老库上照常补齐;
+	//   - enabled:老库有(恒为 1、有默认值),新库已删 → 两边都不写;
+	//   - updated_at:老库有(NOT NULL 无默认值),新库已删 → 老库上补齐。
+	return d.configUpsert("agent_configs", []configCol{
+		{col: "id", val: id},
+		{col: "name", val: id},
+		{col: "config_json", val: string(raw)},
+		{col: "updated_at", val: nowStr()},
+	}, []string{"config_json", "updated_at"})
+}
+
+// configCol 是"一列 + 它的值"(configUpsert 的入参单位)。
+type configCol struct {
+	col string
+	val any
+}
+
+// configUpsert 按目标表**实际拥有的列**拼 INSERT ... ON CONFLICT(id)。
+//
+// 为什么需要:列的删除只改 CREATE TABLE —— 硬要求是**不许**对老库
+// ALTER TABLE DROP COLUMN(老库保留多余的列,无害)。于是同一份代码要
+// 同时服务两种 schema:
+//
+//   - 新库:没有 name/enabled/updated_at 这些列;
+//   - 老库:有,而且其中几列是 NOT NULL 且**无默认值**(不写就违反约束)。
+//
+// 写死一份语句必然在另一种 schema 上失败:新库报 "no such column",
+// 老库报 "NOT NULL constraint failed"。按实际列清单拼语句则两边都对。
+//
+// updateCols 是"冲突时需要更新的列":同样只取实际存在的列(老库多一列
+// updated_at,更新它不会丢信息;新库没有就不更新)。
+func (d *DB) configUpsert(table string, row []configCol, updateCols []string) error {
+	have, err := d.tableColumns(table)
+	if err != nil {
+		return err
+	}
+	cols := make([]string, 0, len(row))
+	vals := make([]any, 0, len(row))
+	sets := make([]string, 0, len(row))
+	for _, c := range row {
+		if !have[c.col] {
+			continue
+		}
+		cols = append(cols, c.col)
+		vals = append(vals, c.val)
+		if c.col != "id" && slices.Contains(updateCols, c.col) {
+			sets = append(sets, c.col+"=excluded."+c.col)
+		}
+	}
+	if len(cols) == 0 {
+		return wrap(fmt.Errorf("persistence: 表 %s 没有可写的列", table))
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(cols)), ",")
+	stmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT(id) DO UPDATE SET %s",
+		table, strings.Join(cols, ","), placeholders, strings.Join(sets, ","))
+	_, err = d.sql.Exec(stmt, vals...)
 	return wrap(err)
+}
+
+// tableColumns 返回表实际拥有的列名集合(PRAGMA table_info)。
+//
+// 只用于"按实际列拼语句"的兼容路径(table 参数是本文件里的字面量,
+// 不是用户输入)。
+func (d *DB) tableColumns(table string) (map[string]bool, error) {
+	rows, err := d.sql.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return nil, wrap(err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return nil, wrap(err)
+		}
+		out[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrap(err)
+	}
+	return out, nil
 }
 
 // GetAgentConfig 读取某 Agent 的配置 JSON(不存在返回 nil)。

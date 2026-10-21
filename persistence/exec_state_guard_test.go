@@ -19,7 +19,7 @@ import (
 //  1. **终态覆盖**:状态机里"没有任何合法后继"的状态(COMPLETED、
 //     CANCELLED)必须纳入守卫。状态机新增一个终态而守卫忘了加 → 这里变红。
 //  2. **不得过宽**:被守卫的状态,其合法后继只能是 RUNNING —— 守卫只能
-//     拦"显式重试"这条路,不能拦 PAUSED→CANCELLED 这类正常收尾。
+//     拦"显式重试"这条路,不能拦 WAITING_USER→CANCELLED 这类正常收尾。
 //     守卫清单被扩成"把非终态也锁死" → 这里变红。
 //  3. **FAILED 必须在内**:状态机允许 FAILED→RUNNING,但那仅代表"用户
 //     显式重试"(引擎走 CAS)。整行 upsert 不得替用户做重试裁决,
@@ -31,7 +31,6 @@ func TestExecStateGuardAgreesWithStateMachine(t *testing.T) {
 	allStates := []model.ExecutionState{
 		model.ExecutionCreated,
 		model.ExecutionRunning,
-		model.ExecutionPaused,
 		model.ExecutionWaitingUser,
 		model.ExecutionCompleted,
 		model.ExecutionFailed,

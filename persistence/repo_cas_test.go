@@ -369,8 +369,8 @@ func TestWorkflowVariablesKeepIntTypeAfterRoundTrip(t *testing.T) {
 // 注意:这是 SaveExecution 这个导出 API 的契约(生产路径当前不经过该分支,
 // 见本文件开头的说明),不是"运行期有保护"的证据。
 //
-// 已知边界:守卫挡不住"往合法后继方向"的过期写(例如库中 PAUSED、过期副本
-// 写 RUNNING —— PAUSED→RUNNING 本身合法)。彻底堵住需要调用方携带
+// 已知边界:守卫挡不住"往合法后继方向"的过期写(例如库中 WAITING_USER、
+// 过期副本写 RUNNING —— WAITING_USER→RUNNING 本身合法)。彻底堵住需要调用方携带
 // "我基于哪个版本"的令牌,不在持久化层可解范围内(见 execStateGuardSQL 注释)。
 func TestSaveExecutionDoesNotRevertCompleted(t *testing.T) {
 	db := openTestDB(t)

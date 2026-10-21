@@ -74,7 +74,7 @@
 | POST | `/api/backup/restore` | 恢复备份。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝;**本机不存在的 Agent 也计入 `agent_configs_invalid` 且不落库**(此前计入"已恢复"是假成功:配置永远不会被应用)。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` / **`agent_configs_unknown_ids`** |
 | GET | `/api/events` | **SSE** 实时事件流(UIEvent;连接即达响应头,15s keepalive) |
 | GET | `/api/events/all?type=&limit=` | 跨执行审计事件(支持类型前缀过滤) |
-| GET | `/api/stats` | 每工作流执行统计 |
+| GET | `/api/stats` | 每工作流执行统计。**`failed` 与 `cancelled` 分列**(轮次 84):`failed` 只算 `FAILED`,`cancelled` 只算 `CANCELLED`;各列之和 == `total`(列的划分穷尽所有执行状态)。消费方算成功率时**分母要排除 `cancelled`** —— 被用户叫停的执行不是"没做成" |
 | GET | `/api/version` | 应用与关键依赖版本(ADK/Wails 从构建信息读取) |
 
 ## 错误格式
@@ -144,6 +144,7 @@ HTTP 状态码语义:
 | `DSL_MISPLACED_KEY` | 400(导入) | 某个段被放错了层级(典型:`permissions:` 写在 `workflow:` 段下)。**权限收紧被静默丢弃 = 安全语义被悄悄放开**,因此必须 fail closed |
 | `UNKNOWN_FIELD` | 400(保存/校验) | 请求体含**未知顶层字段**。允许的键集合由 `model.Workflow` 的 json tag **反射派生**(模型加字段自动生效),错误信息里会列出允许的键 |
 | `INVALID_NODE_ENABLED` | 校验错误 | 节点的 `enabled` 不是布尔值。运行期同样 fail closed(节点失败),两边结论一致 |
+| `INVALID_NODE`(mode 取值) | 校验错误 | agent 节点的 `mode` **不在取值域内**(唯一来源:`model.AllModes()` —— `plan` / `execute` / `review` / `fix` / `test` / `submit`)。此前只查"必填"不查"取值",拼错的 mode(`exectue`)能存能跑,还会**跳过写权限检查**。运行期同样 fail closed(节点失败),两边结论一致(轮次 84) |
 | `UNKNOWN_NODE_CONFIG` | 校验**警告** | 节点配置里有**未被识别**的键(典型:`timeout_seconds` 拼成 `timeout_second`)。该设置**不会生效**,但**不阻断保存** |
 | `DEPRECATED_NODE_CONFIG` | 校验**警告** | 节点配置键已废弃(如 condition 节点的 `expression`)。仍可保存,运行期按边上的条件走 |
 | `UNSUPPORTED_AGENT_SETTING` | 400(保存 Agent 配置) | 该 Agent 设置**不生效**(运行期从不读取它)。典型:`default_working_dir` —— 后端**拒绝新值**并说明原因(请改用节点级 `working_dir`,或清空该字段)。**已存的老值仍可原样回存**(不阻断存量工作流) |
@@ -480,7 +481,12 @@ HTTP 状态码语义:
 | `RUNNING`(且执行协程还活着) | **200** | — | 取消成功。状态由执行协程收尾时 CAS 落成 `CANCELLED`,`workflow.cancelled` 事件也由它发出 |
 | `COMPLETED` / `FAILED` / `CANCELLED` | **400** | `INVALID_TRANSITION` | **取消失败**。取消一个**已经结束**的运行不是幂等删除 —— 约定 6 的"幂等返回 200"只适用于**删除资源**,不适用于状态迁移 |
 | 不存在 | **404** | `NOT_FOUND` | 执行 ID 不存在 |
-| `CREATED` / `PAUSED` / `WAITING_USER` | **200** | — | 走 CAS 裁决:落成 `CANCELLED` 并发 `workflow.cancelled` 事件。并发取消**只产生一次**状态变更与事件 |
+| `CREATED` / `WAITING_USER` | **200** | — | 走 CAS 裁决:落成 `CANCELLED` 并发 `workflow.cancelled` 事件。并发取消**只产生一次**状态变更与事件。**非终态节点同时落成 `SKIPPED`**(节点级视图 + `execution_nodes` 明细)—— 这条路径没有协程会再来收尾它们,不收尾就是"状态与事实不符"(轮次 84) |
+
+> **`PAUSED` 已不在这个表里**:它曾是一个执行状态,但**从来不可达**
+> (没有任何路径会把执行迁移到它),轮次 84 已把它从状态机里移除。
+> **老库**里可能留有 `state='PAUSED'` 的行 → **读出口归一为 `CANCELLED`**
+> (`persistence.NormalizeExecutionState`),所以 API 永远不会返回 `PAUSED`。
 
 > **为什么不能用"句柄在不在"判断**:终态是**先写库**的,执行协程的句柄由
 > `defer` 摘除 —— 两者之间有 ≈**210µs** 的窗口(终态事件同步落库那段)。
@@ -607,12 +613,16 @@ SUCCESS(约定 14:该失败却成功)。
 
 ## 实时事件类型(UIEvent.type)
 
-`workflow.started / paused / resumed / waiting_user / completed / failed / cancelled`
+`workflow.started / resumed / waiting_user / completed / failed / cancelled`
 `node.started / completed / failed / waiting`
 `agent.started / output / completed / retry`
 `review.approved / review.rejected`
 `human.input_required / human.input_received`
 `skill.executed / git.executed / merge.completed`
+
+> **`workflow.paused` 已删除**(轮次 84):`PAUSED` 那个执行状态**从来不可达**,
+> 这个事件**从未被发出过** —— 留着它等于对外承诺一个不会发生的事
+> (订阅它的前端会永远等不到)。
 `node.warning`(模板变量缺失,渲染为空串)/ `runtime.error` / `runtime.warning`
 (如并行分支不收敛:各分支终点互不相同,分支之后的链不会执行)
 `runtime.escalate`(ADK Escalate 的分级:`kind=expected` 是预期内的循环出口

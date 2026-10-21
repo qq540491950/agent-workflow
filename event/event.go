@@ -12,9 +12,13 @@ import (
 )
 
 // 预定义事件类型。
+//
+// 注意:这里只列**真的会发出**的事件类型。PAUSED 相关的
+// "workflow.paused" 曾在此列,但那个状态从来不可达(没有任何路径会把
+// 执行迁移到 PAUSED),事件也从未被发出过 —— 留着它等于对外承诺一个
+// 不会发生的事(前端若订阅它,永远等不到)。
 const (
 	WorkflowStarted     = "workflow.started"
-	WorkflowPaused      = "workflow.paused"
 	WorkflowResumed     = "workflow.resumed"
 	WorkflowCompleted   = "workflow.completed"
 	WorkflowFailed      = "workflow.failed"

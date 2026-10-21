@@ -370,16 +370,39 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 	}
 	// 写权限:mode→是否需要写权限的**唯一来源**是 agent.ModeRequiresWrite
-	// (与 pi 适配器的兜底检查同一份)。
+	// (与 pi 适配器的兜底检查同一份;取值域在 workflow/model)。
 	//
 	// 此前这里只查 execute|fix,而 pi 适配器查 execute|fix|submit ——
 	// 两份集合各自演化(约定 13 的同源精神)。后果:`mode: submit` 的节点
 	// 不受**工作流级 permissions 段**约束(适配器只看得到全局策略),
 	// 用户在 DSL 里收紧写权限,submit 节点照样跑 —— 以为生效了实际没有
 	// (约定 14)。
+	//
+	// 未知/空 mode 一律按"需要写权限"处理(fail closed):mode 拼错
+	// ("exectue")时,若按"不在只读清单里"处理,这道门会被跳过 ——
+	// 一个可能要改文件的节点在权限收紧的工作流里畅通无阻。
 	if coreagent.ModeRequiresWrite(mode) {
 		if err := e.perms(env).Check(agentID, permission.FSWrite); err != nil {
 			return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
+		}
+	}
+
+	// mode 的**取值域**(唯一来源:model.AllModes):非法 mode → 节点失败
+	// (fail closed),不执行任何副作用。
+	//
+	// 此前任意字符串都被接受:拼错的 mode 照常跑完并报 SUCCESS,用户
+	// 以为节点按 execute 跑了,实际它跑的是"一个没人认识的 mode" ——
+	// 上下文链里没有它的槽位,权限判定也落不到正确的分支(约定 14)。
+	//
+	// 顺序:写权限检查在前。未知 mode 的 ModeRequiresWrite 恒为 true,
+	// 所以写权限这道门**不会**因为 mode 非法而被跳过;两道门都过不去时,
+	// 先报权限原因还是先报 mode 非法,取决于这里的位置(约定 13 的
+	// 同源精神:两道门用同一份取值域)。
+	if !model.IsValidMode(mode) {
+		return compiler.NodeOutcome{
+			State: model.NodeFailed,
+			Error: fmt.Sprintf("节点 %s 的 mode %q 非法(允许: %s)",
+				node.ID, mode, strings.Join(model.AllModes(), "|")),
 		}
 	}
 

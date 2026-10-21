@@ -18,6 +18,7 @@ import (
 	"google.golang.org/adk/session"
 
 	coreagent "agentworkflow/agent"
+	"agentworkflow/contextx"
 	"agentworkflow/event"
 	"agentworkflow/logx"
 	"agentworkflow/permission"
@@ -29,7 +30,19 @@ const DefaultMaxIterations = 5
 
 // 会话状态键(执行状态通过 ADK Session State 持久化)。
 const (
-	KeyTask         = "task"
+	// KeyTask 任务文本的会话状态键。
+	//
+	// 唯一来源:contextx.StateKeyTask —— 上下文链的键名由 contextx 定义
+	// (它是"上下文构造"层),compiler 消费它。此前两边各写一份字面量
+	// ("task"),拼写漂移("task" vs "tasks")会让引擎种进去的任务与上下文
+	// 层读出来的任务对不上:{{task}} 渲染成空串 → Agent 收到**没有任务**
+	// 的提示词照常执行(第 19 轮实测:整条跨节点上下文链是死的)。
+	//
+	// 方向是 compiler → contextx:contextx 明确不依赖编排层
+	// (contextx → compiler 会把两个层绑死),见 contextx/context.go 的说明。
+	// 守卫测试:workflow/compiler/taskkey_contract_test.go。
+	KeyTask = contextx.StateKeyTask
+
 	KeyAbort        = "_abort"         // 非空 = 执行中断(失败/等待),后续节点跳过
 	KeyResumeNode   = "_resume_node"   // 恢复执行时从该节点开始
 	KeyUserInput    = "_user_input"    // 人工节点的用户响应

@@ -343,6 +343,20 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 		if str("agent") != "" && agents != nil && !agents(str("agent")) {
 			addErr("AGENT_NOT_FOUND", n.ID, "节点 %q 引用了不存在的 Agent %q", n.ID, str("agent"))
 		}
+		// mode 的**取值域**(唯一来源:model.AllModes)。
+		//
+		// 此前只查"mode 必填",不查取值:拼错的 mode("exectue")与
+		// 完全不存在的 mode("banana")都能通过校验 → 工作流能存能跑,
+		// 而运行期又不认识它:写权限检查被跳过、上下文链没有对应槽位
+		// —— 用户写错一个词,既不会被拦,也不会被正确对待(约定 14)。
+		//
+		// 错误码复用 INVALID_NODE(前端 CODE_HINTS 已有该码,不必同步
+		// 前端,约定 10 的双模式契约)。空 mode 仍由 MISSING_MODE 报
+		// ——"没填"与"填错了"是两个问题,不该报成同一个码。
+		if mode := str("mode"); mode != "" && !model.IsValidMode(mode) {
+			addErr("INVALID_NODE", n.ID, "agent 节点 %q 的 mode %q 非法(允许: %s)",
+				n.ID, mode, strings.Join(model.AllModes(), "|"))
+		}
 	case model.NodeTypeSkill:
 		if str("skill") != "" && skills != nil && !skills(str("skill")) {
 			addErr("SKILL_NOT_FOUND", n.ID, "节点 %q 引用了不存在的 Skill %q", n.ID, str("skill"))

@@ -370,13 +370,17 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 	return snapshot, nil
 }
 
-// Resume 恢复一个 WAITING_USER/PAUSED 的执行(人工输入后)。
+// Resume 恢复一个 WAITING_USER 的执行(人工输入后)。
+//
+// 只接受 WAITING_USER:PAUSED 已从执行状态机里移除(它从来不可达),
+// 遗留的 PAUSED 行在读出口已归一为 CANCELLED,见
+// persistence.NormalizeExecutionState。
 func (e *Engine) Resume(ctx context.Context, executionID string, userResponse map[string]any) (*model.Execution, error) {
 	exec, err := e.loadExec(executionID)
 	if err != nil {
 		return nil, err
 	}
-	if exec.State != model.ExecutionWaitingUser && exec.State != model.ExecutionPaused {
+	if exec.State != model.ExecutionWaitingUser {
 		return nil, model.NewError(model.KindStateError, "INVALID_RESUME",
 			fmt.Sprintf("执行 %s 状态为 %s,不能恢复", executionID, exec.State))
 	}
@@ -387,7 +391,7 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 	// 因此"CAS 成功 → 整行写"之间的窗口里即便有并发写,也不会把状态
 	// 改回去(状态列根本不在这条 UPDATE 里)。
 	ok, err := e.Repo.CasExecutionState(executionID,
-		[]model.ExecutionState{model.ExecutionWaitingUser, model.ExecutionPaused}, model.ExecutionRunning)
+		[]model.ExecutionState{model.ExecutionWaitingUser}, model.ExecutionRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -533,14 +537,14 @@ func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 		// 冲突时状态会停在 RUNNING)。ctx 已无处可取消 → 走下面的 CAS 裁决。
 	}
 
-	// 其余场景(CREATED / PAUSED / WAITING_USER,或 RUNNING 但无句柄):
+	// 其余场景(CREATED / WAITING_USER,或 RUNNING 但无句柄):
 	// 用 CAS 裁决 —— 并发取消只产生一次状态变更与事件。
 	//
 	// 含 RUNNING:库里是运行中却没有句柄的"卡死"执行(终态提交 CAS 冲突
 	// 时状态会停在 RUNNING)也必须能被用户取消,否则用户只能看着一个
 	// 永远"运行中"的执行干瞪眼。
 	ok, err := e.Repo.CasExecutionState(executionID,
-		[]model.ExecutionState{model.ExecutionCreated, model.ExecutionPaused,
+		[]model.ExecutionState{model.ExecutionCreated,
 			model.ExecutionWaitingUser, model.ExecutionRunning},
 		model.ExecutionCancelled)
 	if err != nil {
@@ -557,7 +561,77 @@ func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 			fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, cur))
 	}
 	e.Bus.Emit(event.New(event.WorkflowCancelled, executionID, "", nil))
+	// 节点收尾:这条路径没有协程会再来跑(等待人工的执行被取消后,
+	// 人工节点之后的那条路不会再走),非终态节点必须自己落成 SKIPPED
+	// —— 否则执行状态是"已取消",节点表里却还挂着"等待中/未开始"。
+	e.skipRemainingNodes(executionID)
 	return nil
+}
+
+// skipRemainingNodes 把一次执行里所有**非终态**节点落成 SKIPPED。
+//
+// 为什么需要:取消等待人工的执行时,没有协程负责收尾节点(人工节点
+// 之后的那条路不会再走)。不收尾的后果是状态与事实不符(约定 14 的
+// 同族):执行是"已取消",节点却停在"等待中",用户在监控页上看到的
+// 永远是一个等不到的"等待中"。
+//
+// 落两处(同一份事实的两个出口):
+//   - exec.NodeStates(node_states_json):节点级视图,UI 的节点表读它;
+//   - execution_nodes 明细行:仍在跑/等待的行改成 SKIPPED
+//     (不新建行:没跑过的节点本来就没有明细行,凭空造行等于伪造
+//     "执行过一次")。
+//
+// 已终结的节点(SUCCESS/FAILED/SKIPPED)保持原状:取消不改写历史。
+func (e *Engine) skipRemainingNodes(executionID string) {
+	exec, err := e.loadExec(executionID)
+	if err != nil {
+		logx.Warn("取消后收尾节点失败(执行记录读不出)", "execution", executionID, "error", err.Error())
+		return
+	}
+	if exec.Snapshot == nil {
+		// 快照缺失(历史数据/写入中断):没有节点清单,无法判断哪些节点
+		// 没跑完 —— 只同步明细行,节点视图保持原样。
+		e.skipExecutionNodeRows(executionID)
+		return
+	}
+	changed := false
+	for _, n := range exec.Snapshot.Nodes {
+		if isTerminalNodeState(exec.NodeStates[n.ID]) {
+			continue
+		}
+		if exec.NodeStates == nil {
+			exec.NodeStates = map[string]string{}
+		}
+		exec.NodeStates[n.ID] = string(model.NodeSkipped)
+		changed = true
+	}
+	if changed {
+		// saveMeta 只写非状态列(node_states_json 在其中),不碰 state
+		// —— 状态已经由上面的 CAS 落定,不能被这次写覆盖(约定 4)。
+		if err := e.saveMeta(exec); err != nil {
+			logx.Warn("取消后写回节点状态失败", "execution", executionID, "error", err.Error())
+		}
+	}
+	e.skipExecutionNodeRows(executionID)
+}
+
+// skipExecutionNodeRows 同步 execution_nodes 明细行。
+func (e *Engine) skipExecutionNodeRows(executionID string) {
+	if _, err := e.Repo.MarkExecutionNodesSkipped(executionID); err != nil {
+		logx.Warn("取消后同步节点明细失败", "execution", executionID, "error", err.Error())
+	}
+}
+
+// isTerminalNodeState 判断节点状态是否已终结。
+//
+// 终态(SUCCESS/FAILED/SKIPPED)不再改动;其余(PENDING/RUNNING/WAITING
+// 以及"没出现过"= 还没跑)都属于"还可以被收尾"的状态。
+func isTerminalNodeState(state string) bool {
+	switch model.NodeState(state) {
+	case model.NodeSuccess, model.NodeFailed, model.NodeSkipped:
+		return true
+	}
+	return false
 }
 
 // stopRun 停掉还在跑的执行协程(如果还有活跃句柄)。
@@ -664,7 +738,7 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 }
 
 // RecoverPending 在应用启动时调用:把上次崩溃遗留的 RUNNING 执行标记为
-// FAILED(可再次运行),WAITING_USER/PAUSED 保持可恢复状态。
+// FAILED(可再次运行),WAITING_USER 保持可恢复状态。
 func (e *Engine) RecoverPending() error {
 	pending, err := e.Repo.ListRunningExecutions()
 	if err != nil {
@@ -690,7 +764,7 @@ func (e *Engine) recoverExecution(exec *model.Execution) error {
 	case model.ExecutionRunning, model.ExecutionCreated:
 		exec.Error = "应用重启导致执行中断,可重新运行"
 		return e.transitionAndSave(exec, model.ExecutionFailed)
-	case model.ExecutionWaitingUser, model.ExecutionPaused:
+	case model.ExecutionWaitingUser:
 		// 保持状态,可通过 Resume 继续
 		return nil
 	}
