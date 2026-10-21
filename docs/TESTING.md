@@ -3,17 +3,20 @@
 > 共 8 轮测试验证(超过最低 5 轮要求),其中轮次 2-8 为浏览器视觉测试(GUI 黑盒)。
 > 每次功能完成与 Bug 修复均有独立 git 提交(见提交号)。
 >
-> **当前状态(轮次 71-89,对应 commit `6d76873` + `ce2e34f` + 本轮工作区改动)**:
-> Go 测试文件 **171** 个 / 有测试的包 **22** 个 / 顶层 `func Test*` **899** 个;
-> 前端测试文件 **25** 个 / 用例 **302** 条;门禁 **9 步** + **32** 条自检场景
+> **当前状态(轮次 71-91,对应 commit `6d76873` + `ce2e34f` + `a0549c4` + 本轮工作区改动)**:
+> Go 测试文件 **171** 个 / 有测试的包 **22** 个 / 顶层 `func Test*` **904** 个;
+> 前端测试文件 **25** 个 / 用例 **302** 条;门禁 **9 步** + **36** 条自检场景
 > (迭代 27 新增 3 条:零次循环 / 无匹配分支 / 未被调用的辅助函数 ——
-> 见"轮次 87(续)"一节;**第二十五轮(迭代 30)未动 `scripts/**`**,自检条数不变)。
+> 见"轮次 87(续)"一节;**第二十八轮(迭代 32)新增 4 条**:恒假分支里的
+> 调用点 / 从未被调用的函数字面量 / 无匹配 switch 分支里的调用点 / 链式
+> 辅助函数 —— 见"轮次 91"一节;**第二十五轮(迭代 30)未动 `scripts/**`**,
+> 自检条数不变)。
 > **统计口径**(迭代 28 更正,见 #329):`git ls-files '*_test.go'` **加上**
 > `git ls-files --others --exclude-standard '*_test.go'`(含**未跟踪**的新测试文件),
 > 排除 `build/` 与 `node_modules/`;顶层 `func Test*` = 同口径文件里以
 > `^func Test` 开头的顶层函数(`func Example*` 为 0)。**这是快照,不是常量** ——
 > 同轮还有别的代理在加测试文件,数字会继续变;引用本数字时请写明基线
-> (本轮基线:HEAD `ce2e34f` + 迭代 30 在途改动)。
+> (本轮基线:HEAD `a0549c4` + 迭代 32 在途改动)。
 > (第十四轮**已落地** commit `91fe3e2`;第十五轮(迭代 21B)**已落地**
 > commit `908ba0b` —— 取消终态语义 / ExtraArgs 值形态 / 门禁第 6 步判据;
 > 第十六轮(迭代 17)**已落地** commit `e62f4ff` —— 单源回归锁去恒真 /
@@ -28,7 +31,10 @@
 > 文档口径校正(#326-#329),见"轮次 87"一节;**第二十五轮(迭代 30 收口)**
 > —— git 出口脱敏(#330)/ 状态码语义(#331)/ 前端错误文案统一(#332)/
 > 错误文本去内部细节(#333)/ panic 兜底(#334)/ 路由级 404 文案(#335),
-> 见"轮次 88-89"一节。)完整清单与逐文件说明见
+> 见"轮次 88-89"一节;**第二十六轮(迭代 31)**
+> —— 真实适配器路径的"同形替身"场景矩阵(#336-#340),见"迭代 31"专节;
+> **第二十八轮(迭代 32 收口)**
+> —— 门禁断言扫描的 4 个新盲区(#341),见"轮次 91"一节。)完整清单与逐文件说明见
 > "轮次 41-44 / 45-48 / 49-52 / 53-56 / 57-60 / 61-70 / 71-79 / 轮次 80 /
 > 轮次 81 / 轮次 82 / 轮次 83"十一节;"某条测试在什么改动下
 > 会变红"的实测记录见"改坏实现 → 测试变红"专节、"终审实测记录"专节与
@@ -36,7 +42,92 @@
 > 门禁的**自检**机制见"门禁自检"专节;**形态 × 出口**的脱敏回归锁见
 > "可执行覆盖矩阵"专节;**并发路径的唯一事实源**(失败台账)见"失败台账"专节;
 > 前端测试的**确定性**保障见"前端测试稳定性"专节;
-> **门禁第 6 步为什么不能用文本解析**见"门禁第 6 步:伪造输出绕过"专节。
+> **门禁第 6 步为什么不能用文本解析**见"门禁第 6 步:伪造输出绕过"专节;
+> **真实 CLI 路径的测试手法**(同形替身)见"同形替身 CLI:本项目独有的
+> 测试手法"专节。
+
+### 第三十至三十二轮的新增测试文件清单(逐个说明锁住了什么)
+
+> **基线**:HEAD `a0549c4` + 迭代 32 在途改动。**本清单只覆盖第三十至
+> 三十二轮**(轮次 88-89 / 90 / 91)新增或修改的测试文件;此前各轮的
+> 清单见各自小节。
+>
+> **规模变化**:Go 测试文件 163 → **171**(+8);顶层 `func Test*` 869 →
+> **904**(+35);前端测试文件 24 → **25**(+1);前端用例 293 → **302**(+9);
+> 门禁自检场景 32 → **36**(+4)。
+
+| 轮次 | 文件 | 锁住的行为 |
+| --- | --- | --- |
+| 88-89 | `git/mask_test.go`(**新增**,6 例) | **#330** git 包五个出口不得返回未脱敏内容:`TestDiffMasksCredentialInFile`(凭据形态 + **低熵**两种形态;键名保留、值 → `***`);`TestDiffKeepsOrdinaryContentByteIdentical`(**可读性回归锁**:拿 `git diff` **原文**逐字节比对 —— 普通代码与路径**逐字不变**);`TestDiffMasksLowEntropyButKeepsStructure`(脱敏**不改变行数**);`TestLogMasksCredentialInCommitMessage`;`TestStatusMasksCredentialInPath`(**前置条件断言**:porcelain 原文必须真的含该路径,否则用例是假通过);`TestCommitOutputMasksCredential` |
+| 88-89 | `api/git_mask_test.go`(**新增**,2 例) | **#330** 端到端:`GET /api/git/diff?staged=true` 与 `GET /api/git/log` 的**响应体**不得含凭据明文(走真实 `wrap` + 真实 SQLite + 真实 git 子进程;仓库建在 `t.TempDir()` 里,**不在真实仓库造带密钥的文件**) |
+| 88-89 | `api/error_contract_test.go`(**新增**,8 例) | **#331** `TestErrorStatusMappingByKind`(**15 个 kind/code 组合**逐条断言期望状态码;既有 4xx 组合**一条没动**);`TestInternalErrorIsNotReportedAsBadRequest`;**#334** `TestWrapRecoversPanic`(panic → 500 + `{error,code,kind}` + 响应体不含 panic 原文);`TestWrapPanicAfterResponseCommitted`;**#333** `TestBadRequestDoesNotLeakGoInternals`(不得含 `Go struct field` / `Go value of type` / `[]string` / `AgentConfig` / `(实际 ` / `%T`);`TestReadBodyFailureIsHumanMessage`;`TestErrorBodyMasksCredentials`;**#335** `TestUnknownRouteErrorIsUserFacing` |
+| 88-89 | `api/server_test.go`(**改**,1 处断言) | **#331** `TestErrorBodyAlwaysHasCodeAndKind` 的 `code < 400 \|\| code >= 500` → `code < 400 \|\| code >= 600`。**理由**:那条断言把"错误必须是 4xx"**钉成了契约** —— 而那正是缺陷本身;精确映射改由 `TestErrorStatusMappingByKind` 逐条断言 |
+| 88-89 | `frontend/src/test/toast-guard.test.ts`(**新增**,4 例) | **#332** **静态守卫**:生产代码里的 `toast.error` **只许**出现在 `lib/errors.ts`(白名单为空表);另三条防空转用例(实现存在 / 白名单有效 / 扫描器看得见该模式) |
+| 88-89 | `frontend/src/lib/errors.test.ts`(**改**,+2 例) | **#332** `NETWORK_HINTS` 补的两条:`AbortError` → "请求被中断(可能已取消或页面切换)";`timeout of 5000ms exceeded` → "请求超时" |
+| 88-89 | `frontend/src/lib/api.test.ts`(**改**,+3 例 / 1 处断言变更) | **#332** 5xx 状态码有中文兜底提示(500/502/503/504 各一条);`httpText` 的非 JSON 错误体被**截断**;**桌面模式 panic 归一**(`code=INTERNAL`、不含 Go 包路径与 panic 原文)。**断言变更**:原"没有 Kind(CODE) 前缀的 IPC 错误"用例断言 `code` 为 `undefined` —— 那是"双模式**形状不同构**"的旧行为,现补 `code=BAD_REQUEST` / `kind=ValidationError`(约定 10) |
+| 88-89 | `frontend/src/pages/*.test.tsx`(**改**,5 处断言 + 1 处 `beforeEach`) | **#332** 五条**精确匹配**断言的文案随 scope 变化而变;`Agents.test.tsx` 的 `beforeEach` 增加 `resetErrorDedup()` —— `reportError` 对同一个错误做 5 秒去重(防提示风暴),那是**生产行为**不是缺陷 |
+| 90 | `agent/internal/stubcli/stubcli_main.go.txt`(**新增**,替身源码) | 替身是**真子进程**:真 stdout/stderr、真退出码、真信号、真进程组、真管道。**16 种行为形态**由环境变量切换(`STUBCLI_MODE` / `STUBCLI_SHAPE`) |
+| 90 | `agent/internal/stubcli/stubcli.go`(**新增**,构建与驱动) | 测试期把替身编译成独立可执行文件(`go build` 到临时目录);`Build` / `Cleanup` / `Env` / `ReadPID` / `ProcessAlive`。**不联网**(`GOPROXY=off` + `GOTOOLCHAIN=local`),在没有 claude / pi 的机器上照样跑 |
+| 90 | `agent/internal/stubcli/stubcli_test.go`(**新增**,3 例) | **替身是全部结论的"地面真值"** —— 替身坏了 → 全部结论不可信:替身自身的形态切换、pid 探测、清理都要有用例 |
+| 90 | `agent/claude/stub_matrix_test.go`(**新增**,7 例) | **#336-#340** claude 侧 14 场景矩阵:空输出 / 空白 / 非 JSON / 前置垃圾 + 尾部 JSON / 截断 / 非零退出 / 退出码 0 但零输出 / fork 孤儿 / 超时 / 非法字节 / stderr 含凭据 —— 逐条断言**终态 + 决策值 + 错误消息的可读性与凭据脱敏** |
+| 90 | `agent/pi/stub_matrix_test.go`(**新增**,6 例) | **#336-#340** pi 侧同族矩阵(自由文本形态合法 → **成功但留痕** `decision_missing`,不判失败) |
+| 90 | `agent/claude/main_test.go` / `agent/pi/main_test.go`(**各新增**,1 例) | `TestMain` 里调 `stubcli.Cleanup()` 删除临时目录(每个测试进程只编译一次替身) |
+| 90 | `agent/claude/claude_test.go` / `claude_audit_test.go` / `claude_argv_test.go`(**改**,3 处断言) | **#336 / #337** 旧断言("非 JSON 输出 → 成功")**必须跟着改** —— 它们钉的是**缺陷行为**;新断言钉的是"空输出 → FAILED"与"尾部信封被提取" |
+| 91 | `scripts/verify.sh` 的 `assertscan`(**改**,+4 条自检场景) | **#341** 见"轮次 91"一节的逐条说明(恒假分支 / 函数字面量 / 无匹配 switch / 链式) |
+
+### 门禁第 7 步的前置条件:仓库根**也要** `npm install`(#324)
+
+> **这是"9/9 不可从干净 clone 复现"的那条前置条件**,此前**没有任何文档**
+> 记载。**实测**(终审复审):只装 `frontend/` 的干净副本 → 第 7 步的
+> `npm run lint` **exit 127**(eslint 找不到)→ `&&` 链短路 → 门禁**红**。
+> fail closed 是对的,但"9/9"**不可复现**。
+>
+> 根因:eslint 与它的 4 个插件声明在**仓库根** `package.json`
+> (`frontend/package.json` 里**没有** eslint);`frontend/package.json` 的
+> lint 脚本是 `eslint .`,而 `frontend/node_modules/.bin/` 里**没有**
+> eslint —— `npm run lint` 能跑通**只因为** npm 会把**祖先目录**的
+> `node_modules/.bin` 加进 PATH。
+>
+> **从干净 clone 复现门禁,必须两处都装依赖**:
+>
+> ```bash
+> npm install                  # 仓库根 —— eslint 与插件(门禁第 7 步的 lint)
+> cd frontend && npm install   # 前端自身的依赖(vite / vitest / typescript)
+> ```
+>
+> 逐条证据见"轮次 87"一节(#324)。
+
+### 同形替身 CLI:本项目独有的测试手法
+
+> **为什么要有这一节**:前三十轮的验证几乎都用 **mock agent** —— mock 直接
+> 返回结构体,**不经过子进程**。真实路径(`claude` / `pi` 适配器调用真实
+> CLI)上的子进程管理、超时、输出解析、退出码、stderr、管道与进程组,
+> **从未被系统性地走过**。
+>
+> **"同形替身"是什么意思**:替身**不是 mock** —— 它是**真的子进程**:
+> 真的 stdout/stderr、真的退出码、真的信号、真的进程组、真的管道。
+> mock 只能覆盖"返回值是什么",替身能覆盖"**进程是怎么跑的**"。
+>
+> **它能覆盖什么**:CLI 的**输出形态**与**进程行为**。一个二进制按环境变量
+> 切换 16 种行为形态,覆盖 14 个场景,claude / pi 两侧**共用同一份替身**
+> (输出形态由 `STUBCLI_SHAPE` 切换:claude = JSON 信封 / pi = 正文 + 尾部
+> JSON)。
+>
+> **它不能覆盖什么(必须知道)**:真实 CLI 的真实输出形态**永远无法完全
+> 模拟** —— 替身覆盖"形态",覆盖不了"某个具体版本的 CLI 在某个具体环境
+> 下才会吐出的东西"(某些版本把 `is_error` 写成字符串、某些版本在 stdout
+> 混入 ANSI 转义、某些版本先打印 banner 再输出信封)。真机冒烟
+> (`agent/claude/real_smoke_test.go`)仍然需要真机;**pi 适配器至今
+> 无真机冒烟**(开放项,自轮次 29 起)。
+>
+> **一句话口径**:**"替身能过"≠"真实 CLI 能过"**,但**"替身过不了"
+> 一定是适配器的真问题**。这个不对称是这套手法的价值所在 ——
+> 它给了子进程层一个**确定性的**回归锁,而不需要真机。
+
+#### 替身的组成与场景矩阵
+
+见"迭代 31"一节(替身源码 / 构建驱动 / 替身自身的用例 / 14 场景矩阵 /
+"先红后绿"的实测证据 / 本节没有覆盖的三条)。
 
 ## 环境
 
@@ -1997,6 +2088,80 @@ cd frontend && npm install   # 前端自身的依赖(vite / vitest / typescript)
 → 响应体**不含**明文(值被替换为 `***`)。**不在真实仓库里造带密钥的文件,
 不调用任何会写真实仓库的 git 接口**。
 
+### 轮次 91:第二十八轮(迭代 32 收口)—— 门禁断言扫描的 4 个新盲区(#341)
+
+> 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 91"小节(**#341**)。
+>
+> 本轮是**文档收口轮**:输入是**第三十二轮终审复审**的缺陷清单
+> (1 条 P1 + 一份"可正式关闭的遗留项"清单)。**代码侧**的修法在
+> `scripts/verify.sh`(门禁断言扫描),由**姊妹代理**落地(它拥有
+> `scripts/**`);本轮由文档代理负责**核实 + 登记 + 文档**。
+>
+> **本轮统计**(基线:HEAD `a0549c4` + 迭代 32 在途改动):Go 测试文件
+> **171** 个 / 有测试的包 **22** 个 / 顶层 `func Test*` **904** 个;前端
+> 测试文件 **25** 个 / 用例 **302** 条;门禁 **9 步** + **36** 条自检场景
+> (本轮 **+4** 条,见下)。
+
+#### 本轮的新增 / 修改(逐个文件)
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `scripts/verify.sh` 的 `assertscan`(**改**,+4 条自检场景) | **#341** 门禁第 6 步的断言扫描**不再被骗过**:① **恒假分支里的调用点**不算可达引用(`if 1 != 1 { helper(t) }` → helper 判为不可达);② **函数字面量**里的断言要求该字面量**确有调用点**(立即调用 / 赋值后被调用 → live;赋值后从未被调用 → **不** live);③ **无匹配 switch 分支**里的调用点不算可达引用;④ **链式**辅助函数按**不动点迭代**传递可达性(outer 不可达 → outer 的调用点不计 → inner 也不可达)。**自检 32 → 36**:B4 / B5 / B6 / B7 各一条**红**场景(断言**具体原因**,证明是被**对应那条**规则抓到),每条同时断言**绿方向**(正常写法不得被误报)。**判据从"存在性"升级为"可达性"** —— 这正是上一轮(#320)留下的残余 |
+
+#### 隔离复现的手法(本轮自建,可复跑)
+
+上一轮的复现手法是"改坏实现 → 跑真门禁",本轮**更轻**:把 `assertscan`
+的 **Go 源码段**从 `scripts/verify.sh` 里抽出来(`awk` 取
+`ASSERTSCAN_GOEOF` 之间的部分)→ 单独编译成一个二进制 → 造绕过包 →
+用同一份 manifest 喂给**新旧两个**扫描器,逐包比对
+`total` / `live` / 不可达原因。
+
+**为什么这样做**:门禁第 6 步的判据就是这一个二进制的行为;把判据单独
+拎出来,可以在**秒级**内跑几十种绕过形态,而不必每次都起整条 9 步门禁
+(≈120s)。**代价**:抽出来的源码与脚本里的那份必须**逐字一致** —— 否则
+测的是"另一个程序"。本轮的核对方式是:抽出的段数与脚本里的段数一致,
+且**同一份 manifest**下新旧两个二进制给出**可解释的差异**。
+
+#### 本轮的**红 → 绿**证据(逐条)
+
+| 编号 | 红(旧扫描器) | 绿(新扫描器) |
+| --- | --- | --- |
+| #341 | `bypass1 1 1`(辅助函数**只在恒假分支**里被调用)/ `bypass2 1 1`(断言在**从未被调用的函数字面量**里)/ `bypass3 1 1`(辅助函数**只在无匹配 switch 分支**里被调用)/ `bypass4 1 1`(**链式**:恒假分支调 outer → outer 调 inner)—— **live 全等于 total,四道判据同时被骗过**;4 个包 `go test` 全部 `ok` | `bypass1 1 0 未被调用的辅助函数` / `bypass2 1 0 从未被调用的函数字面量` / `bypass3 1 0 未被调用的辅助函数` / `bypass4 1 0 未被调用的辅助函数` —— **四个包全被抓,原因与形态一一对应** |
+
+**误报 0 的证据**(本轮实测):新扫描器与旧扫描器在本仓库 **22 个包 /
+171 个测试文件**上**逐包 live 计数完全一致**(0 处差异;总计 **3304** 条
+断言,全部 live)。
+
+#### 本轮**仍然开着**的两处(有意保留的边界)
+
+这两处**不是**本轮的 4 个盲区(它们在改前就已是 live),本轮**没有**
+扩大判据去堵它们 —— 扩大判据会带来**误报**(门禁红),而门禁误报的代价
+高于漏报(#290 的口径):
+
+1. **函数字面量作为参数传给别的函数**(典型:`t.Run("x", func(t *testing.T){…})`)
+   → 静态判不出调用与否 → **保守记为 live**。
+2. **辅助函数以"函数值 / 方法值"形态被传递**(`var f func(*testing.T) = helper`)
+   → 这类引用**不是调用点** → 保守记为"出现过" → 偏保守。
+
+**这与 #320 登记的"残余"是同一族**(见 `docs/OPTIMIZATION.md` 第十四节
+第 76 条),口径一致。
+
+#### 本轮**关闭**的遗留项(终审复审实测确认)
+
+终审复审给出一份"可正式关闭的遗留项"清单,本轮**逐条核实**后划掉。
+**核实方式**:读代码 + 跑对应回归用例(逐条结果见
+`docs/OPTIMIZATION.md` 第十三节末"轮次 91"小节的同名表)。
+
+| 原遗留项 | 编号 | 核实方式(本轮实测) | 结论 |
+| --- | --- | --- | --- |
+| 第 19 轮 P0「跨节点上下文链是死的」 | #270 | `workflow/runtime/context_chain_test.go`(**13 例**)全绿;五个槽位各自到达下游 + `{{last_output}}` + 条件表达式不受影响 + **仓库自带示例工作流 `workflows/examples/coding-task.yaml` 的方案正文确实传到了 review 节点** | **已关闭** |
+| 第 28 轮 P2-1「`submit` 产物静默丢弃、`last_output` 留陈旧值」 | #321 | `TestSubmitOutputReachesDownstreamLastOutput` / `TestEveryValidModeHasContextSlot` → PASS | **已关闭** |
+| 第 29/30 轮 P1「`AKIA` 键值粘连形态从 6 个出口泄漏」 | #318 | `TestMaskCoversKeyValueGluedCredentialShapes`(7 形态 × 2 入口)→ PASS;git 出口单列归 #330 | **已关闭** |
+| 第 28 轮 P3「`permission.Manager.Apply` 静默死入口」 | #323 | `TestManagerHasNoSilentApplyEntry`(反射守卫)→ PASS | **已关闭** |
+| 第 27 轮 P1-1「`NaN` 连坐清空变量表」 | #306 | `TestSaveWorkflowRejectsNonFiniteVariables` / `TestSaveWorkflowKeepsValidVariablesWhenOneValueIsBad` → PASS(坏值**不连坐**旁边合法值) | **已关闭** |
+| 第 26 轮 P1「SSE 慢客户端用例 5s 墙钟阈值脆弱」 | #322 | `TestSSESlowClientDoesNotBlockProducer`(实测 0.44s)/ `TestSSESlowClientQueueOverflowDoesNotBlockProducer`(0.23s)→ PASS,**远离任何阈值** | **已关闭** |
+| 第 30 轮 P1「门禁第 6 步断言强度不足(3 种手法)」 | #320 | 3 种已堵;**残余的 4 个新盲区**由本轮 **#341** 堵住 | **部分关闭 → 已全部关闭** |
+
 ### 轮次 84:第二十轮(迭代 21 收口)—— mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决
 
 > 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 84"小节(#291-#296 全部关闭)。
@@ -2642,6 +2807,9 @@ await new Promise((r) => setTimeout(r, 0));   // ×2
 | **列表接口的 `limit` 上限 1000 无"已截断"标记** | 超过 1000 条被静默截断 | 响应里没有任何提示,真正需要大数据量时得引入分页契约。**仍然开放** |
 | **前端测试的同步点靠"猜节拍数"** | 曾用 `await new Promise(r => setTimeout(r, 0))` × 2 当同步点 | 异步链的节拍数**不是常数** → 余量为 0 → 实测全量连跑 20 次挂 1 次。**已关闭**:同步点换成"效果本身" + 类级守卫 `async-determinism-guard.test.ts`(见"前端测试稳定性"专节)(#248 / #249) |
 | **脱敏规则的"形态 × 出口"组合无人断言** | 规则本身正确,但"每个形态在每个出口都被覆盖"从未被断言 | 第十一轮终审的 P0 正是"**裸值形态 × 节点输出**"一个组合漏了,而当时**没有任何断言**能发现它 —— 改规则不会红,少一条规则也不会红。**已关闭**:可执行覆盖矩阵 `TestCredentialShapeCoverageMatrix`(13 形态 × 2 出口,**未覆盖的格子必须写清理由**)(#247) |
+| **门禁第 6 步的断言扫描:引用点的可达性** | 上一轮(#320)堵住了"零次循环 / 无匹配分支 / 未被调用的辅助函数"三种形态,但**引用点**的判据仍是"名字在本包里**出现过**" —— 恒假分支里的调用点也算"出现过" | 4 种新手法(恒假分支调用 / 函数字面量 / 无匹配 case / 链式)能骗过**整条 9 步门禁**。**已关闭**(第三十二轮 / 迭代 32,#341):判据从"存在性"升级为"**可达性**"—— 不可达分支里的引用点不计;`FuncLit` 要求确有调用点;链式按**不动点迭代**传递。自检 32 → **36** 条;真实仓库**误报 0**(22 包 / 171 个测试文件逐包 live 计数**完全一致**) |
+| **门禁第 6 步的断言扫描:非调用形态的引用** | 辅助函数以**函数值 / 方法值**形态传递(`var f func(*testing.T) = helper`)、或**只被另一个死函数**引用 —— 这类引用**不是调用点**,静态判不出 | 判为"出现过"→ 偏保守(宁可漏判,不可误报)。**仍然开放(有意边界)**:扩大判据 → 误报 → 门禁红,代价高于漏报(#290 的口径)。见 `docs/OPTIMIZATION.md` 第十四节第 76 条 |
+| **门禁第 6 步的断言扫描:函数字面量作为参数** | `t.Run("x", func(t *testing.T){…})` —— 静态判不出该字面量会不会被调用 | 保守记为 live。**仍然开放(有意边界)**,同上 |
 
 ### 已关闭的盲区(留档)
 
@@ -2797,6 +2965,7 @@ pi 的输出形态本就是自由文本,仓库自带示例工作流
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 91 | **第二十八轮(迭代 32 收口)**:门禁断言扫描的 4 个新盲区 + 终审复审确认关闭 6 条遗留项 | ✅ 已落地(工作区,待提交) | **#341 共 1 条,已关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 91 小节):**#341**(P1)门禁第 6 步的断言扫描可被 **4 种手法**骗过(辅助函数**只在恒假分支**里被调用 / 断言在**从未被调用的函数字面量**里 / 辅助函数**只在无匹配 switch 分支**里被调用 / **链式**辅助函数只在恒假分支被调用)→ **整条 9 步门禁全绿放行**;根因:`funcUnreachableReason` 用 `refs[name] > 0` 判"是否被调用",而 `packageRefs` 把**恒假分支里的调用点**也计入,且 `FuncLit` 完全不追踪调用关系 → 修法:**判据从"存在性"升级为"可达性"**(引用点收集时跳过不可达分支里的调用点 + `FuncLit` 内断言要求该字面量确有调用点 + 链式辅助函数用**不动点迭代**传递可达性);自检 **32 → 36** 条(B4/B5/B6/B7 各一条红场景 + 绿方向)。**红→绿证据**(本轮自建"抽出 assertscan 单独编译"的手法):旧扫描器 4 个绕过包全部 `live == total` → 新扫描器全部 `live == 0` 且**原因与形态一一对应**;**误报 0**:新旧扫描器在本仓库 22 个包 / 171 个测试文件上**逐包 live 计数完全一致**(3304 条断言全 live)。**另关闭 6 条**终审复审确认的遗留项(**#270** 跨节点上下文链 / **#321** `submit` 产物 / **#318** AKIA 粘连 / **#323** 权限死入口 / **#306** NaN 连坐 / **#322** SSE 慢客户端阈值),逐条核实方式见"轮次 91"一节。**仍然开着 2 处**(有意边界):函数字面量**作为参数**传给别的函数 / 辅助函数以**函数值**形态传递 —— 静态判不出 → 保守记为 live(#320 残余同族,见 OPTIMIZATION 第 76 条) |
 | 90 | **第二十六轮(迭代 31 收口)**:真实适配器路径的"同形替身"场景矩阵(14 场景 × claude/pi 两侧) | ✅ 已落地(工作区,待提交) | **#336-#340 共 5 条**(逐条见 `docs/OPTIMIZATION.md` 轮次 90 小节):**#336**(P0)CLI **退出码 0 但 stdout 为空** → 适配器一律 `StatusSuccess` + 空决策→ 节点绿灯、路由**静默走默认分支**(约定 14"该失败却成功")→ 两侧 `parseOutput` **先判空**→ 显式 FAILED + 可读原因(第二十九轮的 P3 由此**升级为 P0**:同一函数里"截断"早已是显式失败,信息量更少的空输出却是成功 —— 两套口径自相矛盾);**#337**(P1)claude:stdout **不是合法 JSON 信封**(前置提示行 / 纯文本 / 非法字节)→ 整段 Unmarshal 失败 → **决策整个丢失** → 改成**先找信封再解析**(整段 → 尾部对象 → 第一个对象,取第一个**像信封**的:含 `result`/`is_error` 字段);**#338**(P1)进程组击杀**只在取消/超时路径兑现** —— CLI 正常退出但孤儿持有管道时(`ErrWaitDelay` 路径)孤儿**继续在后台跑**(进程泄漏)→ 新增 `agent.KillProcessGroup` 在 Wait 返回后收掉孤儿(失败路径同样收);**#339**(P3)pi:自由文本输出是合法形态但**静默成功** → 改成"成功但留痕"(`Data["decision_missing"]` + 摘要标注),**不判失败**(判失败会打断仓库示例工作流的 plan/execute 节点);**#340**(P2)"信号杀死 + 孤儿持有管道"不会被 `ErrWaitDelay` 掩盖成成功 —— 实现本来就对,本轮把它**钉住**(新增 `fork_and_signal` 替身形态 + 两条孤儿用例)。**红→绿证据**:隔离副本把适配器实现**还原为 HEAD**、只保留本轮测试 → claude 侧 7 条矩阵用例 + 2 条孤儿用例红、pi 侧 5 条矩阵用例 + 2 条孤儿用例红;本轮实现全绿。新增测试文件 **5 个 Go**(`agent/internal/stubcli/stubcli_test.go` 3 / `agent/claude/stub_matrix_test.go` 5 / `agent/pi/stub_matrix_test.go` 5 / 两侧 `main_test.go` 各 1)+ 改 4 个既有 Go 文件(`agent/claude/claude.go` / `agent/pi/pi.go` / `agent/process_unix.go` / `agent/process_windows.go`)+ 3 个既有测试文件的断言(`claude_test.go` 的 `TestParseOutputNonJSON`、`claude_audit_test.go` 的 `TestParseOutputRejectsInvalidDecision`、`claude_argv_test.go` 的假 CLI 形态);前端**未改动** |
 | 88-89 | **第二十五轮(迭代 30 收口)**:git 出口脱敏 / 状态码语义 / 前端错误文案统一 / 错误文本去内部细节 / panic 兜底 / 路由级 404 文案 | ✅ 已落地(工作区,待提交) | **#330-#335 共 6 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 88-89 小节):**#330**(P0,越界)`GET /api/git/diff` 返回**未脱敏**文件内容(用户代码库里的 `.env` / 含密钥文件凭据明文进响应体,再由 GitPanel 渲染到屏幕)→ git 包的**五个出口**(`Status`/`Diff`/`Log`/`Commit`/`CurrentBranch`)一律过 `logx.Mask`(键名 ∪ 值形态,**与节点 output 出口同源**);为什么不用更松的"只按值形态":`.env` 里的密码多半是**低熵**的(`DB_PASSWORD=hunter2`)—— 值形态规则判它"不是凭据",只靠它秘密照样明文出站;**可读性回归锁**:普通 diff 拿 `git diff` 原文**逐字节**比对;**#331**(P1)内部错误(DB 锁死 / Agent 崩溃 / 超时)**一律报 400** → 用户与监控无法区分"填错了"与"后端炸了",且 `api/server_test.go` 的"错误必须是 4xx"断言把错误行为**钉成了契约** → 新增 `statusForError`(**先 code 再 kind**):内部类 → 500/502/504,**既有 4xx 映射一条没动**;**#332**(P1)同一后端错误前端**两种文案**(43 处 `toast.error` vs 16 处 `reportError`;丢掉 scope、丢掉错误码、绕过 `NETWORK_HINTS` 的中文翻译 —— 网络失败时弹的是浏览器的原始英文 `Failed to fetch`)→ 43 处逐个换成 `reportError(e, scope)` + **静态守卫**(生产代码里 `toast.error` 只许出现在 `lib/errors.ts`);`NETWORK_HINTS` 补 `AbortError` 与 `timeout of Nms exceeded`;`STATUS_HINTS` 补 5xx;`httpText` 非 JSON 分支截断 200 字;桌面 `toApiError` 补 code/kind 兜底 + panic 归一;**#333**(P2)错误文本夹带 Go/SQL/git 内部细节(`json: cannot unmarshal string into Go struct field AgentConfig.extra_args of type []string`)→ `badRequest` 改结构化错误 + 三个调用点给人话 + `wrap` 出口文本过 `logx.Mask`(原始错误只进日志);**#334**(P2)`wrap` 无 `recover()` → panic 一路冒到 net/http(服务器模式 EOF / 桌面模式泄漏 Go 包路径)→ 兜住后回 500 `INTERNAL`(`http.ErrAbortHandler` 放行;响应已提交时不再写错误体);**#335**(P3)路由级 404 文案"接口不存在"面向开发者 → 面向用户但可定位的措辞。**红→绿证据**:① `diff 不得含凭据明文("sk-ant-supersecret1234567890abcdef")` → 无明文 ② `状态码 = 400,期望 500` → 500 ③ `panic: runtime error: index out of range [3] with length 2 [recovered, repanicked]` → 500 `INTERNAL` ④ `404 文案仍是开发者口径: 接口不存在` → 新文案。新增测试文件 **3 个 Go**(`git/mask_test.go` 6 / `api/git_mask_test.go` 2 / `api/error_contract_test.go` 8)+ 改 2 个既有 Go 文件(`api/server_test.go` 1 处断言 / `git/` 无);Go 测试文件 163 → **171**、顶层 `func Test*` 869 → **899**;前端 24 → **25** 文件 / 293 → **302** 用例;**既有断言变更逐条**:① `api/server_test.go` 的"必须 4xx"→"4xx 或 5xx"(**理由**:它钉住的正是缺陷本身;精确映射改由 `TestErrorStatusMappingByKind` 逐条断言)② 前端 5 条精确匹配的 toast 断言(加了 scope)③ `api.test.ts` 的 `expect(err.code).toBeUndefined()` → `toBe("BAD_REQUEST")`(桌面模式补 code/kind 兜底,旧断言钉的是"两种模式形状不同构")④ 404 夹具同步新文案 ⑤ `Agents.test.tsx` 的 `beforeEach` 加 `resetErrorDedup()`(5 秒去重是生产行为,不是缺陷) |
 | 85 | **第二十一轮(迭代 22 收口)**:跨文件动作落地(8 项)/ 守卫能力边界登记 | ✅ 已落地(工作区,待提交) | **#297-#304 共 8 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 85):**#297**(P1)`contextx` 自带 mode → 槽位映射表(与 `workflow/model.ModeSpec` 各演各的 → model 认了而 contextx 没认的 mode **产物静默丢弃**)→ 分派改由 `model.ModeSpecFor(mode).ContextSlot` 决定,`skill` 伪 mode 单列,`submit` 什么都不写,**新增 fail-closed 默认分支**(槽位不认识 → 显式报错,不再静默丢弃);**#298**(P1)mode 取值域没有对外出口(前端硬编码一份 → 后端加了 mode 用户选不到)→ `GET /api/modes` + `WorkflowService.Modes()` + 前端 `modes()` 双分支 + Designer 下拉改后端派生(加载中用 `FALLBACK_MODES` 兜底,控件不留空)+ **跨语言守卫**(前端兜底清单必须与 `model.AllModes()` 逐项一致);**#299**(P2)版本页显示的是重新编码的 YAML(整数 `3` → `3.0`,**内容差异不是排版差异**)→ 改读 `Repo.GetWorkflowVersionDSL` 原文,老库 `dsl_text` 为空 → 回退重编码;**#300**(P3)`template` 的 6 个零引用死常量(看着像清单 → 诱导后来者多抄一份)→ 删除 + 源码级守卫;**#301**(P2)备份 `version` **只写不读**(任何 JSON 都被当备份,"恢复成功"却什么也没恢复)→ 缺失/不识别 → `BAD_REQUEST`;备份**缺 `skill_configs`**(禁用的技能换机器后又可用)→ 导出补齐 + 恢复写回(按本机已有 Skill 过滤)+ 前端文案;**#302**(P3)前端 `types.ts` 的 `"PAUSED"` → 删;**#303**(P3)Wails 绑定过期 → 重新生成(先隔离副本实测:结构性差异只有 `cancelled: number` 一行);**#304**(P3)`api.ts` 的 `stats()` 类型缺 `cancelled` → 补。**另登记有意边界 #305**:运行期状态脱敏守卫的常量表只收**字符串字面量**常量 → 把 `contextx.StateKey*` 改成 `model.ContextSlot*` 的**别名会打掉那道守卫**(实测 8 条"无法解析" + 6 条"登记与实现漂移")→ 改用"字面量 + 两道跨包守卫"达成同一目的。**红→绿证据**:① contextx 源码扫描 6 条 mode 字面量 → 0 ② `/api/modes` 404 → 200 且逐项一致 ③ `VersionDSL` 返回 `max_iter: 3.0` → `3` ④ template 6 个常量 → 0 ⑤ 缺 `version` 的备份**不报错** → `BAD_REQUEST` ⑥ 导出无 `skill_configs` → 有且恢复后禁用状态还原。新增测试文件 **5 个 Go**(`contextx/mode_source_test.go` 5 / `app/application/version_dsl_test.go` 3 / `app/application/backup_skill_test.go` 7 / `api/modes_test.go` 3 / `template/dead_const_test.go` 1)+ 改 2 个既有前端文件(`api.test.ts` +2 / `Settings.test.tsx` +3)+ 新增前端测试文件 1 个(`designer.modes.test.tsx` 8);Go 测试文件 150 → **155**、顶层 `func Test*` 814 → **833**;前端 22 → **23** 文件 / 272 → **285** 用例;门禁 9 步通过(实测 **113s**) |
