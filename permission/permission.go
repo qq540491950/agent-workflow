@@ -145,6 +145,29 @@ func (mk policyMask) requests(a Action) bool {
 	}
 }
 
+// applySet 把掩码里**显式指定**的能力位直接赋值给 base(缺省位保持原值)。
+//
+// 与 tighten(求交、只收紧)相反:这是**绝对设置**语义 ——
+// 管理面必须能把某项能力**打开**,收紧做不到这件事。
+func (mk policyMask) applySet(base Policy) Policy {
+	if mk.hasFSRead {
+		base.FilesystemRead = mk.fsRead
+	}
+	if mk.hasFSWrite {
+		base.FilesystemWrite = mk.fsWrite
+	}
+	if mk.hasGitRead {
+		base.GitRead = mk.gitRead
+	}
+	if mk.hasGitCommit {
+		base.GitCommit = mk.gitCommit
+	}
+	if mk.hasGitPush {
+		base.GitPush = mk.gitPush
+	}
+	return base
+}
+
 // merge 与另一掩码求交(两次覆盖叠加时用:只收紧,不会互相放开)。
 func (mk policyMask) merge(other policyMask) policyMask {
 	out := policyMask{}
@@ -167,6 +190,69 @@ func (mk policyMask) merge(other policyMask) policyMask {
 	out.hasGitCommit, out.gitCommit = mergeField(mk.hasGitCommit, other.hasGitCommit, mk.gitCommit, other.gitCommit)
 	out.hasGitPush, out.gitPush = mergeField(mk.hasGitPush, other.hasGitPush, mk.gitPush, other.gitPush)
 	return out
+}
+
+// ---- 局部权限更新(REST:POST /api/agents/{id}/permission)----
+
+// PolicyPatch 表示一次**局部**权限更新:只有载荷里**显式给出**的能力位
+// 会被改写,缺省的能力位保持原值。
+//
+// 为什么需要它:Policy 的 bool 无法区分"没写"与"写了 false"。
+// REST 客户端常常只发它想改的那一项 —— {"filesystem_read": true}
+// 若按"整表覆盖"解释,其余四项(filesystem_write / git_read /
+// git_commit / git_push)会被**静默置 false**:能力被吊销,且用户
+// 毫无提示(约定 14 的同类:不该动的却动了)。
+//
+// 同仓 DSL permissions 段早就用掩码区分了"没写"与"写了 false"
+// (见 policyMask)—— 同一个概念不该有两套语义(约定 13 的同源精神)。
+type PolicyPatch struct {
+	mask policyMask
+}
+
+// ParsePolicyPatch 解析**扁平**权限载荷(键名与 Policy 的 JSON 键同名:
+// filesystem_read / filesystem_write / git_read / git_commit / git_push)。
+//
+//   - 键缺省(或为 null)→ 该能力位**不修改**;
+//   - 值为布尔 → 显式赋值;
+//   - 值不是布尔 → 报错。静默当作 false 等于**吊销**该能力,
+//     而客户端以为自己改的是别的能力(约定 14)。
+//
+// 未知键**忽略**(不报错):载荷可能来自比本端点更宽的客户端契约。
+func ParsePolicyPatch(raw map[string]any) (PolicyPatch, error) {
+	var mk policyMask
+	set := func(key string, val *bool, has *bool) error {
+		v, ok := raw[key]
+		if !ok || v == nil {
+			return nil
+		}
+		b, ok := v.(bool)
+		if !ok {
+			return fmt.Errorf("权限字段 %q 的值不是布尔(实际 %T)", key, v)
+		}
+		*val, *has = b, true
+		return nil
+	}
+	if err := set("filesystem_read", &mk.fsRead, &mk.hasFSRead); err != nil {
+		return PolicyPatch{}, err
+	}
+	if err := set("filesystem_write", &mk.fsWrite, &mk.hasFSWrite); err != nil {
+		return PolicyPatch{}, err
+	}
+	if err := set("git_read", &mk.gitRead, &mk.hasGitRead); err != nil {
+		return PolicyPatch{}, err
+	}
+	if err := set("git_commit", &mk.gitCommit, &mk.hasGitCommit); err != nil {
+		return PolicyPatch{}, err
+	}
+	if err := set("git_push", &mk.gitPush, &mk.hasGitPush); err != nil {
+		return PolicyPatch{}, err
+	}
+	return PolicyPatch{mask: mk}, nil
+}
+
+// Apply 把补丁应用到基础策略:显式指定的位取补丁值,缺省的位保持原值。
+func (p PolicyPatch) Apply(base Policy) Policy {
+	return p.mask.applySet(base)
 }
 
 // Manager 管理全部 Agent 的权限策略。

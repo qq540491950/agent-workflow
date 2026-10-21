@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Settings2 } from "lucide-react";
-import { api, asArray } from "@/lib/api";
+import { api, asArray, formatExtraArgs, parseExtraArgs } from "@/lib/api";
 import type { AgentConfig, AgentInfo } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,9 @@ export default function Agents() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [configTarget, setConfigTarget] = useState<AgentInfo | null>(null);
   const [cfg, setCfg] = useState<AgentConfig | null>(null);
+  // cfgError:配置读取失败的原因。读取失败时**不给**可保存的配置 ——
+  // 空配置回传等于"清空全部环境变量"(迭代 20 / P1-2)。
+  const [cfgError, setCfgError] = useState<string | null>(null);
   const [savingCfg, setSavingCfg] = useState(false);
   const [testingAgent, setTestingAgent] = useState<string | null>(null);
 
@@ -66,12 +69,23 @@ export default function Agents() {
 
   const openConfig = async (a: AgentInfo) => {
     setConfigTarget(a);
+    // 先清掉上一份配置:GET 还没回来时不能显示(或保存)别的 Agent 的配置。
+    setCfg(null);
+    setCfgError(null);
     try {
       const c = await api.getAgentConfig(a.id);
       setCfg({ ...c, env: c.env ?? {} });
     } catch (e) {
-      toast.error((e as Error).message);
-      setCfg({ model: "", base_url: "", timeout_seconds: 0, extra_args: [], env: {} });
+      // GET 失败时**不得**回传一份空配置:后端契约里 env 缺省 = 不修改,
+      // 而前端是"整表回传"—— 若这里回传 env:{} ,后端会把它当成
+      // "显式清空全部环境变量",库里的 ANTHROPIC_AUTH_TOKEN 等凭据
+      // 全被删掉,而用户只看到"配置已保存"(迭代 20 / P1-2,约定 14)。
+      //
+      // 现在:不给出可保存的配置(保存按钮禁用)+ 弹窗里显示原因。
+      const msg = (e as Error).message;
+      setCfg(null);
+      setCfgError(msg);
+      toast.error(msg);
     }
   };
 
@@ -222,6 +236,14 @@ export default function Agents() {
               <span className="ml-2 font-mono text-xs text-muted-foreground">{configTarget?.id}</span>
             </DialogTitle>
           </DialogHeader>
+          {cfgError && (
+            <div className="rounded-md border border-red-500/40 bg-red-500/10 px-2.5 py-2 text-xs text-red-300">
+              读取配置失败:{cfgError}
+              <br />
+              为避免覆盖现有配置(含凭据),<b className="text-foreground">保存已禁用</b>
+              。请关闭后重试。
+            </div>
+          )}
           {cfg && (
             <div className="max-h-[60vh] space-y-4 overflow-auto pr-1">
               <div className="space-y-1.5">
@@ -280,14 +302,18 @@ export default function Agents() {
                 </div>
               )}
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">附加 CLI 参数(空格分隔)</Label>
+                <Label className="text-xs text-muted-foreground">
+                  附加 CLI 参数(空格分隔;含空格的参数用引号包起来)
+                </Label>
                 <Input
-                  placeholder="--verbose"
-                  value={(cfg.extra_args ?? []).join(" ")}
+                  placeholder='--verbose  --header "Authorization: Bearer ghp_xxx"'
+                  value={formatExtraArgs(cfg.extra_args ?? [])}
                   onChange={(e) =>
                     setCfg({
                       ...cfg,
-                      extra_args: e.target.value.split(" ").map((s) => s.trim()).filter(Boolean),
+                      // shell 式分词:引号内的空格属于同一个参数
+                      // (此前按空格硬切,带引号的值会被切碎 —— 迭代 20 / P2-1)。
+                      extra_args: parseExtraArgs(e.target.value),
                     })
                   }
                 />

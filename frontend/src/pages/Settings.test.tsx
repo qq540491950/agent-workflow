@@ -177,3 +177,79 @@ describe("Settings 日志级别前端校验", () => {
     );
   });
 });
+
+// ---- 迭代 20:P1-1 —— 恢复备份"已落库但运行时未生效"必须上抛 ----
+//
+// 后端 RestoreBackup 已经产出 agent_configs_apply_failed_ids:
+// 配置**已落库**,但 applyAgentConfig 失败 → 适配器实例仍是旧的
+// (旧端点/旧凭据/旧参数)。
+//
+// 前端此前把这个字段整个丢掉:只报"恢复 Agent 配置 N 个",
+// 用户据此认为凭据已恢复,实际运行时仍用旧凭据。
+describe("Settings 恢复备份:运行时未生效的上抛", () => {
+  it("apply_failed 的 Agent 逐个上抛(不得只报'已恢复 N 个')", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    m.restoreBackup.mockResolvedValue({
+      workflows_restored: 0,
+      workflows_skipped: 0,
+      workflows_invalid: 0,
+      agent_configs_restored: 1,
+      agent_configs_invalid: 0,
+      agent_configs_apply_failed_ids: ["claude-code"],
+    });
+    renderSettings();
+    await settle();
+    const file = new File([JSON.stringify({ workflows: [] })], "backup.json", {
+      type: "application/json",
+    });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [file] } });
+    await settle();
+    const warn = vi
+      .mocked(toast.warning)
+      .mock.calls.map((c) => String(c[0]))
+      .join(" | ");
+    expect(warn).toContain("已落库但未生效");
+    expect(warn).toContain("claude-code");
+  });
+
+  it("全部生效时不报'未生效'(不制造提示噪音)", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderSettings();
+    await settle();
+    const file = new File([JSON.stringify({ workflows: [] })], "backup.json", {
+      type: "application/json",
+    });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [file] } });
+    await settle();
+    const warn = vi
+      .mocked(toast.warning)
+      .mock.calls.map((c) => String(c[0]))
+      .join(" | ");
+    expect(warn).not.toContain("已落库但未生效");
+  });
+});
+
+// ---- 迭代 20:P2-3 —— 备份明文范围的口径必须与实际导出一致 ----
+//
+// 实际导出:agent_configs **整份原样**(env / behavior / extra_args)
+// + 工作流定义本体(含工作流 variables)。UI 此前只写"环境变量以明文导出",
+// 比实际窄 —— 用户按窄口径保管(约定 8:备份导出含明文是唯一例外)。
+describe("Settings 备份明文范围文案", () => {
+  it("写明三类明文来源(与 docs/api.md 一致)", async () => {
+    renderSettings();
+    await settle();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("明文范围有三类");
+    expect(text).toContain("extra_args");
+    expect(text).toContain("behavior");
+    expect(text).toContain("variables");
+  });
+
+  it("不再使用旧的窄口径文案", async () => {
+    renderSettings();
+    await settle();
+    expect(document.body.textContent ?? "").not.toContain("环境变量以明文导出");
+  });
+});

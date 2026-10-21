@@ -1,6 +1,7 @@
 package contextx
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -60,19 +61,149 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+// fakeWriter 是 StateWriter 的内存实现(测试专用)。
+type fakeWriter struct {
+	m    map[string]any
+	err  error
+	sets []string
+}
+
+func (f *fakeWriter) Get(k string) (any, bool) {
+	v, ok := f.m[k]
+	return v, ok
+}
+
+func (f *fakeWriter) Set(k string, v any) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.sets = append(f.sets, k)
+	f.m[k] = v
+	return nil
+}
+
 func TestSaveNodeOutput(t *testing.T) {
 	m := NewManager()
-	state := map[string]any{}
-	m.SaveNodeOutput("plan", "plan", map[string]any{"summary": "S", "output": "O"}, state)
-	if state["plan"] != "O" {
-		t.Errorf("plan output should win: %+v", state)
+	state := &fakeWriter{m: map[string]any{}}
+	if err := m.SaveNodeOutput("plan", "plan", map[string]any{"summary": "S", "output": "O"}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
 	}
-	m.SaveNodeOutput("review", "review", map[string]any{"summary": "REJ", "issues": []string{"a"}}, state)
-	if state["review"] != "REJ" {
-		t.Errorf("review summary: %+v", state)
+	if state.m[StateKeyPlan] != "O" {
+		t.Errorf("plan output should win: %+v", state.m)
 	}
-	if _, ok := state["issues"]; !ok {
+	if err := m.SaveNodeOutput("review", "review", map[string]any{"summary": "REJ", "issues": []string{"a"}}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
+	}
+	if state.m[StateKeyReview] != "REJ" {
+		t.Errorf("review summary: %+v", state.m)
+	}
+	if _, ok := state.m[StateKeyIssues]; !ok {
 		t.Error("issues should be stored")
+	}
+}
+
+// TestSaveNodeOutputFallsBackToSummaryWhenOutputEmpty output 为空串时必须
+// 退回 summary。
+//
+// 回归(第 19 轮):节点的 output 键**总是存在**(哪怕是空串),"键存在就用"
+// 于是把空串写进 plan 槽位 —— 只产出 summary 的 Agent(绝大多数)写出的
+// plan 恒为空串,下游照样拿不到方案。
+func TestSaveNodeOutputFallsBackToSummaryWhenOutputEmpty(t *testing.T) {
+	m := NewManager()
+	state := &fakeWriter{m: map[string]any{}}
+	if err := m.SaveNodeOutput("plan", "plan", map[string]any{"summary": "只有摘要", "output": ""}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
+	}
+	if state.m[StateKeyPlan] != "只有摘要" {
+		t.Errorf("output 为空时应退回 summary: %+v", state.m)
+	}
+}
+
+// TestSaveNodeOutputWritesLiveState 写入的是**调用方给的状态**,不是副本。
+//
+// 回归(第 19 轮 P0):此前入参是 map[string]any,生产调用方传的是
+// e.stateView(st) —— 一次性副本,写完即丢 → 整条跨节点上下文链是死的。
+// 本用例锁住"写进去的就是会话状态本身"。
+func TestSaveNodeOutputWritesLiveState(t *testing.T) {
+	m := NewManager()
+	state := &fakeWriter{m: map[string]any{}}
+	if err := m.SaveNodeOutput("plan", "plan", map[string]any{"summary": "S", "output": "O"}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
+	}
+	// 写过的键必须出现在状态里(而不是某个副本里)。
+	if got, ok := state.Get(StateKeyPlan); !ok || got != "O" {
+		t.Errorf("plan 未写进会话状态: %+v", state.m)
+	}
+	if len(state.sets) == 0 {
+		t.Error("没有发生任何写入")
+	}
+}
+
+// TestSaveNodeOutputPropagatesWriteError 写不进会话状态必须返回错误。
+//
+// 调用方据此让节点失败:写不进 = 上下文链断了,下游会拿到空上下文照常
+// 执行(约定 #14:该失败却成功等同 P0)。
+func TestSaveNodeOutputPropagatesWriteError(t *testing.T) {
+	m := NewManager()
+	state := &fakeWriter{m: map[string]any{}, err: errors.New("disk on fire")}
+	err := m.SaveNodeOutput("plan", "plan", map[string]any{"summary": "S", "output": "O"}, state)
+	if err == nil {
+		t.Fatal("写入失败必须返回错误(不得静默吞掉)")
+	}
+	if !strings.Contains(err.Error(), StateKeyPlan) {
+		t.Errorf("错误信息应点名状态键: %q", err)
+	}
+}
+
+// TestSaveNodeOutputSkillWritesLastOutput skill 节点的产物写进
+// last_output 槽位(此前 skill 分支根本没有任何槽位,产物直接丢失)。
+func TestSaveNodeOutputSkillWritesLastOutput(t *testing.T) {
+	m := NewManager()
+	state := &fakeWriter{m: map[string]any{}}
+	if err := m.SaveNodeOutput("skill", "sk", map[string]any{"summary": "SKILL-OUT", "output": "SKILL-OUT"}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
+	}
+	if state.m[StateKeyLastOutput] != "SKILL-OUT" {
+		t.Errorf("skill 产物应写进 last_output: %+v", state.m)
+	}
+}
+
+// TestBuildAndSaveShareKeyNames Build(读)与 SaveNodeOutput(写)必须用
+// 同一份键名 —— 拼写漂移会让整条链静默失效(下游读到 nil → 渲染空串)。
+func TestBuildAndSaveShareKeyNames(t *testing.T) {
+	m := NewManager()
+	state := &fakeWriter{m: map[string]any{}}
+	if err := m.SaveNodeOutput("plan", "plan", map[string]any{"summary": "S", "output": "PLAN-TEXT"}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
+	}
+	if err := m.SaveNodeOutput("review", "review", map[string]any{"summary": "REVIEW-TEXT", "issues": []string{"i"}}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
+	}
+	if err := m.SaveNodeOutput("test", "test", map[string]any{"summary": "S", "output": "TEST-TEXT"}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
+	}
+	if err := m.SaveNodeOutput("execute", "ex", map[string]any{"summary": "EXEC-TEXT", "output": ""}, state); err != nil {
+		t.Fatalf("SaveNodeOutput: %v", err)
+	}
+
+	ec := &ExecutionContext{State: state.m}
+	rv := m.Build("review", ec, "review")
+	fx := m.Build("fix", ec, "fix")
+
+	if rv[StateKeyPlan] != "PLAN-TEXT" {
+		t.Errorf("Build 未读到 SaveNodeOutput 写入的 plan: %+v", rv)
+	}
+	if rv[StateKeyReview] != "REVIEW-TEXT" {
+		t.Errorf("Build 未读到 SaveNodeOutput 写入的 review: %+v", rv)
+	}
+	if rv[StateKeyTestResult] != "TEST-TEXT" {
+		t.Errorf("Build 未读到 SaveNodeOutput 写入的 test_result: %+v", rv)
+	}
+	if fx[StateKeyIssues] == nil {
+		t.Errorf("Build 未读到 SaveNodeOutput 写入的 issues: %+v", fx)
+	}
+	if rv[StateKeyLastOutput] != "EXEC-TEXT" {
+		t.Errorf("Build 未读到 SaveNodeOutput 写入的 last_output: %+v", rv)
 	}
 }
 

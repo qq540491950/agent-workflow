@@ -116,6 +116,11 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 		args = append(args, "--cwd", req.WorkingDir)
 	}
 
+	// argv 是本机可见的凭据出口:DefaultArgs(= Agent 配置的 extra_args)
+	// 里若含凭据形态的值,启动前告警(只告警,绝不改写 argv —— 掩码后的值
+	// 不是真凭据,下发过去 CLI 鉴权必失败)。见 agent.WarnCredentialArgs。
+	coreagent.WarnCredentialArgs(a.ID(), a.cfg.DefaultArgs)
+
 	cmd := exec.CommandContext(cctx, a.cfg.Bin, args...)
 	// 取消/超时击杀整个进程组;WaitDelay 兜底关闭遗留管道,
 	// 保证孤儿进程不会让调用方阻塞在 Output() 上。

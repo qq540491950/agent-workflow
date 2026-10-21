@@ -4,6 +4,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"agentworkflow/logx"
 )
 
 // 凭据脱敏:适配器把凭据注入子进程环境后,CLI 常把环境变量原样打进
@@ -110,4 +112,46 @@ func (r *Redactor) RedactResponse(resp *AgentResponse) *AgentResponse {
 	}
 	resp.Error = r.Text(resp.Error)
 	return resp
+}
+
+// WarnCredentialArgs 检查 CLI 参数里是否含**凭据形态**的值,命中则告警。
+//
+// ---- 为什么需要它(P1-3)----
+//
+// 子进程的 argv 对**本机所有进程**可见:ps aux、/proc/<pid>/cmdline、
+// 各类进程监控/审计工具都能读到。Agent 配置里的 extra_args 原样进 argv ——
+// 于是 "--api-key sk-xxx" 这种凭据等于半公开(日志与 API 出口的脱敏管不到它)。
+//
+// 正确做法:凭据放 Agent 的**环境变量**(env,只在子进程里,别的进程读不到
+// 别人的 environ 除非同 uid 且刻意去读),extra_args 只放非敏感参数。
+//
+// ---- 判定口径(唯一来源)----
+//
+// "值呈凭据形态"这条规则全仓只有一份:logx/credential.go。
+// logx.MaskCredentialValues(v) != v ⇔ v 呈凭据形态(只认值形态,不看键名)。
+// 这里只取它的**判断**,不取它的替换结果。
+//
+// ---- 为什么不改写 argv(关键)----
+//
+// 绝不把 argv 里的值脱敏后再下发:掩码哨兵 "***" 不是真凭据,下发过去
+// CLI 鉴权必然失败(约定 5:哨兵只表示"这里曾经被掩过")。
+// 所以这里**只告警**,由用户自己把凭据挪到环境变量。
+//
+// 只检查 Agent 配置带来的参数(extra_args),不检查 prompt/task 正文:
+// 那部分是用户的任务内容,不是"配置里的凭据",混进来会刷屏。
+func WarnCredentialArgs(agentID string, args []string) {
+	var indexes []int
+	for i, a := range args {
+		if logx.MaskCredentialValues(a) != a {
+			indexes = append(indexes, i)
+		}
+	}
+	if len(indexes) == 0 {
+		return
+	}
+	// 只报位置,不报值:告警本身不能成为新的泄漏面。
+	logx.Warn("CLI 参数里含凭据形态的值:命令行参数对本机所有进程可见"+
+		"(ps aux、/proc/<pid>/cmdline),凭据应改放在 Agent 的环境变量(env)里,"+
+		"extra_args 只放非敏感参数",
+		"agent", agentID, "arg_count", len(indexes), "arg_indexes", indexes)
 }

@@ -3,7 +3,9 @@
 package validator
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -329,6 +331,13 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 		addWarn("UNKNOWN_NODE_CONFIG", n.ID, "%s", msg)
 	}
 
+	// retry 的**子键类型**校验(P2-6)。
+	//
+	// 只有声明了 retry 子键契约的节点类型(唯一来源:compiler.NodeConfigSpecFor
+	// 的 SubKeys)才查 —— 别处的 map 型配置键(prompt/args/input)内容是开放的,
+	// 逐个子键校验会误伤大量合法写法(见 knownConfigKeys 的说明)。
+	validateRetrySubKeys(n, spec, addErr)
+
 	switch n.Type {
 	case model.NodeTypeAgent:
 		if str("agent") != "" && agents != nil && !agents(str("agent")) {
@@ -347,6 +356,90 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 	}
 }
 
+// validateRetrySubKeys 校验 retry 的子键类型(约定 13:校验期与运行期同源)。
+//
+// 运行期口径(workflow/runtime/executor.go 的 retryPolicyOf):
+//
+//   - max_attempts:必须是非负整数(YAML 整数 / JSON 整数 / json.Number);
+//     **字符串不合法** —— 运行期此前把 "3" 当成 0 再钳到 1,重试被静默关闭
+//     (用户以为重试 3 次,实际只跑 1 次,节点照常成功);
+//   - backoff:必须是字符串。
+//
+// 错误码复用 INVALID_NODE:前端 CODE_HINTS 已有该码 —— 不新增码就不用
+// 同步前端(约定 10 的双模式契约)。
+//
+// 只查**类型**,不查取值集合:max_attempts 的上限(10 次)由运行期钳制;
+// backoff 的取值集合不在校验期限制 —— 校验期多加一条限制就可能挡住
+// 存量工作流(约定 13 的反例:"用户被自己的校验器挡住")。
+//
+// 错误信息只回显类型不回显值:配置值可能是凭据,回显就是新的泄漏面。
+func validateRetrySubKeys(n model.Node, spec compiler.NodeConfigSpec,
+	addErr func(code, node, format string, args ...any)) {
+	// 只有声明了 retry 子键契约的节点类型才查(唯一来源:契约表的 SubKeys)。
+	if _, ok := spec.SubKeys["retry"]; !ok {
+		return
+	}
+	raw, present := n.Config["retry"]
+	if !present {
+		return
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		addErr("INVALID_NODE", n.ID,
+			"节点 %q 的 retry 必须是对象(如 {max_attempts: 3, backoff: fixed})", n.ID)
+		return
+	}
+	if v, ok := m["max_attempts"]; ok && !isNonNegativeInt(v) {
+		addErr("INVALID_NODE", n.ID,
+			"节点 %q 的 retry.max_attempts 必须是非负整数(实际是 %T)", n.ID, v)
+	}
+	if v, ok := m["backoff"]; ok {
+		if _, isStr := v.(string); !isStr {
+			addErr("INVALID_NODE", n.ID,
+				"节点 %q 的 retry.backoff 必须是字符串(fixed 或 exponential,实际是 %T)", n.ID, v)
+		}
+	}
+}
+
+// isNonNegativeInt 判定一个值是不是非负整数。
+//
+// 接受的形态:YAML 整数(int/int64/uint…)、JSON 整数(float64,必须是整数值)、
+// json.Number。字符串 / 布尔 / 小数 / 负数都不算 —— 与运行期口径一致
+// (约定 13)。
+func isNonNegativeInt(v any) bool {
+	switch n := v.(type) {
+	case int:
+		return n >= 0
+	case int8:
+		return n >= 0
+	case int16:
+		return n >= 0
+	case int32:
+		return n >= 0
+	case int64:
+		return n >= 0
+	case uint:
+		return true
+	case uint8:
+		return true
+	case uint16:
+		return true
+	case uint32:
+		return true
+	case uint64:
+		return true
+	case float32:
+		f := float64(n)
+		return f >= 0 && f == math.Trunc(f)
+	case float64:
+		return n >= 0 && n == math.Trunc(n)
+	case json.Number:
+		i, err := n.Int64()
+		return err == nil && i >= 0
+	}
+	return false
+}
+
 // knownConfigKeys 返回该节点类型"被识别"的全部配置键(排序后)。
 //
 // 唯一来源是 compiler.NodeConfigSpecFor(约定 13:校验期与运行期同源):
@@ -356,9 +449,13 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 //   - Deprecated:已废弃的键(仍在清单里 → 报"已废弃"而不是"未知");
 //   - GlobalConfigKeys:所有节点类型都支持的全局键(enabled)。
 //
-// 子键(如 prompt.template / retry.max_attempts)**不查**:map 型配置键
-// 的内容是开放的(prompt 既可以是字符串也可以是 {template:...},args /
-// input 更是自由映射),逐个子键校验会误伤大量合法写法。
+// 子键**一般不查**:map 型配置键的内容是开放的(prompt 既可以是字符串也可以
+// 是 {template:...},args / input 更是自由映射),逐个子键校验会误伤大量
+// 合法写法。
+//
+// 例外:retry 的子键**查类型**(validateRetrySubKeys)—— 那两个子键的
+// 取值范围是封闭的(整数 / 字符串),且运行期对无法解析的取值是 fail closed,
+// 校验期不报就等于"用户被自己的校验器放过,到运行期才炸"。
 func knownConfigKeys(spec compiler.NodeConfigSpec) []string {
 	seen := map[string]bool{}
 	for _, k := range spec.Required {

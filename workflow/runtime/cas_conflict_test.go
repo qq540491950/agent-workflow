@@ -98,6 +98,19 @@ edges: []
 	}
 	waitForState(t, eng, exec.ID, model.ExecutionRunning)
 
+	// 等节点**真的开始跑**再抢裁决。
+	//
+	// 执行协程启动时会核对库里的状态(engine.go 的"启动即核对状态"):
+	// 若此刻库里已经是 CANCELLED,协程会直接收尾返回 —— 事件流里只有
+	// workflow.started,不会有 runtime.error,本用例会等满 10s 超时。
+	// 原写法在 Start 之后**立刻**抢裁决,于是"抢在协程核对之前"与
+	// "抢在之后"是**竞态**:抢早了 → 静默收尾(超时失败);抢晚了 →
+	// 终态提交冲突 → runtime.error(本用例的预期)。
+	// 实测:HEAD 上用 GOMAXPROCS=1 跑,3/3 稳定复现超时失败(与本轮改动无关)。
+	//
+	// 显式等 node.started 事件:把竞态变成确定时序 —— 断言一个字都不改。
+	waitEvent(t, bus, event.NodeStarted, 10*time.Second)
+
 	// 另一个写者抢先裁决(模拟用户同时点了取消)
 	ok, err := repo.CasExecutionState(exec.ID,
 		[]model.ExecutionState{model.ExecutionRunning}, model.ExecutionCancelled)

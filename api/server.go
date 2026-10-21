@@ -21,20 +21,6 @@ import (
 	"agentworkflow/workflow/model"
 )
 
-func policyOf(m map[string]any) permission.Policy {
-	get := func(k string) bool {
-		b, _ := m[k].(bool)
-		return b
-	}
-	return permission.Policy{
-		FilesystemRead:  get("filesystem_read"),
-		FilesystemWrite: get("filesystem_write"),
-		GitRead:         get("git_read"),
-		GitCommit:       get("git_commit"),
-		GitPush:         get("git_push"),
-	}
-}
-
 // Server 是 HTTP API 服务器。
 type Server struct {
 	app *application.App
@@ -286,7 +272,24 @@ func (s *Server) routes() {
 		if err := decodeJSON(r, &p); err != nil {
 			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
-		err := s.app.AgentSvc.SetPermission(r.PathValue("id"), policyOf(p))
+		// 局部更新:只改载荷里**显式给出**的能力位,缺省的保持原值。
+		//
+		// 此前按"整表覆盖"解释(policyOf:缺键 → false):客户端只发
+		// {"filesystem_read":true} 会把 filesystem_write / git_read /
+		// git_commit / git_push **静默置 false** —— 能力被吊销,
+		// 用户却什么都没收到(约定 14:不该动的却动了)。
+		//
+		// 解析口径与 DSL permissions 段同源(permission.ParsePolicyPatch
+		// 复用 policyMask 的"显式指定"概念,约定 13)。
+		patch, err := permission.ParsePolicyPatch(p)
+		if err != nil {
+			return badRequest(err.Error())
+		}
+		id := r.PathValue("id")
+		// 基线 = 当前**生效**的策略:缺省的能力位保持原值。
+		// 未知 Agent 走 SetPermission 里的 requireAgent → 404 NOT_FOUND。
+		base := s.app.Perms.Get(id)
+		err = s.app.AgentSvc.SetPermission(id, patch.Apply(base))
 		return writeJSON(w, map[string]any{"ok": err == nil}, err)
 	}))
 	s.mux.HandleFunc("GET /api/agents/{id}/config", s.wrap(func(w http.ResponseWriter, r *http.Request) error {

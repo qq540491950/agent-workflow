@@ -40,6 +40,7 @@ const exCancel = vi.fn();
 const agList = vi.fn();
 const agGetConfig = vi.fn();
 const agUpdateConfig = vi.fn();
+const agSetPermission = vi.fn();
 const skList = vi.fn();
 const gtStatus = vi.fn();
 const gtDiff = vi.fn();
@@ -164,6 +165,7 @@ vi.mock("@bindings/agentworkflow/app/application/agentservice.js", () =>
       List: (...a: unknown[]) => agList(...a),
       GetConfig: (...a: unknown[]) => agGetConfig(...a),
       UpdateConfig: (...a: unknown[]) => agUpdateConfig(...a),
+      SetPermission: (...a: unknown[]) => agSetPermission(...a),
     },
   ),
 );
@@ -238,6 +240,7 @@ beforeEach(() => {
   agList.mockReset();
   agGetConfig.mockReset();
   agUpdateConfig.mockReset();
+  agSetPermission.mockReset();
   skList.mockReset();
   gtStatus.mockReset();
   gtDiff.mockReset();
@@ -1788,5 +1791,182 @@ describe("双分支契约:设置更新省略 git_working_dir", () => {
     const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
     expect(body).toEqual({ log_level: "debug" });
     expect("git_working_dir" in body).toBe(false);
+  });
+});
+
+// ---- 迭代 20:P1-1 —— 备份恢复的"运行时应用失败"信号不得被前端丢掉 ----
+//
+// 后端 RestoreBackup 已经产出 agent_configs_apply_failed_ids
+// (app/application/application.go):配置**已落库**,但 applyAgentConfig
+// 失败 → 适配器实例仍是旧的(旧端点/旧凭据/旧参数)。
+//
+// 前端此前把这个字段整个丢掉:toast 只报"恢复 Agent 配置 N 个",
+// 用户据此认为**凭据已恢复**,实际运行时仍用旧凭据。
+describe("备份恢复:apply_failed_ids 必须上抛", () => {
+  const payload = {
+    workflows_restored: 1,
+    workflows_skipped: 0,
+    workflows_invalid: 0,
+    agent_configs_restored: 2,
+    agent_configs_invalid: 0,
+    agent_configs_apply_failed_ids: ["claude-code"],
+  };
+
+  it("浏览器分支透传 apply_failed_ids", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify(payload) }),
+    );
+    const { api } = await freshApi();
+    const r = await api.restoreBackup({});
+    expect(r.agent_configs_apply_failed_ids).toEqual(["claude-code"]);
+  });
+
+  it("桌面分支返回同样的形状", async () => {
+    callByID.mockResolvedValue([]); // desktop
+    stRestoreBackup.mockResolvedValue(payload);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    const r = await api.restoreBackup({});
+    expect(r.agent_configs_apply_failed_ids).toEqual(["claude-code"]);
+    expect(stRestoreBackup).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("后端未返回该字段时是 undefined(可选字段,不报错)", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => JSON.stringify({ ...payload, agent_configs_apply_failed_ids: undefined }),
+      }),
+    );
+    const { api } = await freshApi();
+    const r = await api.restoreBackup({});
+    expect(r.agent_configs_apply_failed_ids).toBeUndefined();
+  });
+});
+
+// ---- 迭代 20:P2-1 —— 附加 CLI 参数必须按 shell 式分词 ----
+//
+// Agents 页此前用 split(" ") 切分:用户填
+// `--header "Authorization: Bearer ghp_x"` 会被切成 3 段,
+// CLI 收到的参数与用户写的不是一回事(引号被切碎)。
+//
+// 参数不经 shell(exec 直接传 argv)→ 引号只是"分组"的书写方式,
+// 引号内的空格属于同一个参数。
+describe("附加 CLI 参数的分词(shell 式)", () => {
+  it("引号内的空格属于同一个参数", async () => {
+    const { parseExtraArgs } = await freshApi();
+    expect(parseExtraArgs('--header "Authorization: Bearer ghp_x"')).toEqual([
+      "--header",
+      "Authorization: Bearer ghp_x",
+    ]);
+  });
+
+  it("带空格的路径不被切碎", async () => {
+    const { parseExtraArgs } = await freshApi();
+    expect(parseExtraArgs('--path "/tmp/my dir/file.txt"')).toEqual([
+      "--path",
+      "/tmp/my dir/file.txt",
+    ]);
+  });
+
+  it("--opt=value 形态是一个参数(不被切开)", async () => {
+    const { parseExtraArgs } = await freshApi();
+    expect(parseExtraArgs("--opt=value")).toEqual(["--opt=value"]);
+    expect(parseExtraArgs('--opt="a b"')).toEqual(["--opt=a b"]);
+  });
+
+  it("多个参数与多余空白", async () => {
+    const { parseExtraArgs } = await freshApi();
+    expect(parseExtraArgs("  --verbose   --api-key  sk-x  ")).toEqual([
+      "--verbose",
+      "--api-key",
+      "sk-x",
+    ]);
+    expect(parseExtraArgs("")).toEqual([]);
+  });
+
+  it("单引号同样分组", async () => {
+    const { parseExtraArgs } = await freshApi();
+    expect(parseExtraArgs("--msg 'hello world'")).toEqual(["--msg", "hello world"]);
+  });
+
+  it("往返保真:parse(format(args)) === args", async () => {
+    const { parseExtraArgs, formatExtraArgs } = await freshApi();
+    const cases = [
+      ["--verbose"],
+      ["--header", "Authorization: Bearer ghp_x"],
+      ["--path", "/tmp/my dir/file.txt"],
+      ['--weird', 'say "hi"'],
+      ["--slash", "a\\b"],
+      ["--opt=value"],
+    ];
+    for (const args of cases) {
+      expect(parseExtraArgs(formatExtraArgs(args)), `往返不一致: ${JSON.stringify(args)}`).toEqual(
+        args,
+      );
+    }
+  });
+
+  it("格式化后的文本仍能切回同样的参数(带空格的加引号)", async () => {
+    const { formatExtraArgs } = await freshApi();
+    expect(formatExtraArgs(["--header", "Authorization: Bearer ghp_x"])).toBe(
+      '--header "Authorization: Bearer ghp_x"',
+    );
+  });
+});
+
+// ---- 迭代 20:P2-2 —— 前端必须发**全量**权限掩码 ----
+//
+// 后端 POST /api/agents/{id}/permission 改成三态(缺省 = 不修改)后,
+// 前端仍必须发全量 5 键:整表语义与旧后端一致,行为不变。
+describe("双分支契约:权限载荷是全量掩码", () => {
+  const full = {
+    filesystem_read: true,
+    filesystem_write: false,
+    git_read: true,
+    git_commit: false,
+    git_push: false,
+  };
+
+  it("web 分支:发全量 5 键", async () => {
+    callByID.mockRejectedValue(new Error("not in wails")); // web
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => "{}" });
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await freshApi();
+    await api.setAgentPermission("claude-code", full);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(Object.keys(body).sort()).toEqual(Object.keys(full).sort());
+    expect(body).toEqual(full);
+  });
+
+  it("桌面分支:发全量 5 键", async () => {
+    callByID.mockResolvedValue([]); // desktop
+    const { api } = await freshApi();
+    await api.setAgentPermission("claude-code", full);
+    // 桌面走 ag.SetPermission 绑定(桩),载荷同样必须是全量
+    expect(agSetPermission).toHaveBeenCalledWith("claude-code", full);
+  });
+});
+
+// ---- 迭代 20:P2-4 —— 新增错误码必须有中文提示 ----
+//
+// 后端新增 INVALID_GIT_WORKING_DIR(Git 工作目录不存在/不是目录)。
+// "错误码全集守卫"会红,但这里再钉一条显式断言:提示文案要说清
+// "本次保存未生效",否则用户以为只改了日志级别。
+describe("错误码提示:INVALID_GIT_WORKING_DIR", () => {
+  it("CODE_HINTS 里有该码的人话提示", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(import.meta.dirname, "api.ts"), "utf8");
+    expect(src).toContain("INVALID_GIT_WORKING_DIR:");
+    const m = src.match(/INVALID_GIT_WORKING_DIR:\s*"([^"]+)"/);
+    expect(m).not.toBeNull();
+    expect(m?.[1]).toContain("工作目录");
   });
 });

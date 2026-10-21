@@ -98,6 +98,12 @@ func TestMaskStateDataMasksFreeTextKeys(t *testing.T) {
 		"variables":           map[string]any{"api_key": leakSecret},
 		"_user_input":         map[string]any{"response": "带上 ANTHROPIC_API_KEY=" + leakSecret},
 		"revisit:rev:history": []any{"ANTHROPIC_API_KEY=" + leakSecret},
+		// 跨节点上下文链(第 19 轮):节点输出原文,凭据的载体,必须脱敏。
+		"plan":        "方案里带上 ANTHROPIC_API_KEY=" + leakSecret,
+		"review":      "评审里带上 ANTHROPIC_API_KEY=" + leakSecret,
+		"issues":      []any{"带上 ANTHROPIC_API_KEY=" + leakSecret},
+		"test_result": "测试里带上 ANTHROPIC_API_KEY=" + leakSecret,
+		"last_output": "输出里带上 ANTHROPIC_API_KEY=" + leakSecret,
 	}
 	out := MaskStateData(data)
 	raw, err := json.Marshal(out)
@@ -110,6 +116,12 @@ func TestMaskStateDataMasksFreeTextKeys(t *testing.T) {
 	// 脱敏不能把内容整体抹掉:键名保留、值替换为 ***(可读性不退化)
 	if got := fmt.Sprint(out["output"]); !strings.Contains(got, "ANTHROPIC_API_KEY=***") {
 		t.Errorf("output 应保留键名并把值替换为 ***: %q", got)
+	}
+	// 上下文链的键同样是自由文本:必须脱敏,且保留上下文可读性。
+	for _, k := range []string{"plan", "review", "issues", "test_result", "last_output"} {
+		if got := fmt.Sprint(out[k]); !strings.Contains(got, "ANTHROPIC_API_KEY=***") {
+			t.Errorf("%s 应保留键名并把值替换为 ***: %q", k, got)
+		}
 	}
 	// 内层按键名判定:"api_key" 是强敏感键 → 整值替换
 	vars, _ := out["variables"].(map[string]any)
@@ -390,6 +402,14 @@ var expectedStateKeyClass = map[string]string{
 	"node:*:result":     "free",
 	"node:*:answered":   "free",
 	"revisit:*:history": "free",
+	// 跨节点上下文链(contextx 写入,第 19 轮):自由文本 —— 节点输出原文,
+	// 凭据的载体,必须脱敏。它们**不是**条件变量(唯一定义见
+	// compiler/conditionenv.go),脱敏不改写路由语义。
+	"plan":        "free",
+	"review":      "free",
+	"issues":      "free",
+	"test_result": "free",
+	"last_output": "free",
 }
 
 // seedOnlyStateKeys 是"只被种进初始会话状态、此后没有写入点"的键。
@@ -431,7 +451,13 @@ const minScannedStateKeys = 15
 // 形态数有下限断言。
 func TestStateWritesAreClassified(t *testing.T) {
 	g := newStateGuard()
-	if err := g.scan([]string{filepath.Join("..", "compiler"), "."}); err != nil {
+	// 扫描范围:编排层(compiler)+ 运行期(runtime)+ 上下文层(contextx)。
+	//
+	// contextx 必须在内:跨节点上下文链的键(plan/review/issues/
+	// test_result/last_output)是在 contextx.SaveNodeOutput 里写进会话
+	// 状态的(第 19 轮)。不扫它 = 这批写入点对守卫不可见 = 守卫只覆盖
+	// 一部分写入点,却宣称"每个写入点都已分类"(恒真的假保护)。
+	if err := g.scan([]string{filepath.Join("..", "compiler"), ".", filepath.Join("..", "..", "contextx")}); err != nil {
 		t.Fatalf("扫描状态写入点: %v", err)
 	}
 

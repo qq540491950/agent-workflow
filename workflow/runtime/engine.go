@@ -80,6 +80,14 @@ type Engine struct {
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+	// cancelProbe 是**测试接缝**:Cancel 在"读到库里状态"之后、"动手取消"
+	// 之前调用它(默认 nil = 不调用,生产路径零开销)。
+	//
+	// 为什么需要:取消的残余窗口("读库之后、执行恰好完成")只能靠**时序**
+	// 复刻,而时序复刻必须能确定性地把执行安排在"读库期间完成" ——
+	// 没有这个钩子,测试只能靠运气(要么 flaky,要么永远跑不到那条路径)。
+	// 用法见 workflow/runtime/cancel_residual_test.go。
+	cancelProbe func()
 	// running 统计正在执行的 execute() 协程(优雅关闭等待用)。
 	running atomic.Int64
 	// eventPersistFailures 统计事件落库失败次数。
@@ -436,11 +444,70 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 //
 // 修法:快路径也**先读库里的状态**(唯一裁决来源,约定 4)——
 // 已终态 → 明确错误;运行中 → 照旧取消 ctx。
+//
+// ---- 残余窗口(迭代 17 实测):读库之后、执行恰好完成 ----
+//
+// 上面的"先读库"把窗口从"终态写库 → 句柄摘除"(几百 µs)缩到了
+// **"读库 → 动手取消"**之间,但**没有完全关闭**:读库是一次 DB 往返
+// (实测 ≈0.3~0.7ms),而执行协程的收尾(最后一次取消检查 → 终态 CAS →
+// 终态事件同步落库)也在同一时间尺度上。两者撞车时:
+//
+//	读库(看到 RUNNING)→ 执行提交 COMPLETED → 句柄查得到 → cancel()
+//	→ return nil(200),而执行最终是 COMPLETED。
+//
+// **实测(迭代 17;随机到达时刻采样 220 次)**:Δ = 取消请求的到达时刻
+// 减去协程最后一次取消检查的时刻。Δ < -250µs 一律取消成功(CANCELLED);
+// Δ ≥ +250µs 一律被拒(INVALID_TRANSITION);**[-300µs, +250µs] 是混合带**,
+// 其中约一半落到"200 假成功"(9/220 ≈ 4%)。窗口宽度 ≈ **0.5ms** ——
+// 比上一轮估的"µs 级"宽一个量级。
+//
+// **宽度由两段 DB 往返构成**(不是上一轮猜的"句柄摘除"那一段):
+//
+// 第一段:"请求到达 → ctx 真的被取消" —— 读库 + 调度(实测状态读本身
+// ≈15~30µs,忙时到 250µs);
+//
+// 第二段:执行侧"最后一次取消检查 → 终态落库" —— CAS 写库 + 终态事件
+// 同步落库(≈250µs)。
+//
+// 两段都在几百微秒量级 → 合计 ≈0.5ms,正好是实测出的混合带宽度。
+//
+// **判断:可接受(有意保留的边界)**,理由三条:
+//
+//  1. **状态与事件流仍然正确**:这条窗口里执行**没有失败**,它是真的
+//     跑完了 → 库里是 COMPLETED、事件流里只有一条 workflow.completed、
+//     **没有** workflow.cancelled(约定 14 的"该失败却成功"不适用);
+//  2. **用户的取消意图其实已经满足**:执行已经结束(跑完了),"让它停下
+//     来"的目的达到了;前端刷新后看到的是**真实状态** COMPLETED,不会
+//     留下"以为取消了、其实还在跑"的执行;
+//  3. **彻底关闭要改的是"谁写 CANCELLED"**:让取消方也走 CAS
+//     (RUNNING→CANCELLED),由**数据库**裁决"取消 vs 终态提交" —— 但那
+//     会把 CANCELLED 的写入从执行协程挪到 API 线程,连带改变:
+//     ① CANCELLED 落库的时刻(提前到请求时刻,而活还没停);
+//     ② workflow.cancelled 事件的发出者与顺序;
+//     ③ 取消分支的 CAS 冲突计数语义(现有用例
+//     `TestCancelCommitConflictIsExpectedRace` 钉住"冲突照样被计数");
+//     ④ **双击取消**的响应(第二次点会拿到 400 → 前端弹错误 toast;
+//     现在第二次点常常是 200)。
+//     这四条都是**取消流程的对外契约**,本轮不改(向后兼容是硬要求)。
+//
+// **用户看到什么**:点了取消没报错,刷新后执行显示"已完成" ——
+// 即"这个执行已经结束了,不用再取消"。
+//
+// 回归锁:`workflow/runtime/cancel_residual_test.go`
+// (`TestCancelResidualWindowSemantics`)用探针**确定性地**复刻这个时序,
+// 把当前语义钉死:返回 nil(200)、最终状态 COMPLETED、事件流里只有一条
+// workflow.completed、没有 workflow.cancelled、没有 runtime.error。
+// 将来若按上面第 3 条改,那条用例就是验收标准。
 func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 	// 库里是唯一裁决来源(约定 4):先读状态,再决定怎么取消。
 	state, err := e.loadExecState(executionID)
 	if err != nil {
 		return err // 不存在 → NOT_FOUND(404)
+	}
+	// 测试接缝:给"读库之后、执行恰好完成"的残余窗口一个确定性入口
+	// (说明见 Engine.cancelProbe)。
+	if e.cancelProbe != nil {
+		e.cancelProbe()
 	}
 
 	switch state {

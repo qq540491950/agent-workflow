@@ -862,7 +862,16 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 				}
 
 				// 2. 评估出口分支
-				if idx, ok := l.selectExitBranch(exitBranches, st, decisionNode.ID, decisionSkipped); ok {
+				idx, ok, err := l.selectExitBranch(exitBranches, st, decisionNode.ID, decisionSkipped)
+				if err != nil {
+					// 出口分支下标写不进状态 = 恢复时无法回放已选定的
+					// 分支(可能"人批准 A、恢复后走 B")。显式失败,不让
+					// 它静默降级(约定 #14)。
+					l.abortRouteRecordFailed(ctx, actions, st, env, decisionNode.ID, err)
+					yield(escalateEvent(ctx, actions), nil)
+					return
+				}
+				if ok {
 					for ev, err := range exitAgents[idx].Run(ctx) {
 						if !yield(ev, err) {
 							return
@@ -890,7 +899,13 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 						// 节点重新执行过决策节点,output/decision 是本轮的新值,
 						// 与循环开始前的那一份不同。求值结果照样记进状态,
 						// 供后续恢复回放(见 selectExitBranch)。
-						if idx, ok := l.selectExitBranch(exitBranches, st, decisionNode.ID, false); ok {
+						idx, ok, err := l.selectExitBranch(exitBranches, st, decisionNode.ID, false)
+						if err != nil {
+							l.abortRouteRecordFailed(ctx, actions, st, env, decisionNode.ID, err)
+							yield(escalateEvent(ctx, actions), nil)
+							return
+						}
+						if ok {
 							for ev, err := range exitAgents[idx].Run(ctx) {
 								if !yield(ev, err) {
 									return
@@ -981,6 +996,32 @@ func (l *lowerer) abortNoRoute(ctx agent.InvocationContext, actions *session.Eve
 	//     于是只写 NodeStates 的那个 FAILED 会被覆盖回 SUCCESS —— UI 上
 	//     "决策点失败"就退化成了成功(实测)。
 	//   - merge 节点读的是 StatusKey,不双写则下游同样看不到失败。
+	st.Set(StatusKey(nodeID), string(model.NodeFailed))
+	env.SetNodeState(nodeID, string(model.NodeFailed))
+	env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, nodeID, map[string]any{
+		"node": nodeID, "error": msg,
+	}))
+}
+
+// abortRouteRecordFailed 记录"出口分支下标写不进会话状态"的中止。
+//
+// 为什么必须显式失败(约定 #14):route:<节点>:branch 是**恢复路径回放
+// 分支**的唯一依据(runtime/state_mask.go 的"output 键的双重身份"一节)。
+// 写失败时这条保证**静默失效** —— 恢复会重新求值出口条件,而求值输入是
+// 脱敏副本(output)且可能被后续节点覆盖 → "人批准 A 分支,恢复后走 B 分支"。
+// 用户看不到任何异常,只看到流程跑完了,但走的是另一条分支。
+// 显式失败 + 可读原因,让用户知道该修什么。
+func (l *lowerer) abortRouteRecordFailed(ctx agent.InvocationContext, actions *session.EventActions,
+	st StateAccess, env *RunEnv, nodeID string, cause error) {
+	msg := fmt.Sprintf("决策节点 %s 的出口分支无法记录到会话状态(%s): %v;"+
+		"恢复执行时无法回放已选定的分支,可能走错分支",
+		nodeID, RouteBranchKey(nodeID), cause)
+	logx.Warn(msg, "execution", env.Exec.ID, "node", nodeID)
+	st.Set(KeyAbort, "FAILED:"+nodeID)
+	env.SetAbort("FAILED:" + nodeID)
+	st.Set("_error", msg)
+	// 与 abortNoRoute 同口径:状态键与节点视图都要写,否则 engine 收尾时
+	// collectResult 用 StateData 整体替换 NodeStates,失败会被覆盖回成功。
 	st.Set(StatusKey(nodeID), string(model.NodeFailed))
 	env.SetNodeState(nodeID, string(model.NodeFailed))
 	env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, nodeID, map[string]any{
@@ -1191,20 +1232,28 @@ func (l *lowerer) matchBranch(branches []RouteBranch, st StateAccess) (int, bool
 //
 // 记录的是**分支下标**(枚举),不含任何自由文本:不落凭据(约定 #8),
 // 又足以在恢复时精确回到同一条分支。
+//
+// 写失败**必须报错**:route:<id>:branch 是恢复路径回放分支的**唯一依据**
+// (runtime/state_mask.go 的"output 键的双重身份"一节)。写失败时恢复会
+// 重新求值出口条件,而求值输入是脱敏副本且可能被后续节点覆盖 ——
+// "人批准 A 分支,恢复后走 B 分支"。这条保证静默失效比崩溃更危险,
+// 所以这里返回 error,由调用方显式让节点失败(约定 #14)。
 func (l *lowerer) selectExitBranch(branches []RouteBranch, st StateAccess,
-	decisionNodeID string, decisionSkipped bool) (int, bool) {
+	decisionNodeID string, decisionSkipped bool) (int, bool, error) {
 	if decisionSkipped {
 		if idx, ok := recordedExitBranch(st, decisionNodeID); ok && idx >= 0 && idx < len(branches) {
-			return idx, true
+			return idx, true, nil
 		}
 	}
 	idx, ok := l.matchBranch(branches, st)
 	if !ok {
-		return idx, false
+		return idx, false, nil
 	}
 	// 记录路由依据:结构化枚举(分支下标),不落凭据。
-	_ = st.Set(RouteBranchKey(decisionNodeID), idx)
-	return idx, true
+	if err := st.Set(RouteBranchKey(decisionNodeID), idx); err != nil {
+		return idx, false, fmt.Errorf("记录出口分支下标(%s)失败: %w", RouteBranchKey(decisionNodeID), err)
+	}
+	return idx, true, nil
 }
 
 // recordedExitBranch 读出状态里记录的出口分支下标。

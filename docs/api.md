@@ -475,6 +475,97 @@ Resume / Retry 的 CAS 已把状态落成 `RUNNING`、但句柄还没注册),协
 **并发取消**:状态变更走 CAS,只产生一次 `CANCELLED` 与一次
 `workflow.cancelled` 事件(约定 4)。
 
+### 13. CLI 参数(argv)是凭据的**本机可见**出口(第二十一轮变更)
+
+**问题**:Agent 配置里的 `extra_args` 会被原样拼进子进程的**命令行参数**。
+而 argv 对**本机所有进程**可见 —— `ps aux`、`/proc/<pid>/cmdline`、各类
+进程监控与审计工具都能读到。日志与 API 出口的脱敏**管不到它**:凭据在
+argv 里就是半公开的。
+
+**现在的行为**:两个 CLI 适配器(`claude-code` / `pi-agent`)**启动 CLI 之前**
+检查自己带来的那部分参数(Agent 配置的 `extra_args`;pi 侧对应
+`pi.Config.DefaultArgs`),只要有**按值形态判定为凭据**的项就发一条
+WARN 日志:
+
+- 判定口径**唯一来源**:`logx/credential.go`("值的形态"规则全仓只有一份,
+  `logx.MaskCredentialValues(v) != v` ⇔ v 呈凭据形态);
+- 告警只报**位置**(第几个参数),**不回显值** —— 告警本身不能成为新的
+  泄漏面。
+
+**为什么不把 argv 里的值脱敏后再下发**:掩码哨兵 `***` 不是真凭据,下发过去
+CLI 鉴权**必然失败**(约定 5:哨兵只表示"这里曾经被掩过")。所以这里
+**只告警、不改写**,由用户自己把凭据挪到环境变量。
+
+**建议**:凭据放 Agent 的 `env`(只在子进程里生效,别的进程读不到它的
+environ);`extra_args` 只放非敏感参数。
+
+> **本轮不做的事**:prompt / task 全文也进 argv(claude 是 `-p <prompt>`,
+> pi 是 `--task <task>`)。改成 stdin 需要先确认两个 CLI 是否支持、以及
+> 大段文本走 stdin 的行为差异 —— 风险不可控,本轮**不动**,登记为长期方案。
+
+**验证**:`agent/claude/claude_argv_test.go`、`agent/pi/pi_argv_test.go`
+(告警必须发出 + **下发的仍是原值**,防止将来有人"顺手"加一层脱敏把鉴权改坏)。
+
+### 14. Mock 行为脚本(`behavior`)的结构契约(第二十一轮变更)
+
+`behavior` 是 Mock Agent 的演示脚本,前端给的是**自由 JSON 文本框**。
+它的结构契约现在**明确写死**:
+
+```
+behavior := { <mode>: { decisions?: string[], summary_template?: string, fail_with?: string } }
+```
+
+**两条变化**:
+
+1. **逐键合并**:用户只写 `decisions` 时,内置默认脚本里的
+   `summary_template` **保留**。此前是 `merged[mode] = raw` **整体替换** ——
+   用户写一个键,默认脚本的其余键全丢(约定 14:不该动的却动了)。
+2. **未知键 / 错类型在保存期报错**:`PUT /api/agents/{id}/config` 返回
+   **400**、`code=BAD_REQUEST`,`error` 里指出出问题的 mode 与字段名。
+   此前未知键被 `continue` **静默丢弃** —— 用户把 `decisions` 写成
+   `decision`,脚本不生效,界面却提示"已保存"(约定 14:静默丢弃与崩溃同样危险)。
+
+**例外:凭据位放行**。`behavior` 是自由 JSON 框,用户可能把 `api_key` 这类
+凭据放进去 —— 那是既有契约(GET 掩码、往返按同路径合并,见第 11 节)。
+判定口径与掩码**同源**:`logx.MaskValue` 会把它的值换成 `***` 的键就是
+凭据位,这类键**不报"未知"**。
+
+**适用范围**:只对 Mock Agent(`mock-claude` / `mock-pi` / `mock`)生效 ——
+`behavior` 只被 `buildMock` 读,别的 Agent 上它是**死配置**,不该因为它
+挡住保存。
+
+**验证**:`app/application/mock_behavior_test.go`。
+
+### 15. 节点 `retry` 子键的类型契约(第二十一轮变更)
+
+```
+retry := { max_attempts?: 非负整数, backoff?: string }
+```
+
+- `max_attempts` 必须是非负整数。合法形态:YAML 整数、JSON 整数、
+  `json.Number`;**字符串不合法**(`"3"` 是笔误,不是"重试 3 次")。
+  上限 **10 次**(运行期钳制),`0` 与缺省同义(不重试)。
+- `backoff` 必须是字符串(`fixed` / `exponential`)。
+
+**两层结论一致**(约定 13:校验期与运行期同源):
+
+| 层 | 位置 | 行为 |
+| --- | --- | --- |
+| 校验期 | `workflow/validator` | 报 `INVALID_NODE`(节点定义非法) |
+| 运行期 | `workflow/runtime` | **fail closed**:节点失败并说明原因(`retry.max_attempts 必须是整数(实际是 string)`) |
+
+此前运行期用 `toInt` 读 `max_attempts`,字符串 `"3"` 认不出来 → `0` →
+钳到 `1` → **重试被静默关闭**:用户以为重试 3 次,实际只跑 1 次,节点照常
+SUCCESS(约定 14:该失败却成功)。
+
+> `workflow/compiler/nodeconfig.go` 的契约表(唯一来源)未变:`retry` 的子键
+> 仍是 `max_attempts` / `backoff`;子键的**类型规则**写在
+> `workflow/validator/validator.go`,运行期实现写在
+> `workflow/runtime/executor.go` 的 `retryPolicyOf`。
+
+**验证**:`workflow/runtime/retry_policy_test.go`、
+`workflow/validator/retry_config_test.go`。
+
 ## SSE 实时事件流(GET /api/events)
 
 - 连接建立立即返回 `text/event-stream` 响应头与注释行(`: connected`),

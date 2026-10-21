@@ -250,7 +250,11 @@ func defaultMockBehavior(id string) map[string]any {
 }
 
 // buildMock 按行为配置构造 Mock Agent(演示用,决策序列可自定义)。
-// behavior 为 nil 表示使用内置默认脚本;非 nil 时按 mode 合并覆盖默认。
+// behavior 为 nil 表示使用内置默认脚本;非 nil 时按 mode **逐键合并**覆盖默认。
+//
+// 逐键合并(P2-5):用户只写 decisions 时,默认脚本里的 summary_template
+// 必须保留。此前是 `merged[mode] = raw` **整体替换** —— 用户写一个键,
+// 默认脚本的其余键全丢(约定 14:不该动的却动了)。
 func buildMock(id string, behavior map[string]any) agent.Agent {
 	name := id
 	switch id {
@@ -260,10 +264,19 @@ func buildMock(id string, behavior map[string]any) agent.Agent {
 		name = "Mock Pi(演示)"
 	}
 	merged := defaultMockBehavior(id)
-	if behavior != nil {
-		for mode, raw := range behavior {
-			merged[mode] = raw
+	for mode, raw := range behavior {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue // 结构错由 validateMockBehavior 在保存期报出
 		}
+		base, _ := merged[mode].(map[string]any)
+		if base == nil {
+			base = map[string]any{}
+		}
+		for k, v := range m {
+			base[k] = v // 只覆盖用户写了的键
+		}
+		merged[mode] = base
 	}
 	scripts := map[string]*mock.Script{}
 	for mode, raw := range merged {
@@ -272,11 +285,7 @@ func buildMock(id string, behavior map[string]any) agent.Agent {
 			continue
 		}
 		sc := &mock.Script{}
-		if arr, ok := m["decisions"].([]any); ok {
-			for _, d := range arr {
-				sc.Decisions = append(sc.Decisions, agent.AgentDecision(strings.ToUpper(fmt.Sprint(d))))
-			}
-		}
+		sc.Decisions = mockBehaviorDecisions(m["decisions"])
 		if tpl, ok := m["summary_template"].(string); ok {
 			sc.SummaryTemplate = tpl
 		}
@@ -288,6 +297,132 @@ func buildMock(id string, behavior map[string]any) agent.Agent {
 	def := scripts["*"]
 	delete(scripts, "*")
 	return mock.New(mock.Options{ID: id, Name: name, Scripts: scripts, Default: def})
+}
+
+// mockBehaviorDecisions 把 behavior 里的 decisions 读成决策序列。
+//
+// 两种形态都认:[]any(JSON 往返后的形态)与 []string(直接构造的形态)。
+// 元素统一转大写 —— 决策取值必须大写(路由按大写匹配)。
+func mockBehaviorDecisions(v any) []agent.AgentDecision {
+	var out []agent.AgentDecision
+	appendOne := func(d any) {
+		out = append(out, agent.AgentDecision(strings.ToUpper(fmt.Sprint(d))))
+	}
+	switch arr := v.(type) {
+	case []any:
+		for _, d := range arr {
+			appendOne(d)
+		}
+	case []string:
+		for _, d := range arr {
+			appendOne(d)
+		}
+	}
+	return out
+}
+
+// mockAgentIDs 是内置 Mock Agent 的 ID 集合。
+//
+// 与 applyAgentConfig 的 mock 分支保持一致:behavior 只被 buildMock 读,
+// 别的 Agent 上它是**死配置** —— 不该因为它挡住保存。
+var mockAgentIDs = map[string]bool{
+	"mock-claude": true,
+	"mock-pi":     true,
+	"mock":        true,
+}
+
+// mockBehaviorFields 是 Mock 行为脚本**被运行期读取**的字段
+// (唯一来源:buildMock 读的那几个键;前端类型与之对应)。
+//
+// 顺序即报错提示里的顺序,与 docs/api.md 的契约写法一致。
+var mockBehaviorFields = []string{"decisions", "summary_template", "fail_with"}
+
+// validateMockBehavior 校验 Mock 行为脚本的结构(未知键 / 错类型 → 报错)。
+//
+// 契约(前端自由 JSON 框的正式契约,见 docs/api.md):
+//
+//	behavior := { <mode>: { decisions?: string[], summary_template?: string, fail_with?: string } }
+//
+// 为什么要校验:此前 buildMock 对不认识的键 `continue` 静默丢弃 —— 用户把
+// decisions 写成 decision,脚本不生效,界面却提示"已保存"(约定 14:静默
+// 丢弃与崩溃同样危险)。
+//
+// 例外:**凭据位**放行。behavior 是自由 JSON 框,用户可能把 api_key 这类
+// 凭据放进去 —— 那是既有契约(GET 掩码、往返合并,见 agent.Masked);
+// 判定口径与掩码同源(logx.MaskValue 会把它的值换成 "***" 的键就是凭据位)。
+//
+// 错误码复用 BAD_REQUEST(前端 CODE_HINTS 已有该码 → 不用改前端,
+// 约定 10 的双模式契约)。
+//
+// 错误信息只回显键名与类型,不回显值:值可能是凭据,回显就是新的泄漏面。
+func validateMockBehavior(behavior map[string]any) error {
+	for mode, raw := range behavior {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			return model.NewError(model.KindValidationError, "BAD_REQUEST",
+				fmt.Sprintf("behavior 的 %q 必须是对象(如 {\"decisions\": [\"APPROVED\"]}),实际是 %T", mode, raw))
+		}
+		for key, v := range m {
+			if err := validateMockBehaviorField(mode, key, v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateMockBehaviorField 校验 behavior 里单个 mode 对象的字段。
+func validateMockBehaviorField(mode, key string, v any) error {
+	switch key {
+	case "decisions":
+		switch arr := v.(type) {
+		case []any:
+			for _, d := range arr {
+				if _, ok := d.(string); !ok {
+					return model.NewError(model.KindValidationError, "BAD_REQUEST",
+						fmt.Sprintf("behavior 的 %q.decisions 必须是字符串数组,元素是 %T", mode, d))
+				}
+			}
+		case []string:
+		default:
+			return model.NewError(model.KindValidationError, "BAD_REQUEST",
+				fmt.Sprintf("behavior 的 %q.decisions 必须是字符串数组,实际是 %T", mode, v))
+		}
+		return nil
+	case "summary_template", "fail_with":
+		if _, ok := v.(string); !ok {
+			return model.NewError(model.KindValidationError, "BAD_REQUEST",
+				fmt.Sprintf("behavior 的 %q.%s 必须是字符串,实际是 %T", mode, key, v))
+		}
+		return nil
+	}
+	if isCredentialBehaviorKey(key) {
+		return nil // 凭据位:放行(掩码契约)
+	}
+	return model.NewError(model.KindValidationError, "BAD_REQUEST",
+		fmt.Sprintf("behavior 的 %q 里有未知的字段 %q(可用: %s;凭据位如 api_key 也允许)",
+			mode, key, strings.Join(mockBehaviorFields, " / ")))
+}
+
+// isCredentialBehaviorKey 判断某个键是不是"凭据位"(掩码规则会替换它的值)。
+//
+// 口径与掩码**同源**:用 logx.MaskValue 探一次 —— 值被换成 "***" 的键
+// 就是凭据位(logx/credential.go 的值形态规则 + logx/mask.go 的键名规则)。
+//
+// 为什么放行凭据位:behavior 是用户的自由 JSON 框,凭据放进去是既有契约
+// (GET 掩码、往返合并,见 agent.Masked / agent.MergeMaskedBehavior)。
+// 把它们当"未知键"报错会打死这条契约。
+func isCredentialBehaviorKey(key string) bool {
+	masked, ok := logx.MaskValue(map[string]any{key: "probe"}).(map[string]any)
+	if !ok {
+		return false
+	}
+	v, ok := masked[key]
+	if !ok {
+		return false
+	}
+	s, ok := v.(string)
+	return ok && s == agent.MaskedValue
 }
 
 // reloadAgents 根据持久化配置注册 Agent 适配器。
@@ -349,6 +484,21 @@ func (a *App) reloadAgents() {
 func boolOf(v any) bool {
 	b, _ := v.(bool)
 	return b
+}
+
+// cloneStringMap 复制一张字符串 map(nil → nil)。
+//
+// 用于"缺省 = 不修改"的字段:把已存值原样带回提交的配置,
+// 不能直接复用原 map(后续的合并循环会就地改它)。
+func cloneStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // SkillDisabled 报告 Skill 是否被禁用(执行协程读,需加锁)。
@@ -1199,6 +1349,18 @@ func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
 	if err := s.app.requireAgent(id); err != nil {
 		return err
 	}
+	// Mock 行为脚本的结构校验(P2-5):未知键 / 错类型直接报错。
+	//
+	// 此前 buildMock 对不认识的键 `continue` 静默丢弃 —— 用户把 decisions
+	// 写成 decision,脚本不生效,界面却提示"已保存"(约定 14)。
+	//
+	// 只对 Mock Agent 生效:behavior 只被 buildMock 读(applyAgentConfig 的
+	// mock 分支),别的 Agent 上它是**死配置** —— 不该因为它挡住保存。
+	if mockAgentIDs[id] {
+		if err := validateMockBehavior(cfg.Behavior); err != nil {
+			return err
+		}
+	}
 	// 合并掩码值:*** → 沿用已存值
 	stored, err := s.app.loadAgentConfig(id)
 	if err != nil {
@@ -1218,6 +1380,25 @@ func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
 			"default_working_dir 不生效(运行期从不读取该设置):"+
 				"请改用节点级 config.working_dir,或清空该字段")
 	}
+	// env 的**第四态**契约。
+	//
+	// 约定 5 只定义了 env 表**内部**的三态(逐键):"***" 保留原值、
+	// 空串删除该键、无原值的 "***" 丢弃。整张表本身的"给不给"此前
+	// 没有定义 —— 而"没给"被当成了"清空全部":
+	//
+	//   缺省(nil)→ **不修改**:保留库里已存的环境变量。
+	//   {}       → **显式清空全部**。
+	//   {k:v}    → **整表替换**:逐键按约定 5 合并,表里没有的键被删除
+	//              (前端是整表回传:用户删掉的行就是要删掉)。
+	//
+	// 为什么"缺省"必须是"不修改":一个只想改模型的请求
+	// (PUT {"model":"x"})此前会顺手把 ANTHROPIC_AUTH_TOKEN 等
+	// **全部凭据删掉**,而用户只看到"已保存" —— 下一次调用 Agent
+	// 就没有鉴权了(约定 14:不该动的却动了)。
+	//
+	// 前后端必须同步(约定 10):前端 Agents 页在 GET 失败时**不得**
+	// 回传一份空表(那等于清空全部凭据)—— 失败时不给出可保存的配置,
+	// 保存按钮禁用。
 	if cfg.Env != nil {
 		for k, v := range cfg.Env {
 			switch v {
@@ -1234,6 +1415,9 @@ func (s *AgentService) UpdateConfig(id string, cfg agent.AgentConfig) error {
 		if len(cfg.Env) == 0 {
 			cfg.Env = nil
 		}
+	} else {
+		// 缺省 = 不修改:把已存的 env 原样带回(库里是**真值**,不是掩码)。
+		cfg.Env = cloneStringMap(stored.Env)
 	}
 	// ExtraArgs 的 *** 同样表示"保留原值"(约定 5),但它是有序的
 	// []string,不能按键合并 —— 必须按**选项名**对齐(agent.MergeExtraArgs):
@@ -1264,7 +1448,10 @@ func (s *AgentService) ResetConfig(id string) error {
 	if err := s.app.requireAgent(id); err != nil {
 		return err
 	}
-	cfg := agent.AgentConfig{}
+	// env 必须是**显式空表**:UpdateConfig 的契约里"env 缺省 = 不修改",
+	// 而"恢复默认"要清空环境变量 —— 不显式给空表就清不掉
+	// (约定 5 的第四态:必须把"清空"与"不给"区分开)。
+	cfg := agent.AgentConfig{Env: map[string]string{}}
 	return s.UpdateConfig(id, cfg)
 }
 
@@ -1559,6 +1746,21 @@ func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNode
 		}
 		level = strings.ToLower(strings.TrimSpace(logLevel))
 	}
+	// git_working_dir 必须**存在且是目录**:此前完全不校验 ——
+	// 用户填一个不存在的路径,界面提示"已保存",此后每个 git / script /
+	// agent 节点因 cmd.Dir 不存在而失败,报错信息与设置页毫无关联
+	// (约定 14:该失败却成功)。
+	//
+	// 校验放在**落库之前**(与 log_level 同一口径):目录非法时一个字段
+	// 都不落库、内存态一个都不改 —— 不能出现"目录没改成、日志级别改成了"
+	// 的部分成功。
+	//
+	// 空串 = 清除(回到启动默认目录),不需要存在性校验。
+	if gitWorkingDir != "" {
+		if err := validateGitWorkingDir(gitWorkingDir); err != nil {
+			return nil, err
+		}
+	}
 	// git_working_dir:**空串 = 清除**(落库空串 + 回到启动默认目录)。
 	//
 	// 此前 "" 被当作"不修改":用户在设置页清空输入框点保存,后端什么都不做,
@@ -1592,4 +1794,32 @@ func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNode
 		logx.Warn("script 节点放行开关已变更", "allow_script_nodes", *allowScriptNodes)
 	}
 	return s.Info(), nil
+}
+
+// validateGitWorkingDir 校验 Git 工作目录:必须**存在且是目录**。
+//
+// 存在的理由(迭代 20 / P2-4):此前不校验 → 用户填一个不存在的路径,
+// 设置页提示"已保存",此后每个 git / script / agent 节点因 cmd.Dir
+// 不存在而失败,报错信息(来自子进程)与设置页毫无关联 —— 用户查不到
+// "是目录填错了"(约定 14:该失败却成功)。
+//
+// 校验放在应用层而不是 git/git.go:git 包只负责"设成什么就用什么",
+// 不该夹带业务校验;应用层是设置语义的唯一入口。
+func validateGitWorkingDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return model.NewError(model.KindValidationError, "INVALID_GIT_WORKING_DIR",
+				fmt.Sprintf("Git 工作目录不存在: %s(本次保存未生效:其他设置也没有保存;"+
+					"请改成存在的目录,或清空该字段回到默认目录)", dir))
+		}
+		return model.NewError(model.KindValidationError, "INVALID_GIT_WORKING_DIR",
+			fmt.Sprintf("Git 工作目录不可访问: %s(%v)", dir, err))
+	}
+	if !info.IsDir() {
+		return model.NewError(model.KindValidationError, "INVALID_GIT_WORKING_DIR",
+			fmt.Sprintf("Git 工作目录不是目录: %s(本次保存未生效:其他设置也没有保存;"+
+				"请改成目录路径,或清空该字段回到默认目录)", dir))
+	}
+	return nil
 }

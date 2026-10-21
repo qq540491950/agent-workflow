@@ -132,7 +132,18 @@ export default function Settings() {
       }
       const unknown = r.agent_configs_unknown_ids ?? [];
       if (unknown.length > 0) parts.push(`本机无此 Agent:${unknown.join(", ")}`);
+      // 已落库但**运行时应用失败**的 Agent:配置进了库,但适配器实例没换成功
+      // —— 这一路的调用仍走旧实例(旧凭据/旧端点/旧参数)。
+      // 不上抛的话用户看到"恢复 Agent 配置 N 个"就以为凭据已恢复
+      // (迭代 20 / P1-1:后端早就产出了这个字段,前端整个丢掉了)。
+      const applyFailed = r.agent_configs_apply_failed_ids ?? [];
+      if (applyFailed.length > 0) parts.push(`已落库但未生效 ${applyFailed.length} 个`);
       toast.success(parts.join(","));
+      if (applyFailed.length > 0) {
+        toast.warning(
+          `以下 Agent 配置已落库但未生效(运行时仍用旧配置/旧凭据,需重启或重新保存):${applyFailed.join(", ")}`,
+        );
+      }
       if (r.workflows_invalid > 0 || r.agent_configs_invalid > 0) {
         toast.warning(
           unknown.length > 0
@@ -238,8 +249,9 @@ export default function Settings() {
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground">
               备份含全部工作流与 Agent 配置。<b className="text-foreground">
-                环境变量以明文导出</b>
-              ,请妥善保管。
+                明文范围有三类</b>
+              :agent_configs 整份原样(env / behavior / extra_args)+
+              工作流定义本体(含工作流 variables)。请按"整个文件都是敏感的"对待,妥善保管。
             </p>
             <div className="flex gap-2">
               <Button variant="outline" onClick={exportBackup} disabled={backupBusy}>

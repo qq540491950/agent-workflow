@@ -203,19 +203,44 @@ func TestMaskCredentialValuesKeepsKeyName(t *testing.T) {
 
 // TestMaskValueShapeRuleIsSingleSource 值的形态规则只有一份来源。
 //
-// agent.MaskCredentialValues 必须与 logx.MaskCredentialValues 逐字节一致
-// —— 两份实现各自演化就会出现"日志侧脱敏了、制品侧没脱敏"的半吊子防护
-// (约定 #13 的同源精神)。
+// **回归背景(#263)**:本用例此前断言的是
+// `MaskCredentialValues(in)` 与 `MaskCredentialValues(in)` —— **同一个函数
+// 比较两次**,恒真 → 永远不会失败 → "两份实现各自演化就会出现日志侧脱敏了、
+// 制品侧没脱敏的半吊子防护"这件事**没有任何测试挡着**。
+//
+// 现在断言的是**两个不同的入口**:
+//
+//	Mask                 键名规则 ∪ 值形态规则
+//	MaskCredentialValues 只看值形态(制品出口)
+//
+// 两者共用同一份值形态实现(`maskCredentialShapes`),因此:
+//
+//  1. **键名规则不触发**的输入上,两者必须**逐字节相同**;
+//  2. 任何输入上,`Mask` 都不得比 `MaskCredentialValues` **少遮**(值形态
+//     规则只有一份 → 更严的那个入口不可能漏掉更松的那个已遮住的内容)。
+//     第 2 条在下面的**覆盖矩阵**里逐形态断言(矩阵的每一行都同时跑两个出口)。
+//
+// 跨包的那一半(`agent` 薄封装 vs `logx` 唯一来源)在
+// `agent/credential_mask_test.go` 里断言 —— **logx 不能 import agent**
+// (agent 依赖 logx,反向 import 成环),比对必须放在能同时 import 两边的包里。
 func TestMaskValueShapeRuleIsSingleSource(t *testing.T) {
-	inputs := []string{
+	// 键名规则**不触发**的输入:不含 api_key/token/password/secret 这类键名。
+	// 这组上两个入口必须逐字节相同(值形态规则同源 → 输出一致)。
+	same := []string{
 		"cli stderr: Bearer " + bearerJWT,
-		"ANTHROPIC_API_KEY=sk-ant-supersecretvalue",
-		"const token = getToken();",
+		"value: " + bearerJWT,
 		"value: ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+		"id: AKIAIOSFODNN7EXAMPLE",
+		"value: sk-ant-supersecretvalue",
+		"value: aB3xK9mQ2pL7vR4tY6uZ8c1Xy",
+		"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
+		"普通文本",
+		"",
 	}
-	for _, in := range inputs {
-		if got, want := MaskCredentialValues(in), MaskCredentialValues(in); got != want {
-			t.Errorf("值形态入口不一致: %q vs %q", got, want)
+	for _, in := range same {
+		if got, want := Mask(in), MaskCredentialValues(in); got != want {
+			t.Errorf("两个入口不一致(键名规则未触发的输入上必须逐字节相同):\n"+
+				"输入: %q\nMask: %q\nMaskCredentialValues: %q", in, got, want)
 		}
 	}
 }
@@ -334,6 +359,13 @@ func TestCredentialShapeCoverageMatrix(t *testing.T) {
 			}
 			if r.why == "" && r.maskedByValues && !strings.Contains(gotValues, maskPlaceholder) {
 				t.Errorf("期望出现脱敏占位符: %q → %q", r.in, gotValues)
+			}
+			// 值形态规则只有一份来源 → 更严的入口(Mask = 键名 ∪ 值形态)
+			// 不可能比更松的入口(MaskCredentialValues = 只看值形态)**少遮**:
+			// 若这里红,说明有人给两个入口写了**两份**值形态实现。
+			if r.maskedByValues && strings.Contains(gotMask, r.secret) {
+				t.Errorf("Mask 出口比 MaskCredentialValues 少遮(值形态规则不同源): %q → %q",
+					r.in, gotMask)
 			}
 		})
 	}

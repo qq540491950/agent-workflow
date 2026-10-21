@@ -96,6 +96,86 @@ export function asArray<T>(v: unknown): T[] {
   return Array.isArray(v) ? (v as T[]) : [];
 }
 
+/**
+ * 附加 CLI 参数的**分词器**(shell 式)。
+ *
+ * 背景(迭代 20 / P2-1):Agents 页此前用 `value.split(" ")` 切分 ——
+ * 用户填 `--header "Authorization: Bearer ghp_x"` 会被切成 3 段
+ * (`"Authorization:` / `Bearer` / `ghp_x"`),CLI 收到的参数与用户写的
+ * **不是一回事**(引号被切碎了,而引号里的空格本该属于同一个参数)。
+ *
+ * 参数不经 shell(exec 直接传 argv),所以引号只是"分组"的书写方式:
+ * 引号内的空格属于同一个参数,引号本身不进 argv。
+ *
+ * 与后端的契约一致:agent/config.go 明确"已存值按原文保存(含引号),
+ * 往返必须逐字节还原" —— 前端必须能**原样往返**用户写的参数:
+ * `parseExtraArgs(formatExtraArgs(args))` 必须等于 `args`。
+ */
+export function parseExtraArgs(input: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  // started 区分"当前 token 为空"与"还没有 token":
+  // `--opt ""` 是一个参数(值为空串),而不是两个。
+  let started = false;
+  let quote: '"' | "'" | null = null;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (quote) {
+      // 双引号内支持反斜杠转义(\" 与 \\);单引号内一切都是字面量。
+      if (ch === "\\" && quote === '"' && i + 1 < input.length) {
+        const next = input[i + 1];
+        if (next === '"' || next === "\\") {
+          cur += next;
+          i++;
+          continue;
+        }
+      }
+      if (ch === quote) {
+        quote = null;
+        continue;
+      }
+      cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+      if (started) {
+        out.push(cur);
+        cur = "";
+        started = false;
+      }
+      continue;
+    }
+    cur += ch;
+    started = true;
+  }
+  if (started) out.push(cur);
+  // 空参数没有意义(会被原样传给 CLI),丢弃。
+  return out.filter((a) => a !== "");
+}
+
+/** 把一个参数渲染成输入框里的写法(必要时加引号)。 */
+function quoteExtraArg(arg: string): string {
+  if (arg === "") return '""';
+  if (!/[\s"'\\]/.test(arg)) return arg;
+  return `"${arg.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * 把参数数组还原成输入框里的一行文本(与 parseExtraArgs 互逆)。
+ *
+ * 不能用简单的 `join(" ")`:带空格的参数会被切碎,用户改一个字符
+ * 再保存,参数就变了(往返不保真)。
+ */
+export function formatExtraArgs(args: string[]): string {
+  return args.map(quoteExtraArg).join(" ");
+}
+
 // ApiError 携带后端的结构化错误信息(code/kind/status)。
 // 此前 http() 只取 error 文本,把 code/kind 丢掉:403 权限不足与 400
 // 参数错误在 UI 上无法区分,用户只能看到一句裸消息。
@@ -152,6 +232,7 @@ const CODE_HINTS: Record<string, string> = {
   PI_PROCESS_ERROR: "Pi 进程异常退出",
   PI_TIMEOUT: "Pi 执行超时",
   UNSUPPORTED_AGENT_SETTING: "该 Agent 设置不生效(请改用节点级 working_dir,或清空该字段)",
+  INVALID_GIT_WORKING_DIR: "Git 工作目录不存在或不是目录(本次保存未生效,请改成有效目录)",
   // ---- 权限 / 持久化 ----
   PERMISSION_DENIED: "权限不足",
   PERMISSION_OVERRIDE_LOOSENS: "权限段试图放宽全局禁用(已按拒绝处理)",
@@ -741,6 +822,10 @@ export const api = {
     agent_configs_invalid: number;
     // 本机不存在的 Agent ID(配置无法生效,未落库)
     agent_configs_unknown_ids?: string[];
+    // 已落库但**运行时应用失败**的 Agent ID:配置进了库,但适配器实例
+    // 没换成功 —— 这一路的调用仍走旧实例(旧凭据/旧端点/旧参数)。
+    // 不计入"已恢复",必须逐个上抛(否则用户以为凭据已恢复)。
+    agent_configs_apply_failed_ids?: string[];
   }> {
     if ((await detectMode()) === "desktop") {
       return nn(await (await wailsBindings()).st.RestoreBackup(backup as unknown as never));

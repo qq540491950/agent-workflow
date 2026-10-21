@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"sort"
 	"strings"
@@ -204,7 +205,7 @@ func answeredOutcome(st compiler.StateAccess, nodeID string) (compiler.NodeOutco
 		}
 	}
 	if inst != "" {
-		_ = st.Set("user_instruction", inst)
+		_ = st.Set(contextx.StateKeyUserInstruction, inst)
 	}
 	// 复用原响应,但明确标注这是"用户已答复,复用原响应",不是 Agent 重新执行
 	out := prev
@@ -461,7 +462,16 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 	}
 
 	// 重试策略:retry.max_attempts(默认 1 = 不重试),backoff: fixed | exponential
-	maxAttempts, backoff := retryPolicyOf(node)
+	//
+	// 配置非法 → 节点**失败**(fail closed):此前字符串 "3" 被当成 0 再钳到 1
+	// → 重试被静默关闭,节点照常成功(约定 14)。
+	maxAttempts, backoff, rerr := retryPolicyOf(node)
+	if rerr != nil {
+		return compiler.NodeOutcome{
+			State: model.NodeFailed,
+			Error: fmt.Sprintf("节点 %s 的 retry 配置非法: %v", node.ID, rerr),
+		}
+	}
 	var outcome compiler.NodeOutcome
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
@@ -499,12 +509,42 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		}
 	}
 	if outcome.State == model.NodeSuccess {
-		// 保存节点输出到上下文(review/plan 等按需引用)
-		e.CtxMgr.SaveNodeOutput(mode, node.ID, map[string]any{
-			"summary": outcome.Summary, "output": outcome.Output, "issues": outcome.Data["issues"],
-		}, e.stateView(st))
+		// 保存节点输出到上下文(review/plan 等按需引用)。
+		//
+		// 写的是**活的**会话状态(st),不是 e.stateView(st) —— 后者是
+		// 新建的一次性副本,写完即丢:plan/review/issues/last_output/
+		// test_result 从未写回会话状态,下游节点读到的恒为空值,
+		// {{plan}} / {{review}} / {{issues}} / {{test_result}} 永远渲染
+		// 成空串(第 19 轮 P0:整条跨节点上下文链是死的)。
+		if err := e.CtxMgr.SaveNodeOutput(mode, node.ID, nodeOutputOf(outcome), st); err != nil {
+			// 写不进会话状态 = 上下文链断了,下游节点会拿到**空上下文**
+			// 照常执行并照常 SUCCESS(约定 #14:该失败却成功等同 P0)。
+			// 显式失败,原因可读。
+			return compiler.NodeOutcome{
+				State: model.NodeFailed,
+				Error: fmt.Sprintf("节点 %s 的输出写入会话状态失败: %v", node.ID, err),
+			}
+		}
 	}
 	return outcome
+}
+
+// nodeOutputOf 把节点结果整理成 contextx.SaveNodeOutput 的入参。
+//
+// issues 只在 Agent 真的给出了时才带上:键**存在但值为 nil**会让
+// SaveNodeOutput 往会话状态写一个空槽位(污染 state_json,且让
+// "该键有没有值"这件事变得不可判)。
+func nodeOutputOf(outcome compiler.NodeOutcome) map[string]any {
+	res := map[string]any{
+		"summary": outcome.Summary,
+		"output":  outcome.Output,
+	}
+	if outcome.Data != nil {
+		if issues, ok := outcome.Data["issues"]; ok {
+			res["issues"] = issues
+		}
+	}
+	return res
 }
 
 // reportMissingVars 上报模板渲染时缺失的变量。
@@ -592,18 +632,46 @@ func normalizeAgentStatus(s coreagent.AgentStatus) string {
 }
 
 // retryPolicyOf 读取节点 retry 配置。
-func retryPolicyOf(node *model.Node) (maxAttempts int, backoff string) {
+//
+// **fail closed**(约定 14 + P2-6):读不出合法取值 → 返回错误,让节点
+// **失败**并说明原因。
+//
+// 缺陷背景:此前 max_attempts 用 toInt 读,而 toInt 只认数值形态 ——
+// 字符串 "3" 认不出来 → 0 → 钳到 1 → **重试被静默关闭**:用户在 DSL 里
+// 写了 max_attempts: "3" 期望重试 3 次,实际只跑 1 次,节点照常 SUCCESS,
+// 没有任何提示(约定 14:静默丢弃与崩溃同样危险)。
+//
+// 合法形态(YAML 整数 / JSON 整数 / json.Number)照旧;字符串**不合法**
+// (DSL 里写 "3" 是笔误,不是"重试 3 次")。
+//
+// 校验期同口径(workflow/validator/validator.go 的 retry 子键校验),
+// 两边结论一致(约定 13)。
+func retryPolicyOf(node *model.Node) (maxAttempts int, backoff string, err error) {
 	maxAttempts = 1
 	backoff = "fixed"
 	raw, ok := node.Config["retry"].(map[string]any)
 	if !ok {
+		// retry 存在但不是对象:同样不能静默按"不重试"处理。
+		if _, present := node.Config["retry"]; present {
+			return 0, "", fmt.Errorf("retry 必须是对象(如 {max_attempts: 3, backoff: fixed})")
+		}
 		return
 	}
 	if v, ok := raw["max_attempts"]; ok {
-		maxAttempts = toInt(v)
+		n, cerr := retryMaxAttempts(v)
+		if cerr != nil {
+			return 0, "", cerr
+		}
+		maxAttempts = n
 	}
-	if v, ok := raw["backoff"].(string); ok && v != "" {
-		backoff = v
+	if v, ok := raw["backoff"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			return 0, "", fmt.Errorf("retry.backoff 必须是字符串(fixed 或 exponential),实际是 %T", v)
+		}
+		if s != "" {
+			backoff = s
+		}
 	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -612,6 +680,77 @@ func retryPolicyOf(node *model.Node) (maxAttempts int, backoff string) {
 		maxAttempts = 10
 	}
 	return
+}
+
+// retryMaxAttempts 解析 retry.max_attempts,返回可判定的尝试次数。
+//
+// 合法形态:YAML 整数(int/int64/uint…)、JSON 整数(float64,且必须是整数值)、
+// json.Number。字符串 / 布尔 / 小数 / 负数一律报错(fail closed)。
+//
+// 上限:超过 10 次按 10 次算(与 retryPolicyOf 的钳制一致);uint64 超过
+// int32 范围时先钳到上限再返回,避免转换溢出成负数。
+func retryMaxAttempts(v any) (int, error) {
+	switch n := v.(type) {
+	case int:
+		return retryAttemptsClamped(int64(n))
+	case int8:
+		return retryAttemptsClamped(int64(n))
+	case int16:
+		return retryAttemptsClamped(int64(n))
+	case int32:
+		return retryAttemptsClamped(int64(n))
+	case int64:
+		return retryAttemptsClamped(n)
+	case uint:
+		return retryAttemptsClamped(int64(n))
+	case uint8:
+		return retryAttemptsClamped(int64(n))
+	case uint16:
+		return retryAttemptsClamped(int64(n))
+	case uint32:
+		return retryAttemptsClamped(int64(n))
+	case uint64:
+		if n > math.MaxInt32 {
+			return 10, nil // 超上限:按 10 次算(与钳制一致)
+		}
+		return retryAttemptsClamped(int64(n))
+	case float32:
+		return retryAttemptsFromFloat(float64(n))
+	case float64:
+		return retryAttemptsFromFloat(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("retry.max_attempts 必须是整数(实际是 %q)", n.String())
+		}
+		return retryAttemptsClamped(i)
+	}
+	return 0, fmt.Errorf("retry.max_attempts 必须是整数(实际是 %T)", v)
+}
+
+// retryAttemptsClamped 校验非负并返回尝试次数(上限 10)。
+func retryAttemptsClamped(n int64) (int, error) {
+	if n < 0 {
+		return 0, fmt.Errorf("retry.max_attempts 必须是非负整数(实际是 %d)", n)
+	}
+	if n > 10 {
+		return 10, nil
+	}
+	return int(n), nil
+}
+
+// retryAttemptsFromFloat 校验浮点形态:必须是整数值(3 可以,3.5 不行)。
+func retryAttemptsFromFloat(f float64) (int, error) {
+	if f != math.Trunc(f) {
+		return 0, fmt.Errorf("retry.max_attempts 必须是整数(实际是 %v)", f)
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("retry.max_attempts 必须是非负整数(实际是 %v)", f)
+	}
+	if f > 10 {
+		return 10, nil
+	}
+	return int(f), nil
 }
 
 // retryBackoffDelay 计算第 attempt 次重试前的等待时间。
@@ -718,7 +857,15 @@ func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *m
 	if resp.Decision != "" {
 		outcome.Decision = resp.Decision
 	}
-	e.CtxMgr.SaveNodeOutput("skill", node.ID, map[string]any{"summary": resp.Output, "output": resp.Output}, e.stateView(st))
+	// 技能节点的产物同样写进活的会话状态(此前写进一次性副本,等于没写)。
+	if err := e.CtxMgr.SaveNodeOutput("skill", node.ID, map[string]any{
+		"summary": resp.Output, "output": resp.Output,
+	}, st); err != nil {
+		outcome.State = model.NodeFailed
+		if outcome.Error == "" {
+			outcome.Error = fmt.Sprintf("节点 %s 的输出写入会话状态失败: %v", node.ID, err)
+		}
+	}
 	return outcome
 }
 
@@ -761,7 +908,7 @@ func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *mod
 	}))
 	// diff 结果保存为上下文,供 review 节点引用
 	if op == "diff" {
-		st.Set("git_diff", out)
+		st.Set(contextx.StateKeyGitDiff, out)
 		// 制品内容按"值的形态"脱敏后落库(约定 8)。
 		//
 		// 此前原文落库:diff 里若含用户不小心提交进仓库的凭据(.env 之类),
@@ -1005,9 +1152,9 @@ func (e *Engine) runHumanNode(ctx context.Context, env *compiler.RunEnv, node *m
 			}
 			// 人工指令写入上下文,后续 execute/fix 节点可用 {{user_instruction}} 引用
 			if inst, _ := m["instruction"].(string); inst != "" {
-				st.Set("user_instruction", inst)
+				st.Set(contextx.StateKeyUserInstruction, inst)
 			} else if resp, _ := m["response"].(string); resp != "" && resp != "approve" && resp != "reject" && resp != "continue" {
-				st.Set("user_instruction", resp)
+				st.Set(contextx.StateKeyUserInstruction, resp)
 			}
 			return compiler.NodeOutcome{
 				State:   model.NodeSuccess,
@@ -1059,18 +1206,24 @@ func (e *Engine) runSubworkflowNode(ctx context.Context, env *compiler.RunEnv, n
 }
 
 // stateView 将 StateAccess 转成普通 map(只读视图,供上下文构造)。
+//
+// 键名用 contextx 的常量(唯一定义处):这里读、contextx.Build 读、
+// contextx.SaveNodeOutput 写,三处必须是同一份键名 —— 拼写漂移会让
+// 上下文链静默失效(第 19 轮 P0)。
 func (e *Engine) stateView(st compiler.StateAccess) map[string]any {
 	view := map[string]any{}
 	for _, key := range []string{
-		"task", "plan", "git_diff", "review", "test_result", "issues",
-		"iteration", "last_output", "relevant_files", "output", "user_instruction",
+		contextx.StateKeyTask, contextx.StateKeyPlan, contextx.StateKeyGitDiff,
+		contextx.StateKeyReview, contextx.StateKeyTestResult, contextx.StateKeyIssues,
+		contextx.StateKeyIteration, contextx.StateKeyLastOutput,
+		contextx.StateKeyRelevantFiles, compiler.KeyOutput, contextx.StateKeyUserInstruction,
 	} {
 		if v, ok := st.Get(key); ok {
 			view[key] = v
 		}
 	}
 	if v, ok := st.Get(compiler.KeyLoopCount); ok {
-		view["iteration"] = v
+		view[contextx.StateKeyIteration] = v
 	}
 	return view
 }

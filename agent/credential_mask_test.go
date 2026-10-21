@@ -1,10 +1,16 @@
 package agent_test
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"agentworkflow/agent"
+	"agentworkflow/logx"
 )
 
 // 迭代 10(P0-2):制品(git diff)里的凭据脱敏。
@@ -192,5 +198,122 @@ func TestMaskCredentialValuesIdempotentOnBareShapes(t *testing.T) {
 		if once != twice {
 			t.Errorf("脱敏不幂等:\n输入: %q\n一次: %q\n两次: %q", in, once, twice)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 迭代 17(#263):值的形态规则**只有一份来源**的跨包回归锁
+// ---------------------------------------------------------------------------
+
+// TestMaskCredentialValuesMatchesLogxSingleSource agent 侧的值形态入口必须
+// 与 logx 侧**逐字节相同**。
+//
+// **为什么必须放在 agent 侧**:比对要同时看到两个入口,而 `agent` 依赖
+// `logx`(**单向**,没有环)—— `logx` 反过来 import `agent` 会成环。
+// 因此跨包比对只能写在 agent 侧(能同时 import 两边的包)。
+//
+// **回归背景(#263)**:此前的"单源"回归锁在 `logx/credential_test.go` 里,
+// 断言的是 `MaskCredentialValues(in)` 与 `MaskCredentialValues(in)` ——
+// **同一个函数比较两次**,恒真 → 永远不会失败 → 将来有人在 agent 侧
+// **重新写一份**值形态实现,没有任何测试会红(今天 agent 侧确实只是薄封装
+// `return logx.MaskCredentialValues(text)`,但那不是被断言保证的)。
+//
+// 断言的语义:**两个不同函数的输出逐字节相同** —— 只有"同一份实现"才
+// 能保证这一点。
+func TestMaskCredentialValuesMatchesLogxSingleSource(t *testing.T) {
+	inputs := []string{
+		// 键名 + 值形态
+		"ANTHROPIC_API_KEY=sk-ant-supersecret",
+		"export GITHUB_TOKEN=ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+		"AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+		"api_key: aB3xK9mQ2pL7vR4tY6uZ8c1Xy",
+		`password = "Xk9mP2qL8vR4tY6uW1zA3Bd"`,
+		"authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc",
+		// 裸值形态
+		"cli stderr: Bearer " + bearerJWT,
+		"value: " + bearerJWT,
+		"value: sk-ant-supersecretvalue",
+		"value: ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+		"id: AKIAIOSFODNN7EXAMPLE",
+		"Authorization: Basic YWRtaW46cGFzc3dvcmQxMjM=",
+		"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
+		// 低熵值(制品出口刻意不遮)
+		"password: hunter2",
+		"token=abc123 secret=xyz789",
+		// 必须原样保留的代码标识符 / 英文句子
+		"  const token = getToken();",
+		"+  const apiKey = cfg.apiKey;",
+		"-  password = getPassword();",
+		"  self.auth_token = self.get_token()",
+		"The bearer of this document is unknown.",
+		"Basic authentication is supported by the API.",
+		"普通文本",
+		"",
+	}
+	for _, in := range inputs {
+		got := agent.MaskCredentialValues(in)
+		want := logx.MaskCredentialValues(in)
+		if got != want {
+			t.Errorf("agent 与 logx 的值形态入口不一致(同一输入必须逐字节相同):\n"+
+				"输入: %q\nagent: %q\nlogx:  %q", in, got, want)
+		}
+	}
+}
+
+// TestSingleSourceAssertionIsNotDegenerate 防"单源回归锁"退化成恒真。
+//
+// #263 的教训:回归锁必须**能失败**。这里从两个角度钉住:
+//
+//  1. **两个入口不是同一个函数对象** —— 若哪天有人把
+//     `agent.MaskCredentialValues` 改成 `logx.MaskCredentialValues` 的别名
+//     (`var MaskCredentialValues = logx.MaskCredentialValues`),
+//     跨入口比对就变成"同一个函数比较两次",必须被抓住。
+//  2. **本文件里的单源用例确实同时调用了两个入口** —— 直接读本文件的
+//     AST(不看运行结果):只调一个入口的"比对"必然恒真。
+func TestSingleSourceAssertionIsNotDegenerate(t *testing.T) {
+	// (1) 两个入口是**不同的函数对象**。
+	if reflect.ValueOf(agent.MaskCredentialValues).Pointer() ==
+		reflect.ValueOf(logx.MaskCredentialValues).Pointer() {
+		t.Error("agent.MaskCredentialValues 与 logx.MaskCredentialValues 是同一个函数对象:" +
+			"跨入口比对会退化成恒真")
+	}
+
+	// (2) 单源用例里必须同时出现两个入口的调用。
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("取不到本测试文件的路径")
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, thisFile, nil, 0)
+	if err != nil {
+		t.Fatalf("解析本测试文件失败: %v", err)
+	}
+	var foundAgent, foundLogx bool
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "TestMaskCredentialValuesMatchesLogxSingleSource" {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, ok := sel.X.(*ast.Ident)
+			if !ok || sel.Sel.Name != "MaskCredentialValues" {
+				return true
+			}
+			switch x.Name {
+			case "agent":
+				foundAgent = true
+			case "logx":
+				foundLogx = true
+			}
+			return true
+		})
+	}
+	if !foundAgent || !foundLogx {
+		t.Errorf("单源用例必须同时调用 agent.MaskCredentialValues 与 logx.MaskCredentialValues"+
+			"(agent=%v logx=%v):只调一个入口的比对必然恒真", foundAgent, foundLogx)
 	}
 }
