@@ -1,0 +1,170 @@
+package main
+
+// 同形替身 CLI(迭代 31)。
+//
+// 它接收与真实 claude / pi **完全相同的参数**(参数本身不解析 —— 参数名
+// 拼错的问题由各适配器自己的 argv 用例覆盖),按环境变量指定的模式输出
+// 对应形态的 stdout/stderr,并按模式决定退出码。
+//
+// 环境变量(全部可选):
+//
+//	STUBCLI_MODE            行为模式(见下面的 switch)
+//	STUBCLI_SHAPE           输出形态:claude = JSON 信封;pi = 正文 + 尾部 JSON
+//	STUBCLI_SECRET          凭据形态的测试值(打进 stderr,用于验证脱敏)
+//	STUBCLI_EXIT_CODE       退出码(exit_code 模式)
+//	STUBCLI_PIDFILE         写下自身 PID(用于验证进程残留)
+//	STUBCLI_CHILD_PIDFILE   写下 fork 出的子进程 PID
+//	STUBCLI_SLEEP_SECONDS   fork 出的子进程存活时长(默认 60)
+//
+// 形态说明:
+//
+//	claude 形态 = {"result": "<模型回答>", "is_error": false}
+//	             —— 真实 claude CLI 在 --output-format json 下的信封。
+//	pi 形态     = "<正文>\n\n{...}" —— 真实 pi CLI 的自由文本 + 尾部 JSON。
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"time"
+)
+
+// 两段决策:第一段是"示例",第二段是真正的结论 —— 用来验证"取最后一个"。
+const (
+	decisionFirst = `{"decision": "APPROVED", "summary": "示例结论"}`
+	decisionLast  = `{"decision": "REJECTED", "summary": "最终结论"}`
+)
+
+func main() {
+	mode := os.Getenv("STUBCLI_MODE")
+	shape := os.Getenv("STUBCLI_SHAPE")
+	writePID(os.Getenv("STUBCLI_PIDFILE"), os.Getpid())
+
+	switch mode {
+	case "ok":
+		emit(shape, "分析完成\n\n"+decisionLast)
+	case "huge":
+		huge(shape)
+	case "empty":
+		// stdout 0 字节,但 stderr 有内容 —— 区分"完全静默"与"只有 stderr"。
+		fmt.Fprintln(os.Stderr, "stub: 未产生任何输出")
+	case "blank":
+		fmt.Fprint(os.Stdout, "  \n\t\n \n")
+	case "nonjson":
+		fmt.Fprintln(os.Stdout, "stub: 这是一段普通文本,里面没有 JSON。")
+	case "garbage_prefix":
+		fmt.Fprintln(os.Stdout, "stub: WARNING: 前置垃圾行")
+		emit(shape, "分析完成\n\n"+decisionLast)
+	case "multi_json":
+		emit(shape, "示例\n"+decisionFirst+"\n"+decisionLast)
+	case "exit_nonzero":
+		fmt.Fprintln(os.Stderr, "stub: 参数 --cwd 不被支持")
+		os.Exit(3)
+	case "empty_with_credential":
+		// stdout 空 + stderr 含凭据 + 退出码 0 —— 验证"空输出"的
+		// 诊断尾巴(stderr)不会把凭据带出去。
+		fmt.Fprintf(os.Stderr, "stub: 鉴权失败 token=%s\n", os.Getenv("STUBCLI_SECRET"))
+	case "exit_zero_silent":
+		// 退出码 0 且一个字节都不输出。
+	case "fork_hold_pipe":
+		forkChild()
+		emit(shape, "分析完成\n\n"+decisionLast)
+	case "fork_and_signal":
+		// fork 出持有 stdout 管道的子进程,然后父进程被信号杀死 ——
+		// 验证"进程被信号杀掉 + 管道被孤儿持有"时,适配器不会把
+		// exec.ErrWaitDelay 误判成成功(进程死了就是失败)。
+		forkChild()
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Kill()
+		}
+		time.Sleep(5 * time.Second)
+	case "sleep":
+		time.Sleep(10 * time.Minute)
+	case "binary":
+		// 非法字节落在结构化结果**内部** → 解析必然失败。
+		// NUL(0x00)在 JSON 字符串里是控制字符,标准 JSON 非法;
+		// 0xff/0xfe 是非法 UTF-8(Go 的解码器会替换成 U+FFFD,
+		// 但 NUL 足以让解析失败)。
+		if shape == "claude" {
+			fmt.Println(`{"is_error":false,"result":"分析完成` + "\x00\xff\xfe" + `"}`)
+		} else {
+			fmt.Println(`{"decision": "RE` + "\x00\xff\xfe" + `JECTED", "summary": "x"}`)
+		}
+	case "binary_prefix":
+		// 非法字节落在结构化结果**之外** → 结果仍应可解析。
+		fmt.Print("\x00\xff\xfe")
+		emit(shape, "分析完成\n\n"+decisionLast)
+	case "stderr_credential":
+		fmt.Fprintf(os.Stderr, "stub: 鉴权失败, token=%s\n", os.Getenv("STUBCLI_SECRET"))
+		os.Exit(1)
+	case "exit_code":
+		code, err := strconv.Atoi(os.Getenv("STUBCLI_EXIT_CODE"))
+		if err != nil || code == 0 {
+			code = 137
+		}
+		os.Exit(code)
+	default:
+		fmt.Fprintf(os.Stderr, "stub: 未知模式 %q\n", mode)
+		os.Exit(64)
+	}
+}
+
+// emit 按形态输出:claude 形态包成 JSON 信封,pi 形态直接输出正文。
+func emit(shape, body string) {
+	if shape == "claude" {
+		env, err := json.Marshal(map[string]any{"result": body, "is_error": false})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "stub: 信封编码失败:", err)
+			os.Exit(70)
+		}
+		fmt.Println(string(env))
+		return
+	}
+	fmt.Println(body)
+}
+
+// huge 输出远超 8MB 上限的内容(上限见 coreagent.MaxOutputBytes)。
+func huge(shape string) {
+	chunk := bytes.Repeat([]byte("x"), 64*1024)
+	for i := 0; i < 9*1024*1024/len(chunk); i++ {
+		if _, err := os.Stdout.Write(chunk); err != nil {
+			return
+		}
+	}
+	fmt.Fprintln(os.Stdout)
+	emit(shape, "分析完成\n\n"+decisionLast)
+}
+
+// forkChild fork 一个持有 stdout 管道的长命子进程后立刻返回。
+//
+// 子进程继承 stdout → 父进程退出后管道**仍被持有** → 适配器侧的
+// WaitDelay 会先到期(exec.ErrWaitDelay)。子进程与父进程同属一个
+// 进程组 → 适配器的进程组击杀能收掉它。
+func forkChild() {
+	pidFile := os.Getenv("STUBCLI_CHILD_PIDFILE")
+	if pidFile == "" {
+		return
+	}
+	secs := os.Getenv("STUBCLI_SLEEP_SECONDS")
+	if secs == "" {
+		secs = "60"
+	}
+	cmd := exec.Command("/bin/sh", "-c", "echo $$ > "+pidFile+"; sleep "+secs)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "stub: fork 子进程失败:", err)
+		return
+	}
+	// 故意不 Wait:父进程随即退出,子进程变成孤儿并继续持有 stdout 管道。
+}
+
+func writePID(path string, pid int) {
+	if path == "" {
+		return
+	}
+	_ = os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o644)
+}

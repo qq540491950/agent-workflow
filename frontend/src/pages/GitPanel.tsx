@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { RefreshCw, GitCommitHorizontal } from "lucide-react";
 import { api, asArray } from "@/lib/api";
+import { reportError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -81,8 +82,10 @@ export default function GitPanel() {
       const first = [st, df, lg].find((r) => r.status === "rejected") as
         | PromiseRejectedResult
         | undefined;
-      const why = first ? ((first.reason as Error)?.message ?? "") : "";
-      toast.error(`Git ${failed.join("/")} 查询失败${why ? ":" + why : ""}`);
+      // 报**错误对象**而不是拼好的字符串:reportError 会补上错误码
+      // (如 NOT_FOUND),用户报障时能直接给出码;scope 说清是 Git 面板
+      // 的哪几个查询失败。
+      reportError(first?.reason, `Git ${failed.join("/")} 查询失败`);
     }
   }, []);
 
@@ -107,7 +110,7 @@ export default function GitPanel() {
       setMessage("");
       refresh();
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "提交 Git 提交");
     } finally {
       setBusy(false);
     }

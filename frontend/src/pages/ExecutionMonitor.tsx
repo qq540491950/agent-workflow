@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CheckCircle2, XCircle, Circle, PauseCircle, Ban } from "lucide-react";
 import { api, asArray, subscribeEvents } from "@/lib/api";
+import { reportError } from "@/lib/errors";
 import { createRefreshDebounce } from "@/lib/debounce";
 import { createRequestGuard } from "@/lib/request-guard";
 import type { Artifact, Execution, ExecutionNode, UIEvent } from "@/lib/types";
@@ -146,7 +147,7 @@ export default function ExecutionMonitor() {
       setArtifacts(asArray<Artifact>(arts));
     } catch (err) {
       if (!guard.isCurrent(seq)) return;
-      toast.error((err as Error).message);
+      reportError(err, "加载执行详情");
     }
   }, [id, guard]);
 
@@ -202,7 +203,7 @@ export default function ExecutionMonitor() {
       setInstruction("");
       setTimeout(refresh, 300);
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "提交人工输入");
     } finally {
       setBusy(false);
     }
@@ -249,7 +250,7 @@ export default function ExecutionMonitor() {
                 try {
                   await api.cancelExecution(exec.id);
                 } catch (e) {
-                  toast.error((e as Error).message);
+                  reportError(e, "取消执行");
                 }
                 refresh();
               }}
@@ -276,7 +277,7 @@ export default function ExecutionMonitor() {
                   toast.success("重试失败节点");
                   setTimeout(refresh, 300);
                 } catch (e) {
-                  toast.error((e as Error).message);
+                  reportError(e, "重试失败节点");
                 } finally {
                   setRecoveryBusy(false);
                 }
@@ -296,7 +297,7 @@ export default function ExecutionMonitor() {
                   toast.success("已跳过失败节点");
                   setTimeout(refresh, 300);
                 } catch (e) {
-                  toast.error((e as Error).message);
+                  reportError(e, "跳过失败节点");
                 } finally {
                   setRecoveryBusy(false);
                 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	coreagent "agentworkflow/agent"
+	"agentworkflow/logx"
 	"agentworkflow/workflow/model"
 )
 
@@ -167,12 +168,45 @@ func checkRefName(name string) error {
 	return nil
 }
 
+// maskOutput 对"要返回给调用方的 git 命令输出"脱敏。
+//
+// ---- 为什么 git 包的出口必须脱敏(迭代 30,P0-1) ----
+//
+// Git 工作目录是**用户自己的代码库**:里面常有 .env、带密钥的配置文件、
+// 凭据写死在配置里的脚本。此前 `GET /api/git/diff` **原样**返回 diff
+// 文本 —— 凭据明文直接进 API 响应体,再由前端 GitPanel 渲染到屏幕
+// (违反 AGENTS.md 约定 8:"API 返回掩码",备份导出含明文是唯一例外)。
+//
+// 口径:**与节点 output 出口同源**(logx.Mask = 键名 ∪ 值形态,
+// 见 logx/credential.go 的分工说明)。为什么不用更松的"只按值形态":
+//
+//   - .env 里的密码多半是**低熵**的(DB_PASSWORD=hunter2)—— 值形态规则
+//     判它"不是凭据",只靠值形态规则,秘密照样明文出站;
+//   - 键名规则把这类也抓住(值 → ***),代价是 diff 里"键名像凭据"的
+//     代码行也被遮(取舍见 docs/api.md 的 git 出口一节)。
+//
+// **哪些出口脱敏、哪些不脱敏**:
+//
+//   - 本文件里 Status / Diff / Log / Commit / CurrentBranch ——
+//     **GitPanel 面**(经 app/application.GitService → REST / 桌面 IPC),
+//     直接呈现给用户,必须脱敏;
+//   - Run(工作流 git 节点用)—— **不**在这里脱敏:它的输出由应用层
+//     统一处理(节点 output → logx.Mask;制品 artifact → 值形态规则,
+//     见 workflow/runtime/executor.go),两处口径都是既有的、已锁定的
+//     契约(制品要保住 `const token = getToken();` 的可读性 ——
+//     workflow/runtime/masking_test.go 钉着这一条)。在这里再叠一层
+//     键名规则会把制品的可读性毁掉,反而与制品出口的既定口径打架。
+func maskOutput(s string) string { return logx.Mask(s) }
+
 // Status 返回结构化状态。
 func (s *Service) Status(ctx context.Context) (*Status, error) {
 	short, err := s.exec(ctx, s.WorkingDir(), []string{"status", "--porcelain", "-b"})
 	if err != nil {
 		return nil, err
 	}
+	// 脱敏在**解析之前**:文件路径同样可能带凭据
+	// (例如 "API_KEY=sk-….txt"),解析出来的路径也必须已脱敏。
+	short = maskOutput(short)
 	st := &Status{Modified: []string{}, Staged: []string{}, Untracked: []string{}}
 	lines := strings.Split(strings.TrimRight(short, "\n"), "\n")
 	for i, line := range lines {
@@ -210,7 +244,7 @@ func (s *Service) Diff(ctx context.Context, staged bool) (string, error) {
 	if strings.TrimSpace(out) == "" {
 		return "(no diff)", nil
 	}
-	return out, nil
+	return maskOutput(out), nil
 }
 
 // Log 返回最近提交。
@@ -225,6 +259,9 @@ func (s *Service) Log(ctx context.Context, maxCount int) ([]LogEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 提交信息(commit message)同样可能含凭据
+	// ("chore: rotate ANTHROPIC_API_KEY=sk-…")→ 脱敏在解析之前。
+	out = maskOutput(out)
 	var entries []LogEntry
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if line == "" {
@@ -248,7 +285,7 @@ func (s *Service) Commit(ctx context.Context, message string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return out, nil
+	return maskOutput(out), nil
 }
 
 // CurrentBranch 返回当前分支名。
@@ -257,7 +294,7 @@ func (s *Service) CurrentBranch(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(out), nil
+	return strings.TrimSpace(maskOutput(out)), nil
 }
 
 // exec 运行 git 子进程,处理超时与错误。
@@ -284,6 +321,9 @@ func (s *Service) exec(ctx context.Context, dir string, args []string) (string, 
 		if reason == "" {
 			reason = err.Error()
 		}
+		// 失败原因也是"命令输出",同样可能带凭据
+		// (例如 remote URL 里的 token)→ 出口脱敏。
+		reason = maskOutput(reason)
 		gitErr := model.NewError(model.KindGitError, "GIT_COMMAND_FAILED",
 			fmt.Sprintf("git %s 失败: %s", strings.Join(args, " "), reason))
 		gitErr.Detail = err.Error()

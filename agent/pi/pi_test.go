@@ -36,7 +36,7 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestParseOutputTrailingJSON(t *testing.T) {
-	resp := parseOutput([]byte("working...\n{\"status\":\"success\",\"decision\":\"CONTINUE\",\"summary\":\"next round\"}"))
+	resp := parseOutput([]byte("working...\n{\"status\":\"success\",\"decision\":\"CONTINUE\",\"summary\":\"next round\"}"), "")
 	if resp.Status != coreagent.StatusSuccess || resp.Decision != coreagent.DecisionContinue {
 		t.Errorf("resp = %+v", resp)
 	}
@@ -46,14 +46,14 @@ func TestParseOutputTrailingJSON(t *testing.T) {
 }
 
 func TestParseOutputFailedStatus(t *testing.T) {
-	resp := parseOutput([]byte("error path\n{\"status\":\"failed\",\"error\":\"tests broke\"}"))
+	resp := parseOutput([]byte("error path\n{\"status\":\"failed\",\"error\":\"tests broke\"}"), "")
 	if resp.Status != coreagent.StatusFailed || resp.Error != "tests broke" {
 		t.Errorf("resp = %+v", resp)
 	}
 }
 
 func TestParseOutputPlainSummary(t *testing.T) {
-	resp := parseOutput([]byte("line1\nline2\nline3\nline4\nline5\nline6"))
+	resp := parseOutput([]byte("line1\nline2\nline3\nline4\nline5\nline6"), "")
 	if resp.Decision != "" {
 		t.Errorf("plain output must not guess decision: %q", resp.Decision)
 	}

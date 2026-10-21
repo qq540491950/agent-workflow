@@ -50,7 +50,7 @@ export default function Settings() {
       setLevel(i.log_level || "info");
       setAllowScript(!!i.allow_script_nodes);
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "加载设置");
     }
   }, []);
 
@@ -68,7 +68,7 @@ export default function Settings() {
     // 前端先挡一道非法日志级别:后端已改为 400 拒绝,但 level 也可能来自
     // 存量配置(不是下拉框选出来的),直接发过去只会拿到一句后端原文。
     if (!LOG_LEVELS.includes(level)) {
-      toast.error(`日志级别非法: ${level}(可选 ${LOG_LEVELS.join("|")})`);
+      reportError(`日志级别非法: ${level}(可选 ${LOG_LEVELS.join("|")})`);
       return;
     }
     setSaving(true);
@@ -82,7 +82,7 @@ export default function Settings() {
       setAllowScript(!!i.allow_script_nodes);
       toast.success("设置已保存(日志级别与 script 开关即时生效)");
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "保存设置");
     } finally {
       setSaving(false);
     }
@@ -103,7 +103,7 @@ export default function Settings() {
       URL.revokeObjectURL(url);
       toast.success("备份已导出(含明文敏感环境变量,请妥善保管)");
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "导出备份");
     } finally {
       setBackupBusy(false);
     }
@@ -153,7 +153,7 @@ export default function Settings() {
       }
       refresh();
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "恢复备份");
     } finally {
       setBackupBusy(false);
     }

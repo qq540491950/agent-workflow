@@ -1515,8 +1515,20 @@ func TestErrorBodyAlwaysHasCodeAndKind(t *testing.T) {
 	}
 	for _, c := range cases {
 		code, body, raw := doReq(t, s, c.method, c.path, c.body)
-		if code < 400 || code >= 500 {
-			t.Errorf("%s: %s %s → %d,期望 4xx(%s)", c.label, c.method, c.path, code, raw)
+		// **断言口径从"必须 4xx"放宽为"4xx 或 5xx"(迭代 30,P1-2)**。
+		//
+		// 原因:此前这条断言把"错误必须是 4xx"**钉成了契约** ——
+		// 而那正是缺陷本身:数据库锁死、Agent 崩溃、超时这些**内部**
+		// 错误此前一律报 400,用户与监控无法区分"用户填错了"与
+		// "后端炸了"(监控侧的 4xx 告警会被这类噪声淹没)。
+		// 内部错误改为 5xx 之后,这条断言若还要求 4xx,就会把
+		// 正确的 5xx 判成失败 —— 即"断言反过来钉住了错误行为"。
+		//
+		// 各 kind → 状态码的**精确**映射由
+		// error_contract_test.go 的 TestErrorStatusMappingByKind
+		// 逐条断言(那张表才是不放松的地方)。
+		if code < 400 || code >= 600 {
+			t.Errorf("%s: %s %s → %d,期望 4xx 或 5xx(%s)", c.label, c.method, c.path, code, raw)
 			continue
 		}
 		if msg, _ := body["error"].(string); msg == "" {

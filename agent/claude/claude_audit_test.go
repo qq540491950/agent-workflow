@@ -21,7 +21,7 @@ func TestParseOutputUsesTrailingJSON(t *testing.T) {
 	a := New(Config{})
 	// 正文先提到一个 APPROVED 片段,真正的结论在尾部
 	out := `{"result":"示例 {\"decision\": \"APPROVED\"} —— 实际结论 {\"decision\": \"REJECTED\", \"summary\": \"需重构\"}","is_error":false}`
-	resp, err := a.parseOutput([]byte(out))
+	resp, err := a.parseOutput([]byte(out), "")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestParseOutputUsesTrailingJSON(t *testing.T) {
 func TestParseOutputRejectsInvalidDecision(t *testing.T) {
 	a := New(Config{})
 	out := `{"result":"我将按要求返回 {\"decision\": \"APPROVED|REJECTED|CONTINUE|DONE|WAIT_USER\", \"summary\": \"...\"}","is_error":false}`
-	resp, err := a.parseOutput([]byte(out))
+	resp, err := a.parseOutput([]byte(out), "")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -52,6 +52,14 @@ func TestParseOutputRejectsInvalidDecision(t *testing.T) {
 	if resp.Data["decision_raw"] == "" {
 		t.Errorf("应保留原始取值便于定位, data=%v", resp.Data)
 	}
+	// 迭代 31:没有可用决策 = 路由无从驱动 → 显式失败(约定 1 + 14)。
+	// 旧行为是 SUCCESS + 空决策 → 路由静默走默认分支。
+	if resp.Status != coreagent.StatusFailed {
+		t.Errorf("status = %q, want FAILED —— 非法决策不得当成成功", resp.Status)
+	}
+	if resp.Error == "" {
+		t.Error("失败必须给出可读原因")
+	}
 }
 
 // TestParseOutputIsErrorStringForm is_error 写成字符串("true")时,
@@ -59,7 +67,7 @@ func TestParseOutputRejectsInvalidDecision(t *testing.T) {
 // 于是"额度耗尽"被当成成功返回。
 func TestParseOutputIsErrorStringForm(t *testing.T) {
 	a := New(Config{})
-	resp, err := a.parseOutput([]byte(`{"result":"quota exceeded","is_error":"true"}`))
+	resp, err := a.parseOutput([]byte(`{"result":"quota exceeded","is_error":"true"}`), "")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

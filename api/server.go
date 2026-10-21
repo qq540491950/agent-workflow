@@ -292,7 +292,9 @@ func (s *Server) routes() {
 		// 复用 policyMask 的"显式指定"概念,约定 13)。
 		patch, err := permission.ParsePolicyPatch(p)
 		if err != nil {
-			return badRequest(err.Error())
+			// 原消息里带 Go 类型标注(permission 包:"…的值不是布尔(实际 %T)"),
+			// 对用户没有意义 → 换成人话;原始错误进日志(wrap 里的 logx.Warn)。
+			return badRequest("权限字段的值必须是布尔值(true/false)")
 		}
 		id := r.PathValue("id")
 		// 基线 = 当前**生效**的策略:缺省的能力位保持原值。
@@ -313,7 +315,16 @@ func (s *Server) routes() {
 		rawJSON, _ := json.Marshal(raw)
 		var cfg agent.AgentConfig
 		if err := json.Unmarshal(rawJSON, &cfg); err != nil {
-			return badRequest(err.Error())
+			// 原始错误形如 "json: cannot unmarshal string into Go struct
+			// field AgentConfig.extra_args of type []string" ——
+			// 泄漏 Go 结构体名与类型名,对用户没有意义。
+			// 换成人话;字段名(用户自己 payload 里的 JSON 键)保留,
+			// 用户才知道该改哪一处。原始错误进日志。
+			var ute *json.UnmarshalTypeError
+			if errors.As(err, &ute) && ute.Field != "" {
+				return badRequest(fmt.Sprintf("Agent 配置的字段 %q 类型不对(应为对应类型的值)", ute.Field))
+			}
+			return badRequest("Agent 配置格式非法:字段类型与预期不符")
 		}
 		if err := s.app.AgentSvc.UpdateConfig(r.PathValue("id"), cfg); err != nil {
 			return err
@@ -420,37 +431,175 @@ func (s *Server) routes() {
 func (s *Server) wrap(h func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if err := h(w, r); err != nil {
-			logx.Warn("http error", "path", r.URL.Path, "error", err)
-			// 结构化错误映射为语义化 HTTP 状态码(资源缺失 404、权限 403,
-			// 其余含校验错误 400);body 保留 error 文本并附带 code/kind。
-			//
-			// 普通错误(参数校验失败等)此前只有 error 字段,同一套 API
-			// 出现两种错误体形状,前端 ApiError.code 时而 undefined ——
-			// 统一补上 code/kind,消费方才能稳定按 code 分支。
-			status := http.StatusBadRequest
-			body := map[string]any{
-				"error": err.Error(),
-				"code":  "BAD_REQUEST",
-				"kind":  string(model.KindValidationError),
-			}
-			var se *model.Error
-			if errors.As(err, &se) {
-				body["code"] = se.Code
-				body["kind"] = string(se.Kind)
-				switch {
-				case se.Code == "NOT_FOUND":
-					status = http.StatusNotFound
-				case se.Code == "PAYLOAD_TOO_LARGE":
-					status = http.StatusRequestEntityTooLarge
-				case se.Kind == model.KindPermissionError:
-					status = http.StatusForbidden
-				}
-			}
-			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(body)
+		// tw 记录"响应是否已经写过":panic 兜底时若响应已经提交,
+		// 就不能再写一个 500 错误体(会把半截成功响应污染成坏 JSON)。
+		tw := &trackedWriter{ResponseWriter: w}
+		err := s.callHandler(h, tw, r)
+		if err == nil {
+			return
+		}
+		logx.Warn("http error", "path", r.URL.Path, "error", err)
+		status, body := errorResponse(err)
+		if tw.wrote {
+			// 响应已经提交(半截正文已写出)→ 只能记日志,不能改状态码。
+			logx.Error("http error 发生在响应提交之后,无法改写状态码",
+				"path", r.URL.Path, "status", status)
+			return
+		}
+		tw.WriteHeader(status)
+		_ = json.NewEncoder(tw).Encode(body)
+	}
+}
+
+// callHandler 调用 handler 并兜住 panic。
+//
+// **为什么必须兜**(迭代 30,P2-5):此前 wrap 没有任何 recover,handler
+// 里的 panic 会一路冒到 net/http —— 后果是**两种模式两种错误形态**:
+//
+//   - 服务器模式:连接被服务端直接断开 → 客户端看到 EOF → 前端报
+//     "Failed to fetch" → 用户以为是"后端没启动/地址不可达";
+//   - 桌面模式:Wails 把 panic 原文交给前端 → 界面弹出
+//     "agentworkflow/app/application.WorkflowService.Get: panic: …"
+//     —— 泄漏 Go 包路径,用户看不懂,开发者也定位不到。
+//
+// 兜住之后统一回 500 + 标准错误体{error,code,kind}(code=INTERNAL),
+// 两种模式的形态一致,且**不外泄** panic 原文(原文只进日志)。
+//
+// http.ErrAbortHandler 例外:那是 net/http 的"主动中止连接"信号,
+// 官方要求**不要** recover 它(recover 会破坏连接关闭语义)。
+func (s *Server) callHandler(h func(http.ResponseWriter, *http.Request) error, w http.ResponseWriter, r *http.Request) (err error) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		if rec == http.ErrAbortHandler {
+			panic(rec) // 放行:见函数注释
+		}
+		// panic 原文可能含路径/参数 → 只进日志(mask 后),不进响应体。
+		logx.Error("http handler panic", "path", r.URL.Path, "panic", fmt.Sprint(rec))
+		err = &panicError{value: rec}
+	}()
+	return h(w, r)
+}
+
+// panicError 是 panic 被兜住后的内部错误。
+//
+// 只用于**标记**"这次错误来自 panic" —— 响应体里不会出现 panic 原文
+// (Error() 返回人话),原文只进日志。
+type panicError struct{ value any }
+
+func (e *panicError) Error() string { return "服务内部错误" }
+
+// trackedWriter 记录"响应是否已经写过"。
+//
+// 用途只有一个:panic 兜底时判断还能不能改写状态码。已经写出正文的
+// 响应再补一个 500 错误体,客户端拿到的是"半截 JSON + 半截错误体"。
+type trackedWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *trackedWriter) WriteHeader(code int) {
+	w.wrote = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *trackedWriter) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap 让 http.NewResponseController 能拿到底层 writer。
+func (w *trackedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// errorResponse 把错误映射成 (HTTP 状态码, 错误体)。
+//
+// 错误体形状统一为 {error, code, kind}(前端 ApiError 靠 code 分支;
+// 约定 8:错误也要结构化)。
+//
+// **error 文本过 logx.Mask**:错误消息常夹带命令输出/SQL 文本,里面
+// 可能带凭据(如 "Authorization: Bearer …")→ 出口必须脱敏
+// (与节点 output 出口同源)。
+func errorResponse(err error) (int, map[string]any) {
+	var pe *panicError
+	if errors.As(err, &pe) {
+		// panic:不外泄原文,统一 INTERNAL。
+		return http.StatusInternalServerError, map[string]any{
+			"error": "服务内部错误",
+			"code":  "INTERNAL",
+			"kind":  string(model.KindWorkflowError),
 		}
 	}
+	status := http.StatusBadRequest
+	body := map[string]any{
+		"error": logx.Mask(err.Error()),
+		"code":  "BAD_REQUEST",
+		"kind":  string(model.KindValidationError),
+	}
+	var se *model.Error
+	if errors.As(err, &se) {
+		body["code"] = se.Code
+		body["kind"] = string(se.Kind)
+		status = statusForError(se)
+	}
+	return status, body
+}
+
+// statusForError 把结构化错误映射为 HTTP 状态码(迭代 30,P1-2)。
+//
+// ---- 为什么要有这张表 ----
+//
+// 此前**所有**错误都报 400(除 NOT_FOUND/PAYLOAD_TOO_LARGE/权限):
+// 数据库锁死、Agent 崩溃、超时 —— 全部 400。用户与监控无法区分
+// "用户填错了"与"后端炸了";监控侧 4xx 告警会被这类噪声淹没。
+//
+// ---- 口径(硬要求:既有 4xx 映射一律不变) ----
+//
+//	NOT_FOUND          → 404   (不变)
+//	PAYLOAD_TOO_LARGE  → 413   (不变)
+//	KindPermissionError→ 403   (不变)
+//	其余校验类/状态类  → 400   (不变)
+//
+// 新增的 5xx 只覆盖**内部类**错误:
+//
+//	KindPersistenceError → 500  (库读不出来/写不进去)
+//	DB_ERROR / INTERNAL → 500
+//	KindAgentError      → 502  (外部 Agent 调用失败)
+//	KindProcessError    → 502  (外部进程异常退出)
+//	KindTimeoutError    → 504  (外部调用超时)
+//
+// **StateError 的 INVALID_RESUME / INVALID_TRANSITION 仍是 400**
+// (不是 409):这两个码是**既有对外契约**——docs/api.md 的"取消执行"
+// 一节写明"已终态 → 400 INVALID_TRANSITION",api/cancel_semantics_test.go
+// 也钉着 400。改成 409 会破坏既有客户端(前端不按状态码分支,但第三方
+// 客户端与文档契约都在),而"语义更准"的收益不足以抵掉破坏兼容性。
+// 登记在 docs/api.md 的状态码映射表里,留待后续轮次统一裁决。
+func statusForError(se *model.Error) int {
+	// 先看 code:少数 code 的语义与 kind 无关 ——
+	// DB_ERROR 同时出现在 KindPersistenceError 与 KindStateError 下,
+	// 都是"库读不出来" → 500,不能因为 kind 落在状态类就报 400。
+	switch se.Code {
+	case "NOT_FOUND":
+		return http.StatusNotFound
+	case "PAYLOAD_TOO_LARGE":
+		return http.StatusRequestEntityTooLarge
+	case "DB_ERROR", "INTERNAL":
+		return http.StatusInternalServerError
+	}
+	switch se.Kind {
+	case model.KindPermissionError:
+		return http.StatusForbidden
+	case model.KindPersistenceError:
+		return http.StatusInternalServerError
+	case model.KindAgentError:
+		return http.StatusBadGateway
+	case model.KindProcessError:
+		return http.StatusBadGateway
+	case model.KindTimeoutError:
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadRequest
 }
 
 // jsonErrorHandler 把 ServeMux 自己产生的 404/405 纯文本响应换成与
@@ -480,7 +629,10 @@ func (w *jsonErrorWriter) WriteHeader(code int) {
 		h.Set("Content-Type", "application/json")
 		w.ResponseWriter.WriteHeader(code)
 		body := map[string]any{
-			"error": "接口不存在",
+			// 面向用户但可定位(迭代 30,P3-6):此前的"接口不存在"是写给
+			// 开发者看的 —— 普通用户看到它不知道该做什么(换个地址?刷新?
+			// 还是等后端起来?)。现在说清"资源没了"并给出两个常见原因。
+			"error": "请求的资源不存在(链接可能已过期,或地址有误)",
 			"code":  "NOT_FOUND",
 			"kind":  string(model.KindValidationError),
 		}
@@ -684,7 +836,7 @@ func readLimitedBody(r *http.Request) (string, error) {
 			return "", model.NewError(model.KindValidationError, "PAYLOAD_TOO_LARGE",
 				fmt.Sprintf("请求体超过 %d MB 上限", maxJSONBody>>20))
 		}
-		return "", badRequest(err.Error())
+		return "", badRequest("读取请求体失败")
 	}
 	return string(b), nil
 }
@@ -699,7 +851,21 @@ func writeJSON(w http.ResponseWriter, data any, err error) error {
 	return json.NewEncoder(w).Encode(data)
 }
 
-func badRequest(msg string) error { return fmt.Errorf("%s", msg) }
+// badRequest 造一个"用户填错了"的错误。
+//
+// **必须是结构化错误**(迭代 30,P2-4):此前它返回裸 fmt.Errorf,
+// 错误体靠 wrap 的默认值兜底(code=BAD_REQUEST/kind=ValidationError),
+// 形状是碰巧对的而不是**声明**出来的。改成显式的 model.Error 之后,
+// code/kind 由错误自己携带,任何调用方(errors.As)都能判别。
+//
+// **消息必须是人话**:调用方只传用户能看懂的话 ——
+// Go 的类型名/结构体名(如 "json: cannot unmarshal string into Go
+// struct field AgentConfig.extra_args of type []string")对用户没有
+// 任何意义,却泄漏了内部实现。原始错误**只进日志**(wrap 里的
+// logx.Warn),响应体只给人话。
+func badRequest(msg string) error {
+	return model.NewError(model.KindValidationError, "BAD_REQUEST", msg)
+}
 
 // maxQueryLimit 是显式 limit 参数的上限。
 // 此前用 int 累加解析,超长数字会整数溢出成负数,而仓储层把 limit<=0

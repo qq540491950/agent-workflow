@@ -47,7 +47,7 @@ func TestResolveModel(t *testing.T) {
 
 func TestParseOutputStructured(t *testing.T) {
 	a := New(Config{})
-	resp, err := a.parseOutput([]byte(`{"result":"review done {\"decision\": \"approved\", \"summary\": \"2 issues\"}","is_error":false}`))
+	resp, err := a.parseOutput([]byte(`{"result":"review done {\"decision\": \"approved\", \"summary\": \"2 issues\"}","is_error":false}`), "")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -62,23 +62,56 @@ func TestParseOutputStructured(t *testing.T) {
 	}
 }
 
+// TestParseOutputNonJSON 非 JSON 输出**必须显式失败**。
+//
+// 旧行为(迭代 31 修掉):非 JSON 输出(含空输出)一律 StatusSuccess,
+// 于是"CLI 退出码 0 但什么都没产出"被当成成功 —— 节点绿灯、决策为空、
+// 路由静默走默认分支(约定 14 说的"该失败却成功")。
+//
+// claude 的契约是 --output-format json:stdout 必须是 JSON 信封。
+// 拿不到信封 = 契约被破坏 = 失败,不是"原样返回"。
 func TestParseOutputNonJSON(t *testing.T) {
 	a := New(Config{})
-	resp, err := a.parseOutput([]byte("plain text output"))
+	resp, err := a.parseOutput([]byte("plain text output"), "")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if resp.Status != coreagent.StatusSuccess || resp.Output != "plain text output" {
-		t.Errorf("resp = %+v", resp)
+	if resp.Status != coreagent.StatusFailed {
+		t.Errorf("status = %q, want FAILED —— 非 JSON 输出不得当成成功", resp.Status)
+	}
+	if resp.Output != "plain text output" {
+		t.Errorf("输出原文必须保留(便于定位): %q", resp.Output)
+	}
+	if resp.Error == "" {
+		t.Error("失败必须给出可读原因")
 	}
 	if resp.Decision != "" {
 		t.Errorf("非 JSON 输出不得猜测 decision, got %q", resp.Decision)
 	}
 }
 
+// TestParseOutputEmptyFails 退出码 0 但 stdout 一个字节都没有 →
+// 显式失败(约定 14)。这是 mock agent 永远走不到、而真实 CLI 完全
+// 可能发生的形态(CLI 崩了但退出码是 0)。
+func TestParseOutputEmptyFails(t *testing.T) {
+	a := New(Config{})
+	for _, in := range []string{"", "   ", "\n\t\n"} {
+		resp, err := a.parseOutput([]byte(in), "")
+		if err != nil {
+			t.Fatalf("parse(%q): %v", in, err)
+		}
+		if resp.Status != coreagent.StatusFailed {
+			t.Errorf("parse(%q): status = %q, want FAILED", in, resp.Status)
+		}
+		if resp.Error == "" {
+			t.Errorf("parse(%q): 失败必须给出可读原因", in)
+		}
+	}
+}
+
 func TestParseOutputIsError(t *testing.T) {
 	a := New(Config{})
-	resp, err := a.parseOutput([]byte(`{"result":"quota exceeded","is_error":true}`))
+	resp, err := a.parseOutput([]byte(`{"result":"quota exceeded","is_error":true}`), "")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

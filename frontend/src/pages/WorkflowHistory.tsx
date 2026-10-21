@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { toast } from "sonner";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
 import { reportError } from "@/lib/errors";
@@ -79,7 +78,7 @@ export default function WorkflowHistory() {
       const text = await api.versionDSL(id, v);
       setViewDSL({ version: v, text });
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "查看工作流版本");
     }
   };
 

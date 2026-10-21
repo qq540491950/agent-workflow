@@ -15,7 +15,7 @@ import (
 // TestParseOutputRejectsInvalidDecision 非法决策取值不得进入路由,
 // 但必须留下可判定的痕迹(否则用户只看到"没有决策")。
 func TestParseOutputRejectsInvalidDecision(t *testing.T) {
-	resp := parseOutput([]byte(`{"decision":"APPROVED|REJECTED|CONTINUE|DONE|WAIT_USER","summary":"模板"}`))
+	resp := parseOutput([]byte(`{"decision":"APPROVED|REJECTED|CONTINUE|DONE|WAIT_USER","summary":"模板"}`), "")
 	if resp.Decision != "" {
 		t.Errorf("非法决策取值不得进入路由, got %q", resp.Decision)
 	}
@@ -30,7 +30,7 @@ func TestParseOutputRejectsInvalidDecision(t *testing.T) {
 // TestParseOutputAcceptsCustomDecision 自定义决策(如 REFACTOR)必须照常透传:
 // 决策取值不枚举白名单,只校验形态。
 func TestParseOutputAcceptsCustomDecision(t *testing.T) {
-	resp := parseOutput([]byte(`{"decision":"refactor","summary":"需重构"}`))
+	resp := parseOutput([]byte(`{"decision":"refactor","summary":"需重构"}`), "")
 	if resp.Decision != coreagent.AgentDecision("REFACTOR") {
 		t.Errorf("decision = %q, want REFACTOR", resp.Decision)
 	}

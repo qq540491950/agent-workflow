@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, asArray, subscribeEvents } from "@/lib/api";
+import { reportError } from "@/lib/errors";
 import { createRefreshDebounce } from "@/lib/debounce";
 import type { Execution } from "@/lib/types";
 import { StateBadge } from "@/components/state-badge";
@@ -23,7 +24,7 @@ export default function Executions() {
   const [stateFilter, setStateFilter] = useState<string>("");
 
   const refresh = useCallback(() => {
-    api.listExecutions("", 100).then((x) => setExecs(asArray<Execution>(x))).catch((e) => toast.error(e.message));
+    api.listExecutions("", 100).then((x) => setExecs(asArray<Execution>(x))).catch((e) => reportError(e, "加载执行记录"));
   }, []);
 
   useEffect(() => {
@@ -129,7 +130,7 @@ export default function Executions() {
                         toast.success("已删除");
                         refresh();
                       } catch (err) {
-                        toast.error((err as Error).message);
+                        reportError(err, "删除执行记录");
                       }
                     }}
                   >

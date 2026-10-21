@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Settings2 } from "lucide-react";
 import { api, asArray, formatExtraArgs, parseExtraArgs } from "@/lib/api";
+import { reportError } from "@/lib/errors";
 import type { AgentConfig, AgentInfo } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
@@ -35,7 +36,7 @@ export default function Agents() {
   const [savingCfg, setSavingCfg] = useState(false);
   const [testingAgent, setTestingAgent] = useState<string | null>(null);
 
-  const refresh = () => api.listAgents().then((x) => setAgents(asArray<AgentInfo>(x))).catch((e) => toast.error(e.message));
+  const refresh = () => api.listAgents().then((x) => setAgents(asArray<AgentInfo>(x))).catch((e) => reportError(e, "加载 Agent 列表"));
   useEffect(() => {
     refresh();
   }, []);
@@ -59,7 +60,7 @@ export default function Agents() {
       await api.setAgentPermission(a.id, p);
     } catch (e) {
       setAgents((list) => list.map((x) => (x.id === a.id ? prev : x)));
-      toast.error((e as Error).message);
+      reportError(e, "更新 Agent 权限");
       return;
     } finally {
       setPendingAgent(null);
@@ -85,7 +86,7 @@ export default function Agents() {
       const msg = (e as Error).message;
       setCfg(null);
       setCfgError(msg);
-      toast.error(msg);
+      reportError(e, "读取 Agent 配置");
     }
   };
 
@@ -105,7 +106,7 @@ export default function Agents() {
       if (blank > 0) toast.warning(`已忽略 ${blank} 个未填写名称的环境变量`);
       setConfigTarget(null);
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "保存 Agent 配置");
     } finally {
       setSavingCfg(false);
     }
@@ -128,7 +129,7 @@ export default function Agents() {
       setCfg({ ...c, env: c.env ?? {} });
       toast.success("已恢复默认配置");
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "恢复默认配置");
     } finally {
       setSavingCfg(false);
     }
@@ -208,7 +209,7 @@ export default function Agents() {
                       } catch (e) {
                         // 此前没有 catch:失败时是 unhandled rejection,
                         // 用户点了按钮完全没有反馈,看起来像按钮坏了
-                        toast.error((e as Error).message);
+                        reportError(e, "测试 Agent");
                       } finally {
                         setTestingAgent(null);
                       }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, asArray } from "@/lib/api";
+import { reportError } from "@/lib/errors";
 import type { SkillDTO } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -23,7 +24,7 @@ export default function Skills() {
   // 那里已加同款锁)。
   const [pendingSkill, setPendingSkill] = useState<string | null>(null);
 
-  const refresh = () => api.listSkills().then((x) => setSkills(asArray<SkillDTO>(x))).catch((e) => toast.error(e.message));
+  const refresh = () => api.listSkills().then((x) => setSkills(asArray<SkillDTO>(x))).catch((e) => reportError(e, "加载 Skill 列表"));
   useEffect(() => {
     refresh();
   }, []);
@@ -37,7 +38,7 @@ export default function Skills() {
       await api.setSkillEnabled(s.id, v);
     } catch (e) {
       setSkills((list) => list.map((x) => (x.id === s.id ? { ...x, enabled: !v } : x)));
-      toast.error((e as Error).message);
+      reportError(e, "启用 Skill");
       return;
     } finally {
       setPendingSkill(null);
@@ -92,7 +93,7 @@ export default function Skills() {
                         const out = await api.testSkill(s.id);
                         toast.success("输出: " + out.slice(0, 120));
                       } catch (e) {
-                        toast.error((e as Error).message);
+                        reportError(e, "测试 Skill");
                       }
                     }}
                   >

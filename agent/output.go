@@ -209,3 +209,23 @@ func StructuredJSON(text string) string {
 	}
 	return FirstJSONObject(text)
 }
+
+// StderrHint 把子进程 stderr 拼成一段可读的诊断尾巴(可为空)。
+//
+// 为什么需要:CLI **退出码 0 却什么都没产出**时,stderr 是**唯一**的
+// 诊断线索("额度耗尽" / "鉴权失败" / "配置文件缺失"之类)—— 错误
+// 消息里没有它,用户只能自己去命令行重跑一遍才能知道出了什么事。
+//
+// 凭据脱敏由调用方负责(先过 redactor.Text 再拼进来):这里只做拼接
+// 与截断,不做任何内容判断。
+func StderrHint(stderr string) string {
+	s := strings.TrimSpace(stderr)
+	if s == "" {
+		return ""
+	}
+	const maxHint = 500
+	if len(s) > maxHint {
+		s = s[:maxHint] + "…(已截断)"
+	}
+	return "; stderr: " + s
+}

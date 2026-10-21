@@ -151,10 +151,16 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	// 父进程环境里的凭据同样算(子进程继承了它们)。
 	redactor := coreagent.NewRedactor(a.cfg.AgentEnv, req.Environment, coreagent.ParentEnv())
 	if errors.Is(runErr, exec.ErrWaitDelay) {
-		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
-		return responseFor(stdout, redactor), nil
+		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获。
+		// 但那些孤儿必须**收掉**:它们还在后台跑并持有管道
+		// (进程泄漏 —— 约定 3 的进程组击杀在成功路径上没有兑现)。
+		coreagent.KillProcessGroup(cmd)
+		return responseFor(stdout, stderr, redactor), nil
 	}
 	if runErr != nil {
+		// 失败路径同样要收掉进程组:直接子进程已经死了,组里剩下的
+		// 都是它留下的孤儿(可能还持有管道)。
+		coreagent.KillProcessGroup(cmd)
 		switch {
 		case cctx.Err() == context.DeadlineExceeded:
 			return nil, model.NewError(model.KindTimeoutError, "PI_TIMEOUT",
@@ -166,7 +172,7 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 			fmt.Sprintf("pi-agent 执行失败: %v; stderr: %s", runErr,
 				redactor.Text(truncate(stderr.String(), 2000))))
 	}
-	return responseFor(stdout, redactor), nil
+	return responseFor(stdout, stderr, redactor), nil
 }
 
 // responseFor 把子进程输出转成 Agent 响应。
@@ -174,7 +180,7 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 // 输出被截断时结构化结果不可信(尾部 JSON 必然不完整),必须**显式失败**
 // 并说明原因 —— 返回 SUCCESS + 空决策会让路由静默走默认分支,
 // 正是约定 14 说的"该失败却成功"。
-func responseFor(stdout *coreagent.BoundedBuffer, redactor *coreagent.Redactor) *coreagent.AgentResponse {
+func responseFor(stdout *coreagent.BoundedBuffer, stderr *coreagent.BoundedBuffer, redactor *coreagent.Redactor) *coreagent.AgentResponse {
 	if stdout.Truncated() {
 		return &coreagent.AgentResponse{
 			Status: coreagent.StatusFailed,
@@ -183,14 +189,31 @@ func responseFor(stdout *coreagent.BoundedBuffer, redactor *coreagent.Redactor) 
 			Output: stdout.String(), // 带显式截断标记,便于定位
 		}
 	}
-	return redactor.RedactResponse(parseOutput(stdout.Bytes()))
+	// stderr 先过脱敏再拼进错误消息(约定 8:CLI 常把凭据原样打进 stderr)。
+	return redactor.RedactResponse(parseOutput(stdout.Bytes(), redactor.Text(stderr.String())))
 }
 
 // parseOutput 解析 pi-agent 输出。
 // 约定:若输出末尾含 JSON 对象则解析结构化结果,否则原样返回。
-func parseOutput(out []byte) *coreagent.AgentResponse {
+//
+// 两处与"禁止猜测"配套的显式口径:
+//
+//   - stdout 为空 / 只有空白 → **显式失败**。退出码 0 却什么都没产出
+//     时,节点绿灯 + 决策为空 + 路由静默走默认分支 = 约定 14 说的
+//     "该失败却成功"。
+//   - 输出里没有**结构化决策** → 仍是成功(pi 的形态本就允许自由
+//     文本,仓库示例工作流的 plan/execute 节点正是靠它产出上下文),
+//     但必须**留痕**(decision_missing):静默成功比崩溃更难查。
+func parseOutput(out []byte, stderr string) *coreagent.AgentResponse {
 	text := string(out)
 	resp := &coreagent.AgentResponse{Status: coreagent.StatusSuccess, Output: text}
+	if strings.TrimSpace(text) == "" {
+		// stderr 是这里**唯一**的诊断线索("额度耗尽"之类)—— 必须带进
+		// 错误消息,否则用户只能自己去命令行重跑才知道出了什么事。
+		resp.Status = coreagent.StatusFailed
+		resp.Error = "pi-agent 未产生任何输出(进程退出码 0 但 stdout 为空)" + coreagent.StderrHint(stderr)
+		return resp
+	}
 	if js := trailingJSONObject(text); js != "" {
 		var structured struct {
 			Status   string `json:"status"`
@@ -212,10 +235,31 @@ func parseOutput(out []byte) *coreagent.AgentResponse {
 			}
 		}
 	}
+	if resp.Status == coreagent.StatusSuccess && resp.Decision == "" {
+		markDecisionMissing(resp)
+	}
 	if resp.Summary == "" {
 		resp.Summary = truncate(firstLines(text, 5), 500)
 	}
 	return resp
+}
+
+// markDecisionMissing 留下"没有结构化决策"的痕迹。
+//
+// 为什么要留痕:pi 的自由文本输出是合法形态(不是失败),但"没有决策"
+// 意味着路由拿不到依据 —— 用户只看到一句"成功",无从判断模型到底
+// 说了什么。痕迹让这件事**可判定**(约定 14 的"降级必须可判定")。
+func markDecisionMissing(resp *coreagent.AgentResponse) {
+	if resp.Data == nil {
+		resp.Data = map[string]any{}
+	}
+	resp.Data["decision_missing"] = true
+	const note = "(未解析出结构化决策)"
+	if resp.Summary == "" {
+		resp.Summary = note
+		return
+	}
+	resp.Summary += note
 }
 
 // trailingJSONObject 从文本末尾取配平的 JSON 对象(见 coreagent 实现)。

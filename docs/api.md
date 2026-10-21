@@ -35,7 +35,7 @@
 | GET | `/api/executions/{id}` | 执行详情(含 state_data 快照) |
 | GET | `/api/executions/{id}/nodes` | 节点执行明细(attempt/duration/output)。**output / error / result_json 已在读出口脱敏**(这些字段直接来自 Agent 的 stdout/stderr,常含凭据) |
 | GET | `/api/executions/{id}/events` | 事件流 |
-| GET | `/api/executions/{id}/artifacts` | 制品(如 git-diff)。**制品保持原样**,不脱敏 |
+| GET | `/api/executions/{id}/artifacts` | 制品(如 git-diff)。**按值的形态脱敏**(第十轮):凭据形态的值被替换为 `***`,代码标识符原样保留(保住"改了哪一行"这个审计证据)。详见第 10 节 |
 | GET | `/api/executions/{id}/export` | 导出完整记录 JSON(附件下载)。响应头 `Cache-Control: no-store`;其中的节点明细同样已脱敏 |
 | POST | `/api/executions/{id}/input` | 人工输入并恢复 `{response, instruction}` |
 | POST | `/api/executions/{id}/retry` | 失败执行恢复 `{skip: bool}`。空 body 合法(等价 `skip=false`);body 非空而解析失败返回 400(此前静默变 `skip=false`,「跳过失败节点」实际会重跑失败 Agent) |
@@ -60,10 +60,39 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/git/status` | 结构化状态(分支/暂存/修改/未跟踪) |
-| GET | `/api/git/diff?staged=` | 未提交改动 |
-| GET | `/api/git/log?limit=` | 提交历史 |
-| POST | `/api/git/commit` | 提交全部改动 `{message}` |
+| GET | `/api/git/status` | 结构化状态(分支/暂存/修改/未跟踪)。**文本已脱敏**(文件路径同样可能带凭据) |
+| GET | `/api/git/diff?staged=` | 未提交改动。**文本已脱敏**(见下方"git 出口的脱敏") |
+| GET | `/api/git/log?limit=` | 提交历史。**提交信息已脱敏**(commit message 可能含凭据) |
+| POST | `/api/git/commit` | 提交全部改动 `{message}`。**输出已脱敏** |
+
+### git 出口的脱敏(轮次 88 / 迭代 30)
+
+Git 工作目录是**用户自己的代码库**:里面常有 `.env`、带密钥的配置文件、
+凭据写死在配置里的脚本。此前 `GET /api/git/diff` **原样**返回 diff 文本 ——
+凭据明文直接进 API 响应体,再由前端 GitPanel 渲染到屏幕。
+
+**现在的口径**:git 包的**五个出口**(`Status` / `Diff` / `Log` / `Commit` /
+`CurrentBranch`)的命令输出**一律过 `logx.Mask`**(键名 ∪ 值形态)——
+与**节点 output 出口同源**(`logx/credential.go` 是形态规则的唯一来源)。
+
+| 情况 | 处理 |
+| --- | --- |
+| `ANTHROPIC_API_KEY=sk-ant-…`(键名 + 凭据形态的值) | **替换**(值 → `***`,键名保留) |
+| `DB_PASSWORD=hunter2`(**低熵**的值) | **替换** —— 键名规则抓得住;`.env` 里的密码多半是这种形态,只靠值形态规则会漏 |
+| `const token = getToken();`(键名像凭据、值是代码) | **替换**(键名规则)—— 与节点 output 出口同一个取舍:**宁可多遮** |
+| 普通代码 / 文件路径 / 英文句子 | **逐字不变**(可读性回归锁:`git/mask_test.go` 的 `TestDiffKeepsOrdinaryContentByteIdentical` 拿 `git diff` 原文逐字节比对) |
+
+**与"制品出口"的差异(刻意)**:制品(`/api/executions/{id}/artifacts`)走
+**只按值形态**的规则(`logx.MaskCredentialValues`)—— 制品是**已落库的历史
+快照**,要保住"改了哪一行"这个审计证据;git 面板是**用户当前工作区**的
+实时视图,里面的 `.env` 低熵密码只有键名规则抓得住。两者规则**同源**
+(同一个 `logx/credential.go`),只是**严格度**按出口不同。
+
+**工作流 git 节点**(`Service.Run`)的输出**不在本包内脱敏**:节点 output
+由应用层统一过 `logx.Mask`,制品由执行器过值形态规则(两处口径都是既有
+契约,`workflow/runtime/masking_test.go` 钉着"制品里 `const token =
+getToken();` 逐字保留")。在本包再叠一层键名规则会与制品出口打架。
+
 
 ## Settings / Events / Stats
 
@@ -103,19 +132,60 @@
 
 | 情况 | code | 错误文本 |
 | --- | --- | --- |
-| 路由不存在 | `NOT_FOUND` | `接口不存在` |
+| 路由不存在 | `NOT_FOUND` | `请求的资源不存在(链接可能已过期,或地址有误)` |
 | 方法不匹配 | `METHOD_NOT_ALLOWED` | `HTTP 方法不被允许` |
 
-HTTP 状态码语义:
+> 路由级 404 的文案此前是"接口不存在" —— 写给开发者看的,普通用户看到
+> 它不知道该做什么(轮次 88 / 迭代 30 改为面向用户但仍可定位的措辞)。
+
+HTTP 状态码语义(轮次 88 / 迭代 30 调整过内部类的状态码):
 
 | 状态码 | 场景 |
 | --- | --- |
-| 400 | 校验失败(WORKFLOW_INVALID 等)/ 参数错误 / 请求体不是合法 JSON(`INVALID_JSON`) |
+| 400 | 校验失败(WORKFLOW_INVALID 等)/ 参数错误 / 请求体不是合法 JSON(`INVALID_JSON`)/ **状态不允许**(`INVALID_RESUME` / `INVALID_TRANSITION` / `INVALID_RETRY` / `NO_FAILED_NODE`)/ git 命令失败(`GIT_*`)/ 已取消(`*_CANCELLED`) |
 | 403 | 权限拒绝(PERMISSION_DENIED) |
 | 404 | 资源不存在(NOT_FOUND) |
 | 405 | 方法不被允许(METHOD_NOT_ALLOWED) |
 | 413 | 请求体超过 1MB 上限(`PAYLOAD_TOO_LARGE`) |
+| 500 | **内部错误**:持久化失败(`DB_ERROR` / `AGENT_CONFIG_CORRUPT`)/ 其它内部错误(`INTERNAL`)/ handler panic |
+| 502 | **外部依赖失败**:Agent 调用失败(`AgentError`)/ 外部进程异常退出(`CLAUDE_PROCESS_ERROR` / `PI_PROCESS_ERROR`) |
+| 504 | **外部依赖超时**(`CLAUDE_TIMEOUT` / `PI_TIMEOUT`) |
 | 200 | DELETE 为幂等语义:删除不存在的资源同样返回 200 |
+
+**为什么内部错误要报 5xx(而不是此前一律 400)**:数据库锁死、Agent 崩溃、
+超时 —— 这些与"用户填错了参数"无关。此前它们**一律报 400**,用户与监控
+无法区分"我填错了"与"后端炸了";监控侧的 4xx 告警会被这类噪声淹没。
+
+**向后兼容**:既有 **4xx 映射一律不变**(`NOT_FOUND`→404、
+`PAYLOAD_TOO_LARGE`→413、`PermissionError`→403、其余校验类/状态类→400)——
+前端与第三方客户端可能依赖。新增的 5xx **只覆盖内部类错误**。
+
+> **一处刻意不改的**:`INVALID_RESUME` / `INVALID_TRANSITION` 语义上更像
+> "409 Conflict"(状态冲突),但它们是**既有对外契约** —— 本文件"取消执行"
+> 一节写明"已终态 → 400 `INVALID_TRANSITION`",`api/cancel_semantics_test.go`
+> 也钉着 400。前端**不按状态码分支**(只按 `code`),但第三方客户端与文档
+> 契约都在 → 本轮**保持 400**,把"改 409"登记为待统一裁决的开放项。
+
+**错误文本一律脱敏**:`error` 字段的文本过 `logx.Mask` —— 错误消息常夹带
+命令输出 / 子进程 stderr / SQL 文本,里面可能带凭据(约定 8:"API 返回
+掩码")。**原始错误只进日志**(`logx.Warn`),用户看到的是脱敏后的人话。
+
+**错误文本不含 Go 内部细节**:此前 `badRequest` 直接把 Go 的错误原文透出
+(如 `json: cannot unmarshal string into Go struct field AgentConfig.extra_args
+of type []string` —— 泄漏 Go 结构体名与类型名)。现在这类调用点给**人话**
+(字段名保留 —— 那是用户自己 payload 里的 JSON 键;Go 类型名不保留)。
+
+**panic 兜底**:handler 里的 panic 此前**一路冒到 net/http** —— 服务器模式
+客户端收到 EOF(前端误报"后端未启动"),桌面模式则把 Go 包路径泄漏到界面。
+现在 `wrap` 兜住 panic,统一回 **500 + 标准错误体**:
+
+```json
+{"error": "服务内部错误", "code": "INTERNAL", "kind": "WorkflowError"}
+```
+
+panic 原文**只进日志**,不进响应体(`http.ErrAbortHandler` 除外 —— 那是
+net/http 的主动中止信号,按官方要求放行)。
+
 
 所有 JSON 请求体上限 1MB(`http.MaxBytesReader`):超限直接拒绝,不会把
 整个 body 读进内存。服务器模式监听 `127.0.0.1` 且**无鉴权**,本机任意

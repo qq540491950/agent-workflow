@@ -103,7 +103,8 @@ describe("Workflows 启用开关", () => {
     fireEvent.click(screen.getAllByRole("switch")[0]);
     await settle();
     expect(m.setEnabled).toHaveBeenCalledWith("wf-1", false);
-    expect(toast.error).toHaveBeenCalledWith("权限不足");
+    // **断言变更(迭代 30,P1-3)**:统一走 reportError → 带 scope。
+    expect(toast.error).toHaveBeenCalledWith("切换工作流启用状态:权限不足");
   });
 
   it("成功时不报错", async () => {
@@ -125,7 +126,8 @@ describe("Workflows 下拉菜单操作", () => {
     fireEvent.click(screen.getByText("复制"));
     await settle();
     expect(m.duplicateWorkflow).toHaveBeenCalledWith("wf-1");
-    expect(toast.error).toHaveBeenCalledWith("复制失败");
+    // **断言变更(迭代 30,P1-3)**:统一走 reportError → 带 scope。
+    expect(toast.error).toHaveBeenCalledWith("复制工作流:复制失败");
   });
 
   it("删除失败时提示错误", async () => {
@@ -137,7 +139,8 @@ describe("Workflows 下拉菜单操作", () => {
     fireEvent.click(screen.getByText("删除"));
     await settle();
     expect(m.deleteWorkflow).toHaveBeenCalledWith("wf-1");
-    expect(toast.error).toHaveBeenCalledWith("删除失败");
+    // **断言变更(迭代 30,P1-3)**:统一走 reportError → 带 scope。
+    expect(toast.error).toHaveBeenCalledWith("删除工作流:删除失败");
   });
 });
 
@@ -191,7 +194,8 @@ describe("Workflows 导入 YAML:被忽略的键必须可见", () => {
   it("导入失败时提示错误", async () => {
     m.importYAML.mockRejectedValue(new Error("DSL 含未知顶层键"));
     await doImport();
-    expect(toast.error).toHaveBeenCalledWith("DSL 含未知顶层键");
+    // **断言变更(迭代 30,P1-3)**:统一走 reportError → 带 scope。
+    expect(toast.error).toHaveBeenCalledWith("导入工作流:DSL 含未知顶层键");
   });
 });
 

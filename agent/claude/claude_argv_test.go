@@ -28,9 +28,14 @@ import (
 //     脱敏而把鉴权改坏。
 
 // fakeCLIRecordsArgs 返回一个把 argv 逐行写进文件的假 CLI 路径。
+//
+// 假 CLI 输出一个**带决策的合法信封**:claude 适配器的契约是
+// `--output-format json`,且它自己会在提示词里要求模型给出 decision ——
+// 没有决策的信封是"模型没 comply",适配器会显式失败(见 claude.go 的
+// parseOutput)。本文件测的是 argv 告警,不该被那条契约牵连。
 func fakeCLIRecordsArgs(t *testing.T, out string) string {
 	t.Helper()
-	body := fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\necho '{\"result\":\"ok\"}'\n", out)
+	body := fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\necho '{\"result\":\"ok {\\\"decision\\\": \\\"DONE\\\"}\"}'\n", out)
 	return writeFakeCLI(t, "claude", body)
 }
 

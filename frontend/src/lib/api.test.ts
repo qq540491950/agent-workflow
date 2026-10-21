@@ -1026,6 +1026,25 @@ describe("文本端点(版本 DSL / YAML 导出)", () => {
     const { api } = await freshApi();
     await expect(api.versionDSL("wf1", 1)).rejects.toThrow(/502|bad gateway/);
   });
+
+  // 迭代 30(P3-1):非 JSON 错误体此前把**全文**当错误消息 ——
+  // HTML 兜底页/网关整页报错会有几百行,整段塞进 toast。
+  // 现在截断到 200 字再交给 buildApiError。
+  it("非 JSON 错误体(HTML 兜底页)被截断,不再整段塞进提示", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    const html = "<html><body>" + "x".repeat(5000) + "</body></html>";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 502, text: async () => html }),
+    );
+    const { api } = await freshApi();
+    const err = (await api.versionDSL("wf1", 1).catch((e: unknown) => e)) as {
+      message: string;
+    };
+    expect(err.message.length).toBeLessThan(300);
+    expect(err.message).toContain("已截断");
+    expect(err.message).not.toContain("x".repeat(1000));
+  });
 });
 
 describe("ApiError 保留后端 code/kind/status", () => {
@@ -1138,6 +1157,27 @@ describe("后端错误体契约", () => {
     expect(err.message).not.toContain("function");
   });
 
+  // 迭代 30(P1-2):后端把内部错误(DB 锁死/Agent 崩溃/超时)改为 5xx ——
+  // 状态码兜底提示必须覆盖 5xx,否则用户只看到裸 "HTTP 500"。
+  it("5xx 状态码有中文兜底提示(内部错误不是用户的错)", async () => {
+    for (const [status, expectText] of [
+      [500, "服务内部错误"],
+      [502, "外部服务"],
+      [503, "暂时不可用"],
+      [504, "超时"],
+    ] as const) {
+      stubError(status, { kind: "WorkflowError" });
+      const { api } = await freshApi();
+      const err = (await api.getWorkflow("x").catch((e: unknown) => e)) as {
+        message: string;
+        status: number;
+      };
+      expect(err.status).toBe(status);
+      expect(err.message).toContain(expectText);
+      expect(err.message).toContain(String(status));
+    }
+  });
+
   it("405 METHOD_NOT_ALLOWED 给出可读提示", async () => {
     stubError(405, {
       code: "METHOD_NOT_ALLOWED",
@@ -1170,9 +1210,12 @@ describe("后端错误体契约", () => {
   });
 
   it("404 未知路由的错误体照样解析出 code", async () => {
+    // **夹具同步(迭代 30,P3-6)**:后端的路由级 404 文案已从
+    // "接口不存在"(开发者口径)改为面向用户的措辞 —— 夹具必须与真实
+    // 后端一致,否则这条用例测的是一个不存在的响应形状。
     stubError(404, {
       code: "NOT_FOUND",
-      error: "接口不存在",
+      error: "请求的资源不存在(链接可能已过期,或地址有误)",
       kind: "ValidationError",
     });
     const { api } = await freshApi();
@@ -1183,7 +1226,7 @@ describe("后端错误体契约", () => {
     };
     expect(err.code).toBe("NOT_FOUND");
     expect(err.status).toBe(404);
-    expect(err.message).toBe("接口不存在");
+    expect(err.message).toBe("请求的资源不存在(链接可能已过期,或地址有误)");
   });
 
   // 第四/五轮新增的码必须能落到人话提示上:错误体只有 code 没有 error
@@ -1608,7 +1651,34 @@ describe("桌面模式的错误处理", () => {
       .catch((e: unknown) => e)) as InstanceType<typeof ApiError>;
     expect(err).toBeInstanceOf(ApiError);
     expect(err.message).toBe("boom");
-    expect(err.code).toBeUndefined();
+    // **断言变更(迭代 30,P1-3)**:此前断言 code 为 undefined ——
+    // 那是"桌面模式与服务器模式**形状不同构**"的旧行为(服务器模式
+    // 永远给 code/kind,见 api/server.go 的 wrap)。
+    // 现在剥不出 "Kind(CODE): " 前缀时补 code=BAD_REQUEST /
+    // kind=ValidationError(约定 10:两种模式给出一致的结构化信息),
+    // 消费方按 code 分支时不必到处判 undefined。
+    expect(err.code).toBe("BAD_REQUEST");
+    expect(err.kind).toBe("ValidationError");
+  });
+
+  // 迭代 30(P2-5):桌面模式的 panic 文本不得外泄 Go 包路径。
+  it("IPC panic 文本被归一为 INTERNAL(不外泄 Go 包路径)", async () => {
+    callByID.mockResolvedValue([]);
+    wfSavePayload.mockRejectedValue(
+      new Error(
+        "agentworkflow/app/application.WorkflowService.Get: panic: runtime error: index out of range [3] with length 2",
+      ),
+    );
+    const { api, ApiError } = await freshApi();
+    const err = (await api
+      .saveWorkflow(goodWorkflowPayload)
+      .catch((e: unknown) => e)) as InstanceType<typeof ApiError>;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.code).toBe("INTERNAL");
+    expect(err.kind).toBe("WorkflowError");
+    // 不外泄:Go 包路径与 panic 原文都不该出现在给用户的文案里
+    expect(err.message).not.toContain("agentworkflow/app/application");
+    expect(err.message).not.toContain("index out of range");
   });
 });
 

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
-import { toast } from "sonner";
 import { api, asArray, subscribeEvents } from "@/lib/api";
+import { reportError } from "@/lib/errors";
 import { createRefreshDebounce } from "@/lib/debounce";
 import { createRequestGuard } from "@/lib/request-guard";
 import { Input } from "@/components/ui/input";
@@ -60,7 +60,7 @@ export default function EventsAudit() {
         setEvents(data);
       } catch (e) {
         if (!guard.isCurrent(seq)) return;
-        toast.error((e as Error).message);
+        reportError(e, "加载审计事件");
       }
     },
     [guard],

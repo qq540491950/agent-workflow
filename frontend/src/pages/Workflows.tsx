@@ -58,7 +58,7 @@ export default function Workflows() {
   const [statsMap, setStatsMap] = useState<Record<string, { running: number; total: number }>>({});
 
   const refresh = useCallback(() => {
-    api.listWorkflows().then((x) => setWorkflows(asArray<Workflow>(x))).catch((e) => toast.error(e.message));
+    api.listWorkflows().then((x) => setWorkflows(asArray<Workflow>(x))).catch((e) => reportError(e, "加载工作流列表"));
     api
       .stats()
       .then((arr) => {
@@ -106,7 +106,7 @@ export default function Workflows() {
       setNewName("");
       nav(`/workflows/${wf.id}/design`);
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "创建工作流");
     }
   };
 
@@ -121,7 +121,7 @@ export default function Workflows() {
     try {
       variables = JSON.parse(runVars || "{}");
     } catch {
-      toast.error("变量不是合法 JSON");
+      reportError("变量不是合法 JSON");
       return;
     }
     try {
@@ -134,7 +134,7 @@ export default function Workflows() {
       setTask("");
       nav(`/executions/${exec.id}`);
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "运行工作流");
     }
   };
 
@@ -232,7 +232,7 @@ export default function Workflows() {
                       try {
                         await api.setEnabled(w.id, v);
                       } catch (e) {
-                        toast.error((e as Error).message);
+                        reportError(e, "切换工作流启用状态");
                         return;
                       }
                       refresh();
@@ -274,7 +274,7 @@ export default function Workflows() {
                               toast.success("已复制");
                               refresh();
                             } catch (e) {
-                              toast.error((e as Error).message);
+                              reportError(e, "复制工作流");
                             }
                           }}
                         >
@@ -290,7 +290,7 @@ export default function Workflows() {
                               a.download = `${w.id}.yaml`;
                               a.click();
                             } catch (e) {
-                              toast.error((e as Error).message);
+                              reportError(e, "导出工作流 YAML");
                             }
                           }}
                         >
@@ -304,10 +304,10 @@ export default function Workflows() {
                                 await navigator.clipboard.writeText(yml);
                                 toast.success("YAML 已复制到剪贴板");
                               } catch {
-                                toast.error("剪贴板不可用");
+                                reportError("剪贴板不可用");
                               }
                             } catch (e) {
-                              toast.error((e as Error).message);
+                              reportError(e, "复制工作流 YAML");
                             }
                           }}
                         >
@@ -327,7 +327,7 @@ export default function Workflows() {
                               toast.success("已删除");
                               refresh();
                             } catch (e) {
-                              toast.error((e as Error).message);
+                              reportError(e, "删除工作流");
                             }
                           }}
                         >
@@ -381,7 +381,7 @@ export default function Workflows() {
                   setImportText("");
                   refresh();
                 } catch (e) {
-                  toast.error((e as Error).message);
+                  reportError(e, "导入工作流");
                 }
               }}
             >

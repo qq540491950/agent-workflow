@@ -28,6 +28,8 @@ interface ErrorLike {
   status?: unknown;
 }
 
+// NETWORK_HINTS 把"网络层失败"翻成人话。
+//
 // fetch 在网络层失败时给的是浏览器的通用文案(各浏览器措辞不同:
 // "Failed to fetch" / "Load failed" / "NetworkError when attempting to
 // fetch resource")。后端不可用是最常见的失败原因,直接把这句英文弹给用户
@@ -36,9 +38,19 @@ interface ErrorLike {
 // **全匹配而不是子串匹配**:后端的具体错误里也可能带 timeout 之类的词
 // (例如 "Claude 执行超时"),子串匹配会把那句有信息量的话替换掉 ——
 // 泛化提示只该用于"根本连不上"这一种情况。
+//
+// 下面两条是迭代 30 补的(此前它们会原样弹给用户):
+//   - AbortError:fetch 被 AbortController 取消(组件卸载/请求竞态)——
+//     用户看到 "The operation was aborted" 完全不知道发生了什么;
+//   - "timeout of 5000ms exceeded":axios/包装层的超时文案。
+//
+// 这两条用**宽松匹配**(子串),因为它们不像 "Failed to fetch" 那样
+// 独占整条消息(前面常带上下文),但仍限定在"明确的超时/取消形态"上。
 const NETWORK_HINTS: Array<[RegExp, string]> = [
   [/^(failed to fetch|load failed|network request failed|networkerror.*)$/i, "无法连接后端服务(后端未启动或地址不可达)"],
   [/^(timeout|timed out|request timeout)$/i, "请求超时"],
+  [/abort/i, "请求被中断(可能已取消或页面切换)"],
+  [/timeout.*exceeded/i, "请求超时"],
 ];
 
 /**

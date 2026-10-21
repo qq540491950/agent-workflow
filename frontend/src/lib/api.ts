@@ -283,18 +283,37 @@ const CODE_HINTS: Record<string, string> = {
 };
 
 // 状态码兜底提示:错误体完全没有 code 时(向后兼容路径)仍给一句人话。
+//
+// 5xx 是迭代 30 补的:后端此前把**内部错误**(数据库锁死/Agent 崩溃/
+// 超时)也报 400,现在改为 5xx(见 docs/api.md 的状态码映射表)——
+// 5xx 的意思就是"不是你的问题,是服务出问题了",这句提示必须说清楚,
+// 否则用户会以为自己填错了什么。
 const STATUS_HINTS: Record<number, string> = {
   400: "请求参数不合法",
   403: "权限不足",
   404: "资源不存在",
   405: "请求方法不被允许",
   413: "内容过大(请求体超过后端上限)",
+  500: "服务内部错误(不是你的操作有问题,请稍后重试或查看日志)",
+  502: "后端调用外部服务失败(Agent/子进程异常)",
+  503: "服务暂时不可用,请稍后重试",
+  504: "后端调用外部服务超时",
 };
 
 // 后端 model.Error.Error() 的文本格式是 "Kind(CODE): message"
 // (带节点时 "Kind(CODE)[node=n1]: message")。直接把 Kind(CODE) 前缀
 // 弹进 toast 没有信息量,这里剥掉只留人话;code 仍保留在 ApiError.code。
 const KIND_PREFIX_RE = /^([A-Za-z]+)\(([A-Z][A-Z0-9_]*)\)(?:\[[^\]]*\])?:\s*/;
+
+// PANIC_TEXT_RE 识别 Wails 传回的 panic 文本。
+//
+// 形态:"<Go 包路径>.<方法>: panic: <panic 原文>"(Wails 的 CallError),
+// 也兼容裸的 "panic: …"。命中即归一为 INTERNAL —— **不外泄** Go 包路径
+// 与 panic 原文(泄漏的路径对用户没有意义,对开发者也定位不到真正的问题;
+// 真正的原文在桌面端日志里)。
+//
+// 用词边界匹配,避免把 "Panic mode" 之类的普通词误判成 panic。
+const PANIC_TEXT_RE = /\bpanic:\s*/i;
 
 /** 剥掉后端错误文本的 "Kind(CODE): " 前缀;非该形态原样返回。 */
 export function stripErrorPrefix(text: string): string {
@@ -333,13 +352,29 @@ export function hintForCode(code?: string): string {
  * 桌面分支此前**完全没有错误处理**:绑定 reject 的原始字符串直接冒泡,
  * 用户看到的是 "ValidationError(UNKNOWN_FIELD): 未知的顶层字段 …" 这种
  * 带内部前缀的裸文本,而服务器模式看到的是剥掉前缀的 ApiError。
+ *
+ * 迭代 30 补的两件事:
+ *   1. **panic 归一化**:Wails 把后端 panic 原文交给前端,形如
+ *      "agentworkflow/app/application.WorkflowService.Get: panic: …"
+ *      —— 泄漏 Go 包路径,用户看不懂。归一成 code=INTERNAL 的通用文案。
+ *   2. **code/kind 兜底**:剥不出 "Kind(CODE): " 前缀时(旧版后端、
+ *      代理改写、第三方绑定)补 code=BAD_REQUEST / kind=ValidationError,
+ *      与服务器模式的默认形状**同构**(约定 10)—— 消费方按 code 分支
+ *      时不必到处判 undefined。
  */
 function toApiError(e: unknown): ApiError {
   if (e instanceof ApiError) return e;
   const text = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  // panic:不外泄 Go 包路径与 panic 原文
+  if (PANIC_TEXT_RE.test(text)) {
+    return new ApiError("服务内部错误(后端处理时出错)", 500, "INTERNAL", "WorkflowError");
+  }
   const parsed = parseErrorPrefix(text);
   const message = parsed.message || hintForCode(parsed.code);
-  return new ApiError(message, 0, parsed.code, parsed.kind);
+  // 剥不出前缀 → 兜底 code/kind(与服务器模式同构)
+  const code = parsed.code ?? "BAD_REQUEST";
+  const kind = parsed.kind ?? "ValidationError";
+  return new ApiError(message, 0, code, kind);
 }
 
 /**
@@ -402,6 +437,18 @@ function buildApiError(status: number, body: unknown): ApiError {
 // text 端点(DSL 导出/下载)用:后端在错误时写的是 JSON 错误体,
 // 直接 res.text() 会把 {"error":...,"code":"NOT_FOUND"} 当成 DSL 内容
 // 弹进对话框或写进 .yaml 文件(fix: 绕过 http() 且不检查 res.ok)。
+//
+// **非 JSON 错误体**(HTML 兜底页、反向代理的整页报错)此前**把全文当
+// 错误消息**:一是几百行 HTML 塞进 toast,二是里面可能带着内部路径。
+// 现在截断到 200 字再交给 buildApiError 统一处理(剥前缀 + 码表提示)。
+const MAX_ERROR_TEXT = 200;
+
+/** 截断过长文本(保留前 N 字,末尾标注截断)。 */
+function truncate(text: string, max = MAX_ERROR_TEXT): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}…(已截断,共 ${text.length} 字)`;
+}
+
 async function httpText(path: string): Promise<string> {
   const res = await fetch(path);
   const text = await res.text();
@@ -414,10 +461,11 @@ async function httpText(path: string): Promise<string> {
     } catch {
       body = undefined;
     }
-    // 非 JSON 错误体(HTML 兜底页等)保留原始文本,便于定位;
-    // JSON 错误体交给 buildApiError 统一处理(剥 Kind(CODE) 前缀 + code 提示)。
+    // 非 JSON 错误体(HTML 兜底页等):截断后当纯文本错误体处理 ——
+    // 走同一条 buildApiError 路径,提示语与状态码兜底口径一致。
     if (body === undefined) {
-      throw new ApiError(text || `HTTP ${res.status}`, res.status);
+      const trimmed = truncate(text.trim());
+      throw buildApiError(res.status, trimmed ? { error: trimmed } : undefined);
     }
     throw buildApiError(res.status, body);
   }

@@ -182,10 +182,16 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 	// (约定 8)。父进程环境里的凭据同样算(子进程继承了它们)。
 	redactor := coreagent.NewRedactor(a.cfg.AgentEnv, req.Environment, coreagent.ParentEnv())
 	if errors.Is(runErr, exec.ErrWaitDelay) {
-		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获
-		return a.responseFor(stdout, redactor)
+		// 进程已成功退出,仅孤儿子进程延迟关管道;输出已完整捕获。
+		// 但那些孤儿必须**收掉**:它们还在后台跑并持有管道
+		// (进程泄漏 —— 约定 3 的进程组击杀在成功路径上没有兑现)。
+		coreagent.KillProcessGroup(cmd)
+		return a.responseFor(stdout, stderr, redactor)
 	}
 	if runErr != nil {
+		// 失败路径同样要收掉进程组:直接子进程已经死了,组里剩下的
+		// 都是它留下的孤儿(可能还持有管道)。
+		coreagent.KillProcessGroup(cmd)
 		if cctx.Err() == context.DeadlineExceeded {
 			return nil, model.NewError(model.KindTimeoutError, "CLAUDE_TIMEOUT",
 				fmt.Sprintf("claude 执行超时(%ds)", timeout))
@@ -198,7 +204,7 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 				redactor.Text(truncate(stderr.String(), 2000))))
 	}
 
-	return a.responseFor(stdout, redactor)
+	return a.responseFor(stdout, stderr, redactor)
 }
 
 // responseFor 把子进程输出转成 Agent 响应。
@@ -206,7 +212,7 @@ func (a *Agent) Execute(ctx context.Context, req coreagent.AgentRequest) (*corea
 // 输出被截断时结构化结果不可信(尾部 JSON 必然不完整),必须**显式失败**
 // 并说明原因 —— 返回 SUCCESS + 空决策会让路由静默走默认分支,
 // 正是约定 14 说的"该失败却成功"。
-func (a *Agent) responseFor(stdout *coreagent.BoundedBuffer, redactor *coreagent.Redactor) (*coreagent.AgentResponse, error) {
+func (a *Agent) responseFor(stdout *coreagent.BoundedBuffer, stderr *coreagent.BoundedBuffer, redactor *coreagent.Redactor) (*coreagent.AgentResponse, error) {
 	if stdout.Truncated() {
 		return &coreagent.AgentResponse{
 			Status: coreagent.StatusFailed,
@@ -215,18 +221,43 @@ func (a *Agent) responseFor(stdout *coreagent.BoundedBuffer, redactor *coreagent
 			Output: stdout.String(), // 带显式截断标记,便于定位
 		}, nil
 	}
-	resp, err := a.parseOutput(stdout.Bytes())
+	// stderr 先过脱敏再拼进错误消息(约定 8:CLI 常把凭据原样打进 stderr)。
+	resp, err := a.parseOutput(stdout.Bytes(), redactor.Text(stderr.String()))
 	return redactor.RedactResponse(resp), err
 }
 
-// parseOutput 解析 claude CLI 的 JSON 输出为结构化 AgentResponse。
-func (a *Agent) parseOutput(out []byte) (*coreagent.AgentResponse, error) {
-	var co claudeOutput
-	if err := json.Unmarshal(out, &co); err != nil {
-		// 非 JSON 输出:原样返回,禁止猜测 decision
+// parseOutput 解析 claude CLI 的输出为结构化 AgentResponse。
+//
+// claude CLI 的契约是 `--output-format json`:stdout **必须**是一个
+// JSON 信封 {"result": "<模型回答>", "is_error": false}。因此:
+//
+//   - stdout 为空 / 只有空白 → 显式失败(约定 14:该失败却成功)。
+//   - stdout 里找不到合法信封 → 显式失败,并说明"不是合法信封"。
+//   - 信封里没有**合法决策** → 显式失败(路由只由结构化决策驱动,
+//     约定 1)。
+//
+// 以前这里是"非 JSON 输出就原样返回 + StatusSuccess":CLI 退出码 0
+// 却什么都没产出时,节点绿灯、决策为空、路由静默走默认分支 ——
+// 约定 14 说的"该失败却成功"。同一个函数里"输出被截断"已经是
+// 显式失败,空输出却不是:两者信息量相同(都拿不到可信决策),
+// 结论却相反 —— 口径必须一致。
+func (a *Agent) parseOutput(out []byte, stderr string) (*coreagent.AgentResponse, error) {
+	text := string(out)
+	if strings.TrimSpace(text) == "" {
+		// stderr 是这里**唯一**的诊断线索("额度耗尽"之类)—— 必须带进
+		// 错误消息,否则用户只能自己去命令行重跑才知道出了什么事。
 		return &coreagent.AgentResponse{
-			Status: coreagent.StatusSuccess,
-			Output: string(out),
+			Status: coreagent.StatusFailed,
+			Error:  "claude 未产生任何输出(进程退出码 0 但 stdout 为空)" + coreagent.StderrHint(stderr),
+			Output: text,
+		}, nil
+	}
+	co, ok := extractEnvelope(text)
+	if !ok {
+		return &coreagent.AgentResponse{
+			Status: coreagent.StatusFailed,
+			Error:  "claude 输出不是合法的 JSON 信封(缺少 result/is_error 字段)" + coreagent.StderrHint(stderr),
+			Output: text,
 		}, nil
 	}
 	if co.IsError {
@@ -240,12 +271,19 @@ func (a *Agent) parseOutput(out []byte) (*coreagent.AgentResponse, error) {
 			Output: co.Result,
 		}, nil
 	}
+	if strings.TrimSpace(co.Result) == "" {
+		return &coreagent.AgentResponse{
+			Status: coreagent.StatusFailed,
+			Error:  "claude 信封里没有内容(result 为空)",
+			Output: co.Result,
+		}, nil
+	}
 	resp := &coreagent.AgentResponse{
 		Status: coreagent.StatusSuccess,
 		Output: co.Result,
 	}
 	// 结构化决策:要求模型按约定返回 JSON(见 buildPrompt 的指令)。
-	// 解析失败不猜测,decision 留空由路由按 output 处理。
+	// 解析失败不猜测,decision 留空 —— 但"留空"不等于"成功"。
 	var structured struct {
 		Decision string `json:"decision"`
 		Summary  string `json:"summary"`
@@ -257,7 +295,59 @@ func (a *Agent) parseOutput(out []byte) (*coreagent.AgentResponse, error) {
 		// 决策取值必须合法才进路由(非法取值留痕但不路由)。
 		coreagent.ApplyDecision(resp, structured.Decision)
 	}
+	if resp.Decision == "" {
+		// 没有可用决策 → 路由无从驱动 → 显式失败(约定 1 + 14)。
+		// Data 里已留有 decision_invalid / decision_raw 痕迹。
+		resp.Status = coreagent.StatusFailed
+		resp.Error = "claude 的输出里没有合法的结构化决策(decision),无法驱动路由"
+	}
 	return resp, nil
+}
+
+// extractEnvelope 从 stdout 里提取 claude 的 JSON 信封。
+//
+// 候选顺序:整段文本 → 尾部对象 → 第一个对象;取第一个**像信封**的
+// 候选(含 result 或 is_error 字段)。
+//
+// 为什么要多几个候选:真实 CLI 偶尔会在信封**前面**打印提示行
+// (版本提示、deprecation 警告)。整段 Unmarshal 失败就等于把本来
+// 可用的结果整个丢掉 —— 决策随之消失,路由静默走默认分支。
+func extractEnvelope(text string) (claudeOutput, bool) {
+	candidates := []string{text}
+	if tail := coreagent.TrailingJSONObject(text); tail != "" && tail != text {
+		candidates = append(candidates, tail)
+	}
+	if first := coreagent.FirstJSONObject(text); first != "" && first != text {
+		candidates = append(candidates, first)
+	}
+	for _, candidate := range candidates {
+		if !isEnvelope(candidate) {
+			continue
+		}
+		var co claudeOutput
+		if err := json.Unmarshal([]byte(candidate), &co); err != nil {
+			continue
+		}
+		return co, true
+	}
+	return claudeOutput{}, false
+}
+
+// isEnvelope 判断一段 JSON 文本是不是 claude 的信封(含 result 或
+// is_error 字段)。
+//
+// 用字段判定而不是"能不能 Unmarshal":模型正文里也会出现 JSON
+// 对象(典型是提示词里的示例),它们能 Unmarshal 但不是信封。
+func isEnvelope(candidate string) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(candidate), &fields); err != nil {
+		return false
+	}
+	if _, ok := fields["result"]; ok {
+		return true
+	}
+	_, ok := fields["is_error"]
+	return ok
 }
 
 // buildPrompt 组装 Prompt:指令 + 任务 + 上下文 + 结构化输出要求。

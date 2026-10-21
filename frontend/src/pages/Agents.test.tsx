@@ -6,6 +6,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { toast } from "sonner";
 import Agents from "./Agents";
 import { settle } from "@/test/helpers";
+import { resetErrorDedup } from "@/lib/errors";
 
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), message: vi.fn() },
@@ -50,6 +51,10 @@ const agent = {
 };
 
 beforeEach(() => {
+  // reportError 对同一个错误做 5 秒去重(防提示风暴):测试里多个用例
+  // 报同一个错误时后一个会被去重掉 —— 那是生产行为,不是缺陷。
+  // 断言"这次确实提示了"之前先清掉去重记录。
+  resetErrorDedup();
   vi.useFakeTimers();
   m.listAgents.mockReset().mockResolvedValue([agent]);
   m.getAgentConfig.mockReset().mockResolvedValue({

@@ -1346,6 +1346,145 @@ submit 一个)。
 | #323 | `dead_entry_test.go:40: Manager 不得再有静默入口 Apply(方法集: Apply, ApplyChecked, ApplyWorkflowOverrides, Check, Clone, Get, Set, Snapshot, ValidateTightenOnly)`(overlay 把 `Apply` 加回去) | 方法集里没有 `Apply`;`ApplyChecked` / `ApplyWorkflowOverrides` 都在 |
 | #324-#329 | (纯文档项:判据是"核实"—— 文件与行号逐条读过 + 实测) | 文档口径与实现一致;`docs/check-numbering.sh` 全绿 |
 
+### 轮次 88-89:第二十五轮(迭代 30 收口)—— git 出口脱敏 / 状态码语义 / 前端错误文案统一 / panic 兜底 / 错误文本去内部细节(#330-#335)
+
+> 本节是**迭代 30**(第二十五轮)的收口记录。输入是第二十九轮的
+> **API 错误契约扫描**报告(6 条:1 条 P0 越界 + 2 条 P1 + 2 条 P2 + 1 条 P3)。
+> 本轮的纪律与前几轮一致:**先核实**("复审给的是文件与行号"→ 逐条读过、
+> 实测复现)→ **先写会失败的测试** → 再改实现 → 逐条给出红/绿证据。
+>
+> **号段分配**:本轮用 **#330-#335**;`docs/check-numbering.sh` 可解析
+> (上一轮用到 #329,连续)。
+>
+> **本轮不动**:`workflow/**`、`app/application/**`、`persistence/**`、
+> `event/**`、`agent/**`、`skill/**`、`template/**`、`contextx/**`、
+> `logx/**`、`permission/**`、`scripts/**`、根 `main.go` —— 那些是别的
+> 代理的地盘。本轮只动 `git/`、`api/`、`frontend/src/{lib,pages,test}/`、
+> `docs/`。
+
+#### 本轮登记的缺陷与处理
+
+| 编号 | 轮次 | 缺陷 | 证据 | 修法 |
+| --- | --- | --- | --- | --- |
+| **#330** | 第二十五轮 | **P0(越界)** `GET /api/git/diff` 返回**未脱敏**文件内容 —— 用户代码库里的 `.env` / 含密钥文件,凭据明文进 API 响应体,再由前端 GitPanel 渲染到屏幕(违反约定 8) | 扫描原文:"实测 `GET /api/git/diff` 返回 `ANTHROPIC_API_KEY=sk-ant-supersecret1234567890abcdef` **明文**;`git/git.go` 全文 **0 处 `logx.Mask`**"。**本轮隔离复现**(`git archive HEAD` 副本 + 本轮测试):`git/mask_test.go` 4 条红 —— `diff 不得含凭据明文("sk-ant-supersecret1234567890abcdef")`、`diff 不得含低熵凭据明文("hunter2-low-entropy")`、`提交信息不得含凭据明文: "chore: rotate sk-ant-supersecret1234567890abcdef"`、`status 原文不得含凭据明文: "## main\n?? API_KEY=sk-ant-supersecret1234567890abcdef.txt\n"` | `git/git.go` 的**五个出口**(`Status` / `Diff` / `Log` / `Commit` / `CurrentBranch`)一律过 `logx.Mask`(键名 ∪ 值形态,**与节点 output 出口同源**);脱敏在**解析之前**做(文件路径同样带凭据)。**为什么不用更松的"只按值形态"**:`.env` 里的密码多半是**低熵**的(`DB_PASSWORD=hunter2`)—— 值形态规则判它"不是凭据",只靠它秘密照样明文出站(隔离副本实测:该值**原样出站**)。**可读性回归锁**:`TestDiffKeepsOrdinaryContentByteIdentical` 拿 `git diff` **原文**逐字节比对(普通代码与路径**逐字不变**);`TestDiffMasksLowEntropyButKeepsStructure` 另锁"行数不变"。**`Run`(工作流 git 节点用)刻意不脱敏**:它的输出由应用层统一处理(节点 output → `logx.Mask`;制品 → 值形态规则,`workflow/runtime/masking_test.go` 钉着制品里 `const token = getToken();` 逐字保留)—— 在本包再叠一层键名规则会与制品出口打架 |
+| **#331** | 第二十五轮 | **P1** 内部错误(DB 锁死 / Agent 崩溃 / 超时)**一律报 400** —— 用户与监控无法区分"用户填错了"与"后端炸了";`api/server_test.go` 的"错误必须是 4xx"断言把这条错误行为**钉成了契约** | 扫描原文:"实测 `PersistenceError(DB_ERROR): sql: database is locked` → **HTTP 400**;`StateError(INVALID_RESUME)`/`AgentError`/`TimeoutError`/`WorkflowError(INTERNAL)` 全 400"。**本轮隔离复现**:`状态码 = 400,期望 500 ({"code":"DB_ERROR","error":"PersistenceError(DB_ERROR): x","kind":"PersistenceError"})`(6 个子用例全红:500/500/500/502/502/504) | `api/server.go` 新增 `statusForError`:**先按 code 再按 kind** 映射 —— `NOT_FOUND`→404、`PAYLOAD_TOO_LARGE`→413(不变);`DB_ERROR`/`INTERNAL`→500;`KindPersistenceError`→500;`KindAgentError`/`KindProcessError`→502;`KindTimeoutError`→504;`KindPermissionError`→403(不变);其余→400(不变)。**向后兼容是硬要求**:既有 4xx 映射**一条都没动**。**`INVALID_RESUME`/`INVALID_TRANSITION` 刻意保持 400**(评估见下方专节) |
+| **#332** | 第二十五轮 | **P1** 同一后端错误前端给出**两种文案**(43 处 `toast.error` vs 16 处 `reportError`)—— 丢掉 scope、丢掉错误码、且**绕过 `errors.ts` 的 `NETWORK_HINTS` 中文翻译**(网络失败时 `toast.error` 弹的是浏览器的原始英文 `Failed to fetch`) | 扫描原文:"实测同一 NOT_FOUND:`toast.error`→`工作流 "ghost" 不存在`;`reportError`→`加载工作流:工作流 "ghost" 不存在(NOT_FOUND)`;网络失败:`toast.error`→**原始英文 `Failed to fetch`**"。**本轮核实**:`grep -rn "toast.error" frontend/src/pages` → **43 处**(扫描原文说 45 处 —— 差 2 处是**已在上轮改掉**的 `WorkflowHistory`/`Workflows` 链) | 43 处逐个换成 `reportError(e, scope)`(逐条清单见 `docs/TESTING.md` 轮次 89 一节);`NETWORK_HINTS` 补 `AbortError` 与 `timeout of Nms exceeded` 两条;`STATUS_HINTS` 补 500/502/503/504;`httpText` 的非 JSON 分支改走 `buildApiError` + **截断 200 字**(此前把 HTML 全文当错误消息);桌面分支 `toApiError` 补 `code`/`kind` 兜底(`BAD_REQUEST`/`ValidationError`,与服务器模式同构)+ **panic 归一**(含 `: panic: ` → `INTERNAL`,不外泄 Go 包路径)。**静态守卫**:新增 `frontend/src/test/toast-guard.test.ts`(生产代码里 `toast.error` 只许出现在 `lib/errors.ts`;白名单为空表) |
+| **#333** | 第二十五轮 | **P2** 错误文本**夹带 Go/SQL/git 内部细节** —— `json: cannot unmarshal string into Go struct field AgentConfig.extra_args of type []string` 泄漏 Go 结构体名与类型名;`sql: database is locked`、`git status --porcelain -b 失败: fatal: not a git repository` 同族 | 扫描原文给出的 4 处位置(`api/server.go:702` 的 `badRequest` + `:295` + `:316` + `persistence/repo.go:1141` + `git/git.go:287`)。**本轮隔离复现**:`错误文本泄漏内部细节 "Go struct field": json: cannot unmarshal string into Go struct field AgentConfig.extra_args of type []string`、`错误文本泄漏内部细节 "(实际 ": 权限字段 "filesystem_read" 的值不是布尔(实际 string)` | `badRequest` 改成**结构化** `model.NewError(KindValidationError, "BAD_REQUEST", <人话>)`;三个曾透出 Go 原文的调用点改人话(Agent 配置字段类型 → 报**用户自己 payload 的 JSON 键名**、权限字段 → "必须是布尔值"、读请求体失败 → "读取请求体失败");`wrap` 出口的 `error` 文本**一律过 `logx.Mask`**(错误消息常夹带命令输出 / stderr / SQL 文本)。**原始错误只进日志**(`logx.Warn` 已有)—— 用户看人话,开发者看日志 |
+| **#334** | 第二十五轮 | **P2** `wrap` **无 `recover()`** → handler 里的 panic 一路冒到 net/http:服务器模式客户端收到 EOF(前端误报"后端未启动/不可达"),桌面模式 Wails 转 `CallError{"<FQN>: panic: <err>"}` → 界面弹出 `agentworkflow/app/application.WorkflowService.Get: panic: runtime error: index out of range [3] with length 2`(**泄漏 Go 包路径**) | 扫描原文(并注明"panic 用合成 handler 复现,**未能证明生产路径可达**" —— 300 轮随机 YAML fuzz + 15 组畸形 JSON,零 panic)。**本轮隔离复现**:`panic: runtime error: index out of range [3] with length 2 [recovered, repanicked]` —— 栈穿过 `api/server.go:423`(旧 `wrap`)一路冒到测试进程 | `api/server.go` 的 `wrap` 加 `defer recover()`:兜住后回 **500 + 标准错误体** `{"error":"服务内部错误","code":"INTERNAL","kind":"WorkflowError"}`,**panic 原文只进日志**。`http.ErrAbortHandler` **放行**(官方要求:那是主动中止信号,recover 会破坏连接关闭语义)。**响应已提交时不得再写错误体**(否则客户端拿到"半截正文 + 500 错误体"的坏 JSON)→ 用 `trackedWriter` 记录"是否已写过"。前端 `toApiError` 对含 `: panic: ` 的文本归一为 `INTERNAL` 且**不外泄 FQN** |
+| **#335** | 第二十五轮 | **P3** 路由级 404 文案"接口不存在"**面向开发者** —— 普通用户看到它不知道该做什么(换地址?刷新?还是等后端起来?) | 核实:`api/server.go` 的 `jsonErrorWriter.WriteHeader` 里 404 分支写死 `"接口不存在"`;前端 `api.test.ts` 的夹具也是这句(夹具已同步) | 改为面向用户但仍可定位的措辞:"请求的资源不存在(链接可能已过期,或地址有误)";`code` 仍是 `NOT_FOUND`(程序化处理不受影响) |
+
+#### #331 的评估:`INVALID_RESUME` / `INVALID_TRANSITION` 为什么不改成 409?
+
+扫描原文建议把这两个"状态不允许"改成 **409 Conflict**(语义更准),但同时
+提醒"改 400→409 会破坏既有客户端 → 请**评估**"。本轮的评估结论是
+**保持 400**,理由三条:
+
+1. **硬要求先行**:本轮的硬要求是"**4xx 既有映射不能变**"。这两个码的
+   既有映射就是 400 —— 改 409 就违反硬要求。
+2. **既有对外契约**:本文件"取消执行"一节写明"**已终态** → **400
+   `INVALID_TRANSITION`**",`api/cancel_semantics_test.go` 也钉着 400。
+   文档契约 + 既有测试 + 硬要求三处一致,单方面改 409 是**破坏契约**。
+3. **前端不按状态码分支**:核实前端**没有任何**按 `status === 400` 分支的
+   逻辑(`ApiError.status` 只用于"没有文案时退回 HTTP NNN"这一处显示兜底),
+   所以改 409 **不会**破坏本项目的 UI —— 但这也说明"改成 409 的收益"
+   只在**语义精确度**上,而第三方客户端与文档契约的代价是**实打实**的。
+
+**代价登记**:409 语义更准这件事**没有消失**,登记为待统一裁决的开放项 ——
+将来若有版本化的 API 契约(例如 `/api/v2`),可以在那一版里把
+`INVALID_RESUME` / `INVALID_TRANSITION` 改成 409,并同步更新
+`docs/api.md` 与 `api/cancel_semantics_test.go`。**本轮不做**。
+
+#### 本轮的**红 → 绿**证据(逐条)
+
+| 编号 | 红(改前实测,隔离副本 `git archive HEAD` + 本轮测试) | 绿(改后) |
+| --- | --- | --- |
+| #330 | `diff 不得含凭据明文("sk-ant-supersecret1234567890abcdef")`;`diff 不得含低熵凭据明文("hunter2-low-entropy")`;`提交信息不得含凭据明文: "chore: rotate sk-ant-supersecret1234567890abcdef"`;`status 原文不得含凭据明文: "## main\n?? API_KEY=sk-ant-supersecret1234567890abcdef.txt\n"` | 四个出口均无明文;键名保留、值 → `***`;`TestDiffKeepsOrdinaryContentByteIdentical` 拿 `git diff` 原文**逐字节相同** |
+| #331 | `状态码 = 400,期望 500 ({"code":"DB_ERROR",…})`;`状态码 = 400,期望 502 ({"code":"AGENT_FAILED",…})`;`状态码 = 400,期望 504 ({"code":"CLAUDE_TIMEOUT",…})`;`持久化失败应报 5xx,实际 400` | 15 个 kind/code 组合逐条断言(`api/error_contract_test.go` 的 `TestErrorStatusMappingByKind`);既有 4xx 组合**一条没动** |
+| #332 | `错误文本泄漏内部细节 "Go struct field": …`;`错误文本含凭据明文: …ANTHROPIC_API_KEY=sk-ant-supersecret1234567890abcdef`;`404 文案仍是开发者口径: 接口不存在`;前端 5 条断言拿到的是**裸消息**(无 scope/无错误码) | 43 处全部走 `reportError`;守卫 `frontend/src/test/toast-guard.test.ts` 绿;`NETWORK_HINTS` / `STATUS_HINTS` / `httpText` 截断 / `toApiError` 兜底各有用例 |
+| #333 | `错误文本泄漏内部细节 "Go struct field": json: cannot unmarshal string into Go struct field AgentConfig.extra_args of type []string`;`错误文本泄漏内部细节 "(实际 ": 权限字段 "filesystem_read" 的值不是布尔(实际 string)` | 三处调用点给人话;`wrap` 出口文本过 `logx.Mask`(凭据明文被替换为 `***`) |
+| #334 | `panic: runtime error: index out of range [3] with length 2 [recovered, repanicked]`(栈穿 `api/server.go:423` 冒到测试进程) | 500 + `{"error":"服务内部错误","code":"INTERNAL","kind":"WorkflowError"}`;响应体不含 panic 原文与 Go 包路径 |
+| #335 | `404 文案仍是开发者口径: 接口不存在` | "请求的资源不存在(链接可能已过期,或地址有误)";`code` 仍是 `NOT_FOUND` |
+
+### 轮次 90:第二十六轮(迭代 31)—— 真实适配器路径的"同形替身"场景矩阵(#336-#340)
+
+> 本节是**迭代 31**的收口记录。输入是一个**方法论缺口**,不是某条扫描
+> 报告:**前三十轮的验证几乎都用 mock agent**(它行为可预测、可断言),
+> 而真实路径是 `claude` / `pi` 适配器**调用真实 CLI** —— 子进程管理、
+> 超时、输出解析、退出码、stderr、管道与进程组全在 mock 之外,从未被
+> 系统性地走过一遍。
+>
+> 本轮做法:沿用仓库既有的"同形替身"先例(`agent/pi/stub_smoke_test.go`
+> 的 shell 替身、`agent/claude/real_smoke_test.go` 的真机冒烟),把它升级
+> 成**一个可复用、跨包共用**的 Go 替身二进制(`agent/internal/stubcli`):
+> 一个二进制按环境变量切换 16 种行为形态,覆盖 14 个场景,claude / pi
+> 两侧共用同一份替身(输出形态由 `STUBCLI_SHAPE` 切换)。
+>
+> **号段分配**:本轮用 **#336-#340**;`docs/check-numbering.sh` 可解析
+> (上一轮用到 #335,连续)。
+>
+> **本轮只动**:`agent/claude/**`、`agent/pi/**`、`agent/process_unix.go`、
+> `agent/process_windows.go`、`agent/internal/stubcli/**`、`docs/**`。
+> `workflow/**`、`api/**`、`app/**` 等一律没碰。
+>
+> **本轮的一条方法论**:替身不是 mock —— 它是**真的子进程**:真的
+> stdout/stderr、真的退出码、真的信号、真的进程组、真的管道。所以
+> "替身能过"不等于"真实 CLI 能过"(见文末的遗留风险),但"替身**过不了**"
+> 一定是适配器的真问题。
+
+#### 本轮登记的缺陷与处理
+
+| 编号 | 轮次 | 缺陷 | 证据 | 修法 |
+| --- | --- | --- | --- | --- |
+| **#336** | 第二十六轮 | **P0** CLI **退出码 0 但 stdout 为空/只有空白** → 适配器一律 `StatusSuccess` + 决策为空 → 节点绿灯、路由**静默走默认分支**(约定 14 的"该失败却成功")。第二十九轮扫描登记过一条 P3(`agent/claude/claude.go:223-231` "非 JSON 输出(含空输出)一律 StatusSuccess"),本轮**核实并升级为 P0**:同一函数里"输出被截断"早已是显式失败(注释原文:"返回 SUCCESS + 空决策会让路由静默走默认分支,正是约定 14 说的'该失败却成功'"),而**信息量更少**的空输出却是成功 —— 两条分支自相矛盾 | **替身实测(红)**:`03 空输出 → status = "SUCCESS", want "FAILED" (output="" error="")`;`04 只有空白 → status = "SUCCESS"`;`09 退出码 0 但无任何输出 → status = "SUCCESS"`(claude / pi 两侧同病)。**为什么是 P0 而不是 P3**:① 同一个函数里信息量更少的空输出必须比截断更严格,否则"截断失败、空输出成功"是自相矛盾的两套口径;② 运行期的 `matchBranch`(`workflow/compiler/lower.go:1211`)在条件不匹配时会**兜底走无条件分支** —— 路由静默换道,用户看不到任何异常;③ 真实 CLI 完全可能"崩了但退出码是 0"(写日志文件而非 stdout、被 wrapper 吞掉输出等),这不是理论形态 | claude / pi 两侧的 `parseOutput` **先判空**:stdout 为空或只有空白 → `StatusFailed` + 可读原因("进程退出码 0 但 stdout 为空")。**错误消息带上 stderr**(CLI 退出码 0 时 stderr 是**唯一**的诊断线索 —— 没有它用户只能自己去命令行重跑才知道出了什么事;拼接前先过脱敏,凭据明文不得随行)。**不是**把空输出猜成某种决策 —— 约定 1 的"禁止猜测"仍然成立,只是这次**失败**而不是**静默成功** |
+| **#337** | 第二十六轮 | **P1** claude:stdout **不是合法 JSON 信封** → 整段 `json.Unmarshal` 失败 → 旧实现"原样返回 + `StatusSuccess`" → **决策整个丢失**(路由静默走默认分支)。触发形态:CLI 在信封**前面**打印提示行(版本提示、deprecation 警告),或输出根本不是 JSON | **替身实测(红)**:`06 前置垃圾 + 尾部 JSON → decision = "", want "REJECTED"`(stdout = `stub: WARNING: 前置垃圾行\n{"is_error":false,"result":"…"}`);`05 非 JSON 输出 → status = "SUCCESS", want "FAILED"`;`12 非法字节落在 JSON 内 → status = "SUCCESS"`。同族:**信封本身合法但没有决策**(模型没 comply / 决策取值非法)同样丢决策 | claude 的 `parseOutput` 改成**先找信封再解析**:候选顺序 = 整段文本 → **尾部对象** → 第一个对象,取第一个**像信封**的候选(含 `result` 或 `is_error` 字段 —— 用字段判定而不是"能不能 Unmarshal",因为模型正文里也会出现 JSON 对象,典型是把提示词里的示例原样抄回来)。找不到信封 → `StatusFailed` + "不是合法的 JSON 信封";信封里 `result` 为空 → `StatusFailed`;**没有可用决策** → `StatusFailed` + "没有合法的结构化决策,无法驱动路由"(`Data` 里仍留 `decision_invalid` / `decision_raw` 痕迹) |
+| **#338** | 第二十六轮 | **P1** 进程组击杀**只在取消/超时路径兑现**;CLI **正常退出**但派生出的孤儿仍持有 stdout 管道时(`exec.ErrWaitDelay` 路径),适配器返回成功,而那些**孤儿进程继续在后台跑** —— 进程泄漏 + 管道泄漏(约定 3 的"进程组击杀"语义只兑现了一半) | **替身实测(红)**:替身 fork 出一个 `sleep 60` 的子进程(继承 stdout)后立刻退出 → `孤儿进程 25062 仍然存活 —— 进程组未被清理`(claude / pi 两侧同病)。用 `ps` 复核:适配器早已返回,孤儿仍在进程表里 | `agent/process_unix.go` 新增 `KillProcessGroup(cmd)`:在 **Wait 返回之后**对 `-pgid` 发 SIGKILL —— 那时直接子进程已退出,组里剩下的就是孤儿。**失败路径同样调用**(直接子进程死了,组里剩下的也是它的遗留)。Windows 侧是空操作(无 POSIX 进程组语义)。**边界**:正常成功路径(没有 `ErrWaitDelay`)不杀组 —— CLI 可能**有意**留一个后台守护进程,那是 CLI 的事;只在"确实有人持有管道"或"命令失败"时才收 |
+| **#339** | 第二十六轮 | **P3** pi:自由文本输出(没有结构化 JSON)**是合法形态**(仓库自带示例 `workflows/examples/coding-task.yaml` 的 plan / execute 节点正是靠 pi 的自由文本产出当上下文),但旧实现**静默成功** —— 没有任何痕迹能判定"这次没有决策",用户只看到一句"成功" | **替身实测(红)**:pi 侧 `05 非 JSON 输出 → 缺少决策必须留痕(decision_missing), data=map[]`;`12 非法字节落在 JSON 内 → 不该有决策: "REJECTED"`(非法字节让 JSON 解析失败,决策与痕迹一起消失) | pi 的 `parseOutput`:stdout 为空 → `StatusFailed`(同 #336);**没有可用决策** → 仍是成功(形态合法),但**必须留痕**:`Data["decision_missing"] = true` + 摘要追加"(未解析出结构化决策)"。**降级必须可判定**(约定 14)—— 与 `decision_invalid` / `decision_raw` 同一族思路 |
+| **#340** | 第二十六轮 | **P2** "进程被信号杀死 + 管道被孤儿持有"这个组合,`exec.Wait` 返回的是 `*exec.ExitError` 而不是 `exec.ErrWaitDelay`(Go 的 `Wait` 里 `ExitError` 优先),适配器**不会**把它误判成成功 —— 但这条结论此前**没有任何用例钉着**,属于"靠运气正确" | **替身实测(绿,但此前无锁)**:`fork_and_signal` 形态(替身 fork 出持有管道的子进程后自己被 SIGKILL)→ 适配器返回 `CLAUDE_PROCESS_ERROR` / `PI_PROCESS_ERROR`(**不是** SUCCESS)。**反向风险**:若 `ErrWaitDelay` 优先于 `ExitError`,同一次执行会被判成功 —— 那才是 P0 | 新增 `fork_and_signal` 替身形态 + `TestStubSignalKillReapsOrphan`(两侧):断言①**不得**判成功;②孤儿被收掉。**这条是"登记为已验证"而不是"修"** —— 实现本来就对,本轮只是把"靠运气"变成"钉住" |
+
+#### 本轮的**红 → 绿**证据(逐条)
+
+隔离副本(`/tmp/aw31-scratch`,`git archive HEAD` + 本轮测试)把适配器实现
+**还原为 HEAD**、只保留本轮测试 → 红的用例即"本轮测试确实能抓住这些缺陷":
+
+| 编号 | 红(还原实现后实测) | 绿(本轮实现) |
+| --- | --- | --- |
+| #336 | claude:`03 空输出` / `04 只有空白` / `09 退出码 0 但无任何输出` 三条 `status = "SUCCESS", want "FAILED"`;pi:同三条 | 三条全绿(两侧),错误信息可读、带 stderr 线索、且不含凭据明文 |
+| #337 | claude:`06 前置垃圾 → decision = "", want "REJECTED"`、`05 非 JSON → status = "SUCCESS"`、`12 非法字节 → status = "SUCCESS"`;pi:`05` / `12` 同族 | 全绿:尾部信封被提取、非法字节不 panic、错误可读 |
+| #338 | claude / pi:`孤儿进程 <pid> 仍然存活 —— 进程组未被清理`(两处) | 全绿:孤儿在适配器返回后被收掉 |
+| #339 | pi:`05 非 JSON → 缺少决策必须留痕(decision_missing), data=map[]`、`12 → 不该有决策: "REJECTED"` | 全绿:`decision_missing` 痕迹在位、非法 JSON 不产出决策 |
+| #340 | (实现本来就对) | 全绿:信号杀死 → `*_PROCESS_ERROR`,且孤儿被收掉 |
+
+#### 本轮**没有**改口径的一处(有意保留)
+
+任务书里"非 JSON 输出 → 明确失败"这条期望,**pi 侧不照办**:
+pi 的输出形态本就是自由文本,仓库自带的示例工作流
+(`workflows/examples/coding-task.yaml`)的 plan / execute 节点靠的正是它 ——
+把它改成失败会打断既有工作流形态。pi 侧改成"**成功但留痕**"
+(#339),既不打断合法用法,也不再静默。claude 侧可以判失败,因为**适配器
+自己**在提示词里要求了 JSON 决策(`buildPrompt` 末尾那句
+`Respond with JSON at the end of your reply`),拿不到决策 = 模型没 comply。
+
+**代价登记**:claude 侧"没有决策即失败"是 fail-closed 的取舍 —— 一个
+**非路由**用途的 claude 节点,若模型没按要求给 JSON,节点会**红**而不是
+"带着正文继续"。这是有意的(约定 14:静默成功比崩溃更危险),但用户可能
+需要把这类节点的提示词补上 JSON 要求。
+
+#### 本轮的**遗留**(不修,登记)
+
+1. **真实 CLI 的真实输出形态永远无法完全模拟** —— 替身能覆盖"形态",
+   覆盖不了"某个具体版本的 CLI 在某个具体环境下才会吐出的东西(例如
+   某些版本把 `is_error` 写成字符串、某些版本在 stdout 混入 ANSI 转义、
+   某些版本先打印 banner 再输出信封)。本轮已覆盖**信封/正文两种形态**与
+   16 种恶劣行为,但真机冒烟(`agent/claude/real_smoke_test.go`)仍然
+   需要真机。
+2. **`pi` 适配器仍无真机冒烟** —— 开放项(自轮次 29 起)保持开放:同形
+   替身已把子进程层覆盖到位,**真实 pi-agent CLI 的输出形态**仍未验证。
+3. **`KillProcessGroup` 的 PID 复用窗口** —— 直接子进程退出后其 PID 可能
+   被系统回收并分配给别的进程,那一瞬间 `kill(-pgid)` 理论上可能误伤
+   无关进程组。窗口是微秒级,且只在"确实有孤儿持有管道"或"命令失败"时
+   才会走到这条路。已登记,本轮不处理(处理它需要更强的进程追踪,
+   超出本轮范围)。
+
 ## 十四、仍然开放(轮次 61-86 之后)
 
 > 下面是**当前**的完整开放清单。前面各轮登记过的开放项,**已修的划掉并

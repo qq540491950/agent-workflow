@@ -298,7 +298,7 @@ function DesignerInner() {
       setTimeout(() => fitView({ padding: 0.15 }), 60);
     }).catch((e) => {
       setLoadError(e.message);
-      toast.error(e.message);
+      reportError(e, "加载工作流");
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -436,10 +436,10 @@ function DesignerInner() {
         return true;
       }
       setErrors(res.errors);
-      if (!silent) toast.error(`校验失败: ${res.errors.length} 个问题`);
+      if (!silent) reportError(`校验失败: ${res.errors.length} 个问题`);
       return false;
     } catch (e) {
-      if (!silent) toast.error((e as Error).message);
+      if (!silent) reportError(e, "校验工作流");
       return false;
     }
   };
@@ -451,7 +451,7 @@ function DesignerInner() {
       // 原样塞进 error 字段(用户只看到一坨裸 JSON)。此前无论校验是否
       // 通过都提交,既拿不到可读提示,后端的 warning 分支也不可达。
       if (!(await validate(true))) {
-        toast.error("校验未通过,已阻止保存(见画布下方错误列表)");
+        reportError("校验未通过,已阻止保存(见画布下方错误列表)");
         return;
       }
       const saved = await api.saveWorkflow(toModel());
@@ -463,7 +463,7 @@ function DesignerInner() {
       const warns = describeWarnings(saved.warnings);
       if (warns) toast.warning(warns);
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "保存工作流");
     } finally {
       setSaving(false);
     }
@@ -481,7 +481,7 @@ function DesignerInner() {
     try {
       variables = JSON.parse(runVars || "{}");
     } catch {
-      toast.error("变量不是合法 JSON");
+      reportError("变量不是合法 JSON");
       return;
     }
     try {
@@ -490,7 +490,7 @@ function DesignerInner() {
       setRunOpen(false);
       nav(`/executions/${exec.id}`);
     } catch (e) {
-      toast.error((e as Error).message);
+      reportError(e, "运行工作流");
     }
   };
 

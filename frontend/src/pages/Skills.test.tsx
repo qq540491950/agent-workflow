@@ -109,7 +109,9 @@ describe("Skills 启用开关", () => {
     const sw = screen.getAllByRole("switch")[0] as HTMLButtonElement;
     fireEvent.click(sw);
     await settle();
-    expect(toast.error).toHaveBeenCalledWith("启用失败");
+    // **断言变更(迭代 30,P1-3)**:统一走 reportError 后,文案带上
+    // scope 与错误码 → "启用 Skill:启用失败"(原文案只有裸消息)。
+    expect(toast.error).toHaveBeenCalledWith("启用 Skill:启用失败");
     // 回滚到服务端状态(仍为启用)
     expect(sw.getAttribute("data-state")).toBe("checked");
   });

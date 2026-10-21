@@ -64,6 +64,23 @@ describe("describeError", () => {
     expect(describeError(new Error("Claude 执行超时"))).toBe("Claude 执行超时");
     expect(describeError(new Error("request timeout"))).toBe("请求超时");
   });
+
+  // 迭代 30(P1-3):这两条此前会**原样**弹给用户 ——
+  // "AbortError: The operation was aborted" / "timeout of 5000ms exceeded"
+  // 是英文,用户看不懂,也不知道该不该重试。
+  it("请求被中断(AbortError)翻成人话", () => {
+    expect(describeError(new DOMException("The operation was aborted", "AbortError"))).toBe(
+      "请求被中断(可能已取消或页面切换)",
+    );
+    expect(describeError(new Error("AbortError: The operation was aborted"))).toBe(
+      "请求被中断(可能已取消或页面切换)",
+    );
+  });
+
+  it("超时文案(timeout of Nms exceeded)翻成人话", () => {
+    expect(describeError(new Error("timeout of 5000ms exceeded"))).toBe("请求超时");
+    expect(describeError(new Error("request timeout of 30000ms exceeded"))).toBe("请求超时");
+  });
 });
 
 describe("reportError", () => {
