@@ -3,6 +3,22 @@
 > 桌面模式通过 Wails IPC 暴露同一套服务;以下端点在 `--server` 模式下可用。
 > 启动:`./bin/agent-workflow-server --server --addr 127.0.0.1:8080`
 
+> **第三十轮(迭代 34 收官,轮次 93)契约复核**:本文件是**对外契约**,
+> 收官轮对它做了 **8 条声称 vs 代码**的逐条抽查 —— **8 条全部成立,
+> 契约正文未改**。逐条的核对依据见 `docs/OPTIMIZATION.md` 第十四节
+> 末尾"本轮复核的依据"表的最后一行:
+>
+> | # | 契约声称 | 核对到的代码 |
+> | --- | --- | --- |
+> | 1 | **凭据出口** | git 包**五个出口**全过 `logx.Mask`(`git/git.go:209/247/264/288/297`);错误文本也过(`api/server.go:536`);`state_json` 按键分类;制品走值形态规则 |
+> | 2 | **错误响应形状** | 非 2xx 一律 `{error, code, kind}`(`api/server.go:524-547`);路由级 404 / 405 同形状(`:631-642`) |
+> | 3 | **状态码映射** | `statusForError`(`api/server.go:578-603`)与下方状态码表**逐行一致**(先 code 再 kind) |
+> | 4 | **git 出口** | `Status` / `Diff` / `Log` / `Commit` / `CurrentBranch` **五个出口**全遮 |
+> | 5 | **modes 端点** | `GET /api/modes`(`api/server.go:63`)→ `workflow/model.AllModes()`(`workflow/model/model.go:156`);`modeSpecs` 实为 plan / execute / review / fix / test / submit,与本文档**逐项一致** |
+> | 6 | **备份范围** | 导出带 `version` + `workflows` + `agent_configs` + `skill_configs`(`app/application/application.go:1903-1906`);恢复端 `checkBackupVersion`(`:1934`)校验版本 |
+> | 7 | **取消语义** | `workflow/runtime/engine.go:505-568` 与下方"取消执行的三种语义"表**逐行一致**(终态 → 400 `INVALID_TRANSITION` / 不存在 → 404 / `CREATED`·`WAITING_USER` → CAS 裁决 + 非终态节点落 `SKIPPED`) |
+> | 8 | **顶层键严格化** | `app/application/workflow_payload.go:97` 的 `UNKNOWN_FIELD`;允许集合由 `model.Workflow` 的 json tag 反射派生;服务器模式与桌面模式走同一段代码 |
+
 ## 系统
 
 | 方法 | 路径 | 说明 |
