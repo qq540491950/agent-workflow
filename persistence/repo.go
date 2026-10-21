@@ -715,30 +715,25 @@ func (d *DB) ListExecutionNodes(executionID string) ([]*model.ExecutionNode, err
 
 // SaveEvent 持久化 UI 事件(审计与恢复)。
 //
-// **载荷不可 JSON 化时(NaN/Inf)不写空串**:写空串会让审计记录凭空变成
-// "没有载荷",与"载荷本来就是空的"无法区分(约定 14:静默丢数据)。
-// 改为落一条**自带说明**的占位载荷 + 一条 WARN:事件本身仍在审计流里
-// (审计流缺一条记录比记录里少一个字段更糟),且"载荷丢了"这件事在表里
-// 与日志里都看得见。
+// **载荷不可 JSON 化时(NaN/Inf)即失败**:持久层唯一的出口是 marshalJSON
+// (失败即报错,一行都不落库)—— 事件列不例外。
 //
-// 为什么这里**不**用"失败即返回错误"(其它列都用它):运行期对"事件落库
-// 失败"已有既定反应(计数 + ERROR 日志 + 发一条 runtime.error 事件,
-// 见 workflow/runtime/engine.go 的 onEventPersistFailed),而那条 runtime.error
-// 会改变 SSE 流的可见内容 —— api/sse_marshal_test.go 正是按"流里不得
-// 出现该执行 ID"来断言的(SSE 契约归 api 层所有)。本轮 api/** 由别的
-// 子代理在改(不可改动),因此事件列走"可见降级"而不是"失败"。
+// 为什么不"写一条占位载荷"(第二十五轮曾改成那样):占位载荷会让**失败的
+// 事件**在审计流里长得像一条正常事件(只是载荷里多了个标记),而这条事件
+// 在 SSE / UI 上恰恰**发不出去**(json.Marshal 同样失败)→ 审计流里多一条
+// "看起来正常"的记录,实际内容却丢了。失败即报错让运行期走它**既有的**
+// 反应链(计数 + ERROR 日志 + 一条 runtime.error 事件),审计流里留下的是
+// **显式的失败信号**,而不是一条被改了样的正常事件(约定 14)。
 //
-// 待办(需与 api 层一并处理):把这里改回"失败即返回错误",并同步把
-// api/sse_marshal_test.go 的断言从"流里不得出现执行 ID"精化成"失败
-// 的事件不得被当作**正常事件**发出"(runtime.error 是显式的失败信号,
-// 带上执行 ID 是它的价值所在)。
+// 递归护栏在运行期侧(workflow/runtime/engine.go 的 persistFailGuard):
+// runtime.error 自己落库失败时**不再**发一条 runtime.error —— 最多一级
+// 嵌套,不会级联。
+//
+// 向前兼容:老库里已存在的占位载荷行照常可读(它就是一段合法 JSON)。
 func (d *DB) SaveEvent(ev event.UIEvent) error {
 	data, err := marshalJSON(ev.Data)
 	if err != nil {
-		logx.Warn("事件载荷含不可 JSON 化的值(NaN/Inf),已按占位载荷落库",
-			"type", ev.Type, "execution", ev.ExecutionID, "node", ev.NodeID,
-			"error", err.Error())
-		data = []byte(`{"__unserializable__":"事件载荷含 NaN/Inf,无法 JSON 化,已按占位落库(原始载荷未保存)"}`)
+		return wrap(err)
 	}
 	_, err = d.sql.Exec(`INSERT INTO events (execution_id,node_id,type,data_json,created_at) VALUES (?,?,?,?,?)`,
 		ev.ExecutionID, ev.NodeID, ev.Type, string(data), ev.Timestamp.Format(time.RFC3339Nano))

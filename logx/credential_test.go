@@ -201,6 +201,216 @@ func TestMaskCredentialValuesKeepsKeyName(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 迭代 27(P1-1):"键值粘连"形态 —— 凭据前的键名/行前缀把它藏住了
+// ---------------------------------------------------------------------------
+
+// TestMaskCoversKeyValueGluedCredentialShapes "键值粘连"形态必须被脱敏。
+//
+// 背景(第二十七轮终审 P1-1):凭据 token 化时把 '=' / '+' 并进了同一个
+// token,于是:
+//
+//	AK=AKIAIOSFODNN7EXAMPLE  →  token = "AK=AKIAIOSFODNN7EXAMPLE"
+//	+AKIAIOSFODNN7EXAMPLE    →  token = "+AKIAIOSFODNN7EXAMPLE"
+//
+// 两者都**不是**凭据形态:AWS 密钥 ID 的规则锚定 ^…$ ('=' / '+' 让它不匹配),
+// 已知前缀用 HasPrefix(前缀不在 token 开头),高熵兜底要求小写
+// (AWS 密钥 ID 只有大写+数字)→ **四路全不命中** → 凭据明文从
+// 节点 output / state_json / 制品 / 执行详情 / 事件流六个出口全部泄漏。
+//
+// 注意 "X=ghp_…" / "X=eyJ…" 这类形态此前**看起来**是对的,实测是靠
+// "整个 token 恰好高熵"蒙对的(不是靠前缀规则)—— 根因与 AKIA 同源,
+// 本用例把这一族形态**逐条**钉住,不再靠运气。
+func TestMaskCoversKeyValueGluedCredentialShapes(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		secret string
+		// keep 是必须**原样保留**的上下文(键名 / diff 行前缀)。
+		// 保留它们是"可读性"取舍:读者要看出是哪个键、哪一行被脱敏了。
+		keep string
+	}{
+		{"短键名 + AWS 密钥 ID", "AK=AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE", "AK="},
+		{"diff 新增行前缀 + AWS 密钥 ID", "+AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE", "+"},
+		{"diff 删除行前缀 + AWS 密钥 ID", "-AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE", "-"},
+		{"短键名 + sk-ant", "X=sk-ant-supersecretvalue", "sk-ant-supersecretvalue", "X="},
+		{"短键名 + ghp_", "X=ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+			"ghp_16C7e42F292c6912E7710c838347Ae178B4a", "X="},
+		{"短键名 + JWT", "X=" + bearerJWT, bearerJWT, "X="},
+		{"diff 前缀 + ghp_", "+ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+			"ghp_16C7e42F292c6912E7710c838347Ae178B4a", "+"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotMask := Mask(c.in)
+			if strings.Contains(gotMask, c.secret) {
+				t.Errorf("Mask 出口仍含凭据明文: %q → %q", c.in, gotMask)
+			}
+			if !strings.Contains(gotMask, maskPlaceholder) {
+				t.Errorf("Mask 出口期望出现脱敏占位符: %q → %q", c.in, gotMask)
+			}
+			if !strings.Contains(gotMask, c.keep) {
+				t.Errorf("Mask 出口应保留上下文 %q: %q → %q", c.keep, c.in, gotMask)
+			}
+			gotValues := MaskCredentialValues(c.in)
+			if strings.Contains(gotValues, c.secret) {
+				t.Errorf("MaskCredentialValues 出口仍含凭据明文: %q → %q", c.in, gotValues)
+			}
+			if !strings.Contains(gotValues, maskPlaceholder) {
+				t.Errorf("MaskCredentialValues 出口期望出现脱敏占位符: %q → %q", c.in, gotValues)
+			}
+		})
+	}
+}
+
+// TestMaskCoversKeyValueGluedCredentialsAtOutlets 端到端:三个出口都不得
+// 留下"键值粘连"凭据的明文。
+//
+// 出口在代码里收敛成三个入口(逐条对照真实调用点):
+//
+//	节点 output / state_json / 日志 / 执行详情 → logx.Mask
+//	事件流(SQLite 落库 + SSE 推送 + Wails IPC) → logx.MaskValue
+//	制品(git diff)                          → logx.MaskCredentialValues
+//
+// 调用点:workflow/runtime/executor.go(节点 output)、
+// workflow/runtime/state_mask.go(state_json)、event/event.go(事件流)、
+// agent/redact.go(制品)、app/application/application.go(API 读出口)。
+func TestMaskCoversKeyValueGluedCredentialsAtOutlets(t *testing.T) {
+	const secret = "AKIAIOSFODNN7EXAMPLE"
+	const glued = "AK=" + secret
+
+	// 出口 1:节点 output / state_json / 日志 / API 读出口。
+	if got := Mask(glued); strings.Contains(got, secret) {
+		t.Errorf("节点 output 出口仍含凭据明文: %q", got)
+	}
+	// 出口 2:事件流(结构化载荷)。
+	out, ok := MaskValue(map[string]any{"output": glued}).(map[string]any)
+	if !ok {
+		t.Fatalf("MaskValue 应返回 map[string]any, 实际 %T", MaskValue(map[string]any{}))
+	}
+	raw := mustJSON(t, out)
+	if strings.Contains(raw, secret) {
+		t.Errorf("事件流出口仍含凭据明文: %s", raw)
+	}
+	// 出口 3:制品(git diff)。
+	if got := MaskCredentialValues(glued); strings.Contains(got, secret) {
+		t.Errorf("制品出口仍含凭据明文: %q", got)
+	}
+}
+
+// TestAWSAccessKeyPatternIsNotRedundant awsAccessKeyPattern **不是冗余规则**。
+//
+// 第二十七轮终审指出:"把 awsAccessKeyPattern 删掉,没有任何测试变红" ——
+// 虚假信心。本用例给出**只有它能抓住**的形态:不含数字的 AWS 密钥 ID。
+//
+// 判据:宽松前缀规则("akia" 等)要求值里**含数字**,高熵规则也要求含数字
+// → 无数字的 AWS 密钥 ID 只有 awsAccessKeyPattern 能命中。删掉它 → 本用例红。
+func TestAWSAccessKeyPatternIsNotRedundant(t *testing.T) {
+	// AKIA + 16 位大写字母(无数字)。
+	const keyID = "AKIAABCDEFGHIJKL"
+	// 前提自检:这条值**不含数字** —— 否则宽松前缀规则也能命中,
+	// 本用例就退化成"测不出 awsAccessKeyPattern 的作用"了。
+	if hasDigit(keyID) {
+		t.Fatalf("测试前提不成立:%q 含数字(应选一个无数字的 AWS 密钥 ID)", keyID)
+	}
+	for _, in := range []string{keyID, "id: " + keyID, "+" + keyID, "AK=" + keyID} {
+		got := Mask(in)
+		if strings.Contains(got, keyID) {
+			t.Errorf("无数字的 AWS 密钥 ID 未脱敏(只有 awsAccessKeyPattern 能抓住它): %q → %q", in, got)
+		}
+		if !strings.Contains(got, maskPlaceholder) {
+			t.Errorf("期望出现脱敏占位符: %q → %q", in, got)
+		}
+	}
+}
+
+// TestBareBase64WithPaddingIsNotTruncated 裸 base64(带 '=' 填充)不得被截断。
+//
+// 回归风险(本轮修法的核心约束):凭据 token 化的字符集里**必须保留** '='
+// —— 它是 base64 的合法字符。若把它删掉,这串 base64 会被截短成 22 字符
+// → 跌破裸值语境的高熵门槛(≥24)→ **整串明文泄漏**。
+//
+// 因此本用例用的是**恰好 24 字符**(含 2 个填充)的 base64:去掉 '=' 就跌破门槛。
+func TestBareBase64WithPaddingIsNotTruncated(t *testing.T) {
+	// 16 字节的 base64 —— 24 字符,末尾两个 '=' 填充。
+	// 夹具的挑选有两条硬要求(否则本用例就测不出"截断"这件事):
+	//   1. 去掉末尾填充后长度 **< 24** → 截断即跌破裸值高熵门槛;
+	//   2. **驼峰起伏 < 4 次** → 不被"驼峰标识符"护栏挡下(否则护栏会
+	//      替高熵规则把这条拦掉,用例就测错了东西)。
+	const b64 = "i5Ul4g/aaJJ/Ky/4Nvc1eA=="
+	if len(b64) != 24 {
+		t.Fatalf("测试前提不成立:base64 夹具长度应为 24(含填充),实际 %d", len(b64))
+	}
+	if len(strings.TrimRight(b64, "=")) >= 24 {
+		t.Fatalf("测试前提不成立:去掉填充后仍 ≥24 字符,截断也过不了门槛")
+	}
+	if humps := countHumps(b64); humps >= 4 {
+		t.Fatalf("测试前提不成立:夹具的驼峰起伏为 %d(≥4 会被驼峰护栏挡下)", humps)
+	}
+	for _, in := range []string{b64, "value " + b64, "AK=" + b64} {
+		got := Mask(in)
+		if strings.Contains(got, b64) {
+			t.Errorf("裸 base64 未脱敏(= 被截断 → 跌破高熵门槛): %q → %q", in, got)
+		}
+		if !strings.Contains(got, maskPlaceholder) {
+			t.Errorf("期望出现脱敏占位符: %q → %q", in, got)
+		}
+	}
+}
+
+// countHumps 统计"大写字母后紧跟小写字母"的次数(驼峰起伏)。
+//
+// 与 credential.go 的 isCamelIdentifier 同一口径 —— 用例用它自检
+// "夹具会不会被驼峰护栏挡下"(护栏一旦变化,本用例的前提自检会先红)。
+func countHumps(v string) int {
+	n := 0
+	for i := 1; i < len(v); i++ {
+		if v[i-1] >= 'A' && v[i-1] <= 'Z' && v[i] >= 'a' && v[i] <= 'z' {
+			n++
+		}
+	}
+	return n
+}
+
+// TestBasicAuthBase64IsMasked "Basic <base64>" 形态必须被脱敏。
+//
+// 本轮(迭代 27)的修法有一条硬约束:凭据 token 化的字符集里**必须保留** '='
+// —— 它是 base64 的合法字符。本用例锁住两件事:
+//
+//  1. 带 '=' 填充的 base64(既有形态)仍被脱敏 —— 不得因为切分规则而截断;
+//  2. 短一档的 base64("dXNlcjpwYXNz" = base64("user:pass"))也被脱敏 ——
+//     它没有填充、没有数字、长度 12,前三档判据都判不出。
+//
+// 反向对照(不得误伤):"Basic authentication" 这类英文短语**不能**被当成
+// 凭据 —— 判据要求 base64 能**解出含 ':' 的字节**,英文短语解不出来。
+func TestBasicAuthBase64IsMasked(t *testing.T) {
+	cred := []string{
+		"Authorization: Basic YWRtaW46cGFzc3dvcmQxMjM=", // 带填充
+		"Basic YWRtaW46cGFzc3dvcmQxMjM=",                // 裸形态 + 填充
+		"Basic dXNlcjpwYXNz",                            // 裸形态,无填充(短一档)
+		"Basic dXNlcjpwYXNz=",                           // 同一串,带填充
+	}
+	for _, in := range cred {
+		got := Mask(in)
+		if !strings.Contains(got, maskPlaceholder) {
+			t.Errorf("Basic base64 未脱敏: %q → %q", in, got)
+		}
+		if strings.Contains(got, "dXNlcjpwYXNz") || strings.Contains(got, "YWRtaW46cGFzc3dvcmQxMjM") {
+			t.Errorf("Basic base64 明文仍在: %q → %q", in, got)
+		}
+	}
+	// 反向对照:英文短语不得被误伤。
+	for _, in := range []string{
+		"Basic authentication is supported by the API.",
+		"Basic Tokenization is the standard here.",
+		"Basic application layer",
+	} {
+		if got := Mask(in); got != in {
+			t.Errorf("英文短语被误伤: %q → %q", in, got)
+		}
+	}
+}
+
 // TestMaskValueShapeRuleIsSingleSource 值的形态规则只有一份来源。
 //
 // **回归背景(#263)**:本用例此前断言的是
@@ -342,6 +552,17 @@ func TestCredentialShapeCoverageMatrix(t *testing.T) {
 		{
 			shape: "高熵长串(无前缀无键名)", in: "value " + highEntropy,
 			secret: highEntropy, maskedByMask: true, maskedByValues: true,
+		},
+		{
+			// 迭代 27(P1-1)新增:键名把凭据"粘"住了 —— 凭据前的短键名
+			// 进了同一个 token,四路形态判据全不命中 → 六个出口全泄漏。
+			shape: "AK=AKIA…(键值粘连)", in: "AK=AKIAIOSFODNN7EXAMPLE",
+			secret: "AKIAIOSFODNN7EXAMPLE", maskedByMask: true, maskedByValues: true,
+		},
+		{
+			// 迭代 27(P1-1)新增:diff 行前缀把凭据"粘"住了(同源根因)。
+			shape: "+AKIA…(diff 行前缀)", in: "+AKIAIOSFODNN7EXAMPLE",
+			secret: "AKIAIOSFODNN7EXAMPLE", maskedByMask: true, maskedByValues: true,
 		},
 	}
 

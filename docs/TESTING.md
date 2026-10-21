@@ -3,9 +3,17 @@
 > 共 8 轮测试验证(超过最低 5 轮要求),其中轮次 2-8 为浏览器视觉测试(GUI 黑盒)。
 > 每次功能完成与 Bug 修复均有独立 git 提交(见提交号)。
 >
-> **当前状态(轮次 71-86,对应 commit `6d76873` + 本轮工作区改动)**:
-> Go 测试文件 **158** 个 / 有测试的包 **21** 个 / 顶层 `func Test*` **851** 个;
-> 前端测试文件 **24** 个 / 用例 **293** 条;门禁 **9 步** + **29** 条自检场景。
+> **当前状态(轮次 71-87,对应 commit `6d76873` + 本轮工作区改动)**:
+> Go 测试文件 **163** 个 / 有测试的包 **21** 个 / 顶层 `func Test*` **869** 个;
+> 前端测试文件 **24** 个 / 用例 **293** 条;门禁 **9 步** + **32** 条自检场景
+> (迭代 27 新增 3 条:零次循环 / 无匹配分支 / 未被调用的辅助函数 ——
+> 见"轮次 87(续)"一节)。
+> **统计口径**(迭代 28 更正,见 #329):`git ls-files '*_test.go'` **加上**
+> `git ls-files --others --exclude-standard '*_test.go'`(含**未跟踪**的新测试文件),
+> 排除 `build/` 与 `node_modules/`;顶层 `func Test*` = 同口径文件里以
+> `^func Test` 开头的顶层函数(`func Example*` 为 0)。**这是快照,不是常量** ——
+> 同轮还有别的代理在加测试文件,数字会继续变;引用本数字时请写明基线
+> (本轮基线:HEAD `bb88b4f` + 迭代 28 在途改动)。
 > (第十四轮**已落地** commit `91fe3e2`;第十五轮(迭代 21B)**已落地**
 > commit `908ba0b` —— 取消终态语义 / ExtraArgs 值形态 / 门禁第 6 步判据;
 > 第十六轮(迭代 17)**已落地** commit `e62f4ff` —— 单源回归锁去恒真 /
@@ -14,7 +22,10 @@
 > argv 凭据告警,见"轮次 81"一节;第十八轮(迭代 20)**已落地**
 > commit `3e4a5b3` —— 设置读失败可观测 / 内置 Agent 注册失败上抛 / Set 白名单化,
 > 见"轮次 82"一节;第十九轮(迭代 20 收口)**已落地** —— 空上下文可见(#280)/
-> 门禁第 6 步的断言维度(#289),见"轮次 83"一节。)完整清单与逐文件说明见
+> 门禁第 6 步的断言维度(#289),见"轮次 83"一节;**第二十四轮(迭代 28 收口)**
+> —— `submit` 产物进上下文链(#321)/ SSE 慢客户端用例改确定性同步点(#322)/
+> 权限死入口清理(#323)/ 门禁前置条件与自检计数登记(#324 / #325)/
+> 文档口径校正(#326-#329),见"轮次 87"一节。)完整清单与逐文件说明见
 > "轮次 41-44 / 45-48 / 49-52 / 53-56 / 57-60 / 61-70 / 71-79 / 轮次 80 /
 > 轮次 81 / 轮次 82 / 轮次 83"十一节;"某条测试在什么改动下
 > 会变红"的实测记录见"改坏实现 → 测试变红"专节、"终审实测记录"专节与
@@ -34,6 +45,7 @@
 | SQLite | modernc.org/sqlite(纯 Go) |
 | Node | v24.13.1 / Vite 8 / React 18 / TS 5 |
 | 前端 | Tailwind CSS 4 + shadcn/ui + @xyflow/react (React Flow) |
+| 依赖安装 | **仓库根 `npm install`** + **`frontend/` 下 `npm install`**(两处都要,见下) |
 
 ---
 
@@ -1436,12 +1448,14 @@ vitest **233/233**(0 → 233);门禁 9 步通过。
 
 ### 轮次 78:第十四轮(迭代 18)—— 门禁自检的完备性加固 + 剩余开放项收口
 
-> **当前自检场景总数:29 条**(`scripts/verify.sh` 的 `SELFCHECK_EXPECTED`)。
+> **当前自检场景总数:32 条**(`scripts/verify.sh` 的 `SELFCHECK_EXPECTED`)。
 > 第十四轮(轮次 78)加了 5 条(共 14 条);第十五轮(轮次 79)加 1 条(伪造输出,
 > 17 条);第十六~十八轮(轮次 80-82)加了 6 条(路径排除规则 4 条 + 孤儿包候选
 > 2 条,23 条);第十九轮(轮次 83)加 4 条(第 6 步"断言扫描"判定,27 条);
 > **第二十二轮(轮次 86)加 2 条(第 6 步"断言**强度**"判定,29 条** ——
-> 恒不触发的断言必须被抓 + 运行期才成立的正常断言不得误判)——
+> 恒不触发的断言必须被抓 + 运行期才成立的正常断言不得误判);
+> **第二十七轮(轮次 87 续)加 3 条(第 6 步"**死断言**"判定的三类新形态,32 条** ——
+> 零次循环 / 无匹配分支 / 未被调用的辅助函数,后者同时断言绿方向)——
 > 逐条见下表与各轮次小节。
 >
 > 这一轮的**主体**是**门禁自检本身的完备性加固**(门禁脚本的判定逻辑,
@@ -1762,6 +1776,144 @@ vitest **268/268**、`./scripts/verify.sh` **9 步通过**(实测 **113s**)、
 `go test -race -count=1 ./...` **全绿**、前端 `npm run lint` +
 `npx tsc --noEmit` + `npx vitest run` **293/293**、
 `./scripts/verify.sh` **9 步通过**、`docs/check-numbering.sh` 通过。
+
+### 轮次 86(续):第二十三轮(迭代 26 收口)—— 运行期 timeout 钳制 / SaveEvent 收口 / 导入期预检判定
+
+> 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 86(续)"小节(**#312-#314 全部关闭**,
+> 另登记 3 条:**#315-#317**)。
+>
+> 本轮是**收口轮**:把上一轮写好的精确改法落地,并逐条核实"改法本身会不会引入
+> 新问题"(递归 / 契约探针 / 向后兼容)。**没有**改动 `workflow/compiler/**`、
+> `workflow/runtime/engine.go`、`app/**`、`agent/**`、`event/**`、`scripts/**`。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/runtime/timeout_seconds_test.go`(**新**) | **#312**:运行期交给适配器的 `req.Timeout` 必须是**合法范围**内的值(0..86400),15 个取值形态逐个锁死 —— 正常值(30 / `uint64` / `float64`)原样保留;0 → 0(= 不设节点超时);86400 → 86400;**超上界**(86401 / 10000000000 / `uint64` 4611686018427387904 / **1e20(float)**)→ **一律钳到 86400**(1e20 既不是负数也不是 0);**负值**(-1 / `int64(-1)<<40`)→ **0**;小数秒(30.5)→ **0**(不静默截断改写);字符串("30")→ 0;NaN → 0;+Inf → 86400。**#312(可观测后果)**:script 节点 `timeout_seconds: 10000000000` 必须**跑完**(SUCCESS),而不是刚起就被杀 |
+| `workflow/runtime/event_persist_payload_test.go`(**新**) | **#316**:载荷含 NaN 的事件落库失败 → ① 失败被计数;② **有且仅有 1 条** `runtime.error`(**递归护栏,不级联**);③ 审计流里**只有那一条 `runtime.error`**(坏事件本身**不在**表里 —— 持久层失败即报错) |
+| `persistence/finite_json_test.go`(**改**) | **#313**:`SaveEvent` 遇 NaN 载荷 → **返回错误**且**一行都不落库**(不得写占位载荷冒充正常事件) |
+| `api/sse_marshal_test.go`(**改**) | **#315**:失败的事件**不得以正常事件的形态发出**(顶层 `type` 不得是 `node.started`);且**必须有显式的失败信号**(`"type":"runtime.error"` 必须出现)—— 失败不能只剩一条日志(约定 14) |
+| `api/server_test.go`(**改,+1 例**) | **#314**:导入含 `.nan` 的 DSL → **400 `WORKFLOW_INVALID`** + 响应里看得见"有限数值" + 工作流**根本没被创建**(GET → 404) |
+
+**红 → 绿证据(改前实测)**:
+
+| # | 旧代码上的实测输出 | 现在 |
+| --- | --- | --- |
+| #312 | `运行期交给适配器的 timeout = 10000000000,want 86400`;`1e20(float) → timeout = -9223372036854775808,want 86400`;`负值 → timeout = -1,want 0`;`小数秒 → timeout = 30,want 0`;script:`超大 timeout_seconds 让 script 节点 FAILED(context deadline exceeded),want SUCCESS;耗时 547.637µs` | 15 个取值形态全部落到预期值(86400 / 0 / 原值);script 节点 **SUCCESS** |
+| #313 | `载荷含 NaN 时 SaveEvent 必须返回错误(不得写占位载荷冒充正常事件)`(persistence);`事件落库失败必须留下显式的失败信号(runtime.error),实际输出: ": connected\n\ndata: {\"type\":\"node.completed\",...}"`(api) | `SaveEvent` 返回错误且**一行都不落库**;SSE 流里有 `{"type":"runtime.error",...}`、**没有** `{"type":"node.started",...}` |
+| #315 | 旧断言 `!contains(out,"exec-bad")` 与正确行为**冲突**(失败信号本来就带执行 ID) | 判据改成**顶层 `type`** + 新增 `runtime.error` **正向**断言 |
+| #316 | (覆盖缺口:只有"整库故障"的用例) | 新用例锁住"只有一条 `runtime.error`"+"审计流里只有失败信号" |
+
+**契约探针仍然有牙齿(#312 的核心约束)**:
+
+- 两个调用点都保持 `cfgFloat(node, "timeout_seconds")` 的**字面量**形态
+  (探针只认 `cfg*(node, "字面量")`)→ `go test ./workflow/compiler/` **绿**,
+  且本轮**没有**改动 `workflow/compiler/**` 的任何文件(契约表与探针原样);
+- **造坏验证(隔离副本 `/tmp/aw26-probe`)**:把 script 节点的字面量读取换成
+  `if s := 0; s > 0` → 探针立刻报
+  `script 节点:契约表声明了配置键 "timeout_seconds",但运行期没有读取它` → 门禁红。
+
+**门禁自检**:场景数仍为 **29 条**(`SELFCHECK_EXPECTED=29`,本轮**没有**新增 /
+删除自检场景 —— `scripts/verify.sh` 未改动);`./scripts/verify.sh` **9 步通过**。
+
+**本轮验证**:`gofmt -l` 干净(改过的文件)、`go vet` 干净、
+`go test -race -count=1 ./...` **全绿**(21 个包)、`./scripts/verify.sh`
+**9 步通过**、`docs/check-numbering.sh` 通过。
+
+### 轮次 87:第二十四轮(迭代 28 收口)—— submit 产物进上下文链 / SSE 用例改确定性同步点 / 权限死入口清理 / 文档口径校正
+
+> 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 87"小节(#321-#329)。
+>
+> 本轮是**收口轮**:不新增扫描面,只把第二十六/二十七轮两份复审各自留下的
+> P2 / P3 收掉,并且**先核实**"复审说的是不是真的"。新增 Go 顶层用例
+> **+6 例**、**新增测试文件 3 个**(160 → **163**),顶层 `func Test*`
+> 853 → **869**(含第二轮在途改动带来的用例)。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `workflow/runtime/submit_slot_test.go`(**新,2 例**) | **`submit` 的产物必须进上下文链**(#321):端到端 —— `execute` → `submit` → 下游 `{{last_output}}`,下游必须拿到 **submit 自己的产物**(`提交摘要-NEW`),**不是**上一个 execute 节点的旧产物(`执行完成-OLD`);`submit` 之后再走一个 `execute` 时,下游拿到的是**最后一次**产出(槽位按执行顺序刷新,不是"submit 专属") |
+| `workflow/model/mode_slot_test.go`(**新,3 例**) | **mode → 槽位的映射是全覆盖的**(#321):遍历**全部**合法 mode,每个都必须有**非空** `ContextSlot`(空槽位 = 该 mode 的产物不进上下文链 = 槽位里留**陈旧值**且无告警);`submit` 的槽位必须是 `last_output` 且 `RequiresWrite` 为真;`execute` / `fix` / `submit` 共用 `last_output` |
+| `permission/dead_entry_test.go`(**新,1 例**) | **权限管理器只有一个应用覆盖的入口**(#323):用**反射**断言 `Manager` 的方法集里**不得**再有 `Apply`(静默版),且 `ApplyChecked` / `ApplyWorkflowOverrides` 必须都在 —— 防止"静默入口"被再加回来 |
+| `api/sse_test.go`(改:1 例重写 + 1 例新增) | **慢客户端不得阻塞事件生产者**(#322):`TestSSESlowClientDoesNotBlockProducer` 去掉 **5s 硬阈值**(并行负载下误红),改成等"**Emit 已返回**"这个**信号**;`TestSSESlowClientQueueOverflowDoesNotBlockProducer`(新)用 `blockedWriter` 把"客户端卡住"变成**确定的事实**,两个同步点(① 写协程已卡在 `Write` 里 ② 生产者那一轮 `Emit` 已全部返回),并断言**队列丢弃分支被走到**(捕获 `logx` 的 WARN `SSE 客户端消费过慢`) |
+| `workflow/runtime/node_config_test.go`(改) | **#317 关闭**:`TestCfgIntAcceptsAllIntShapes` → `TestCfgFloatAcceptsAllNumericShapes`(断言强度不变 —— 仍是"认全所有数值形态",字符串 `"30"` → 0),`cfgInt` / `toInt` 两个助手随之删除 |
+
+#### 红 → 绿(逐条)
+
+| 编号 | 红(改前实测) | 绿(改后) |
+| --- | --- | --- |
+| #321 | `submit_slot_test.go:83: 下游节点收到的提示词里没有 submit 节点的产物: "上次输出:执行完成-OLD"` / `submit_slot_test.go:86: 下游节点拿到的是**陈旧**的 last_output(上一个 execute 节点的产物): "上次输出:执行完成-OLD"` | 下游提示词 = `"上次输出:提交摘要-NEW"`,不含 `"执行完成-OLD"`,无残留占位符 |
+| #322 | 旧判据是**耗时阈值**(复审实测 3 路并行 5.409s > 5s → 误红)。**本轮未能在本机复现该误报**:3 路并行 + 4 个满载进程 + 并发跑整包 `-race` 全量,旧用例耗时 **0.70-0.88s**(远低于阈值)—— 复审的 5.409s 是在更重的负载下测到的;但缺陷是**结构性的**(判据比墙钟时长,时长是负载的函数;该用例自己的注释就写着"单独跑约 0.55s,全量并发时 2.3s",5s 阈值只比已记录的最坏值高约 2.2 倍)。**造坏验证**(overlay 把订阅回调改回"同步写客户端"):`FAIL: TestSSESlowClientQueueOverflowDoesNotBlockProducer (10.02s)` / `sse_test.go:265: Emit 被慢客户端阻塞(触发事件的那次 Emit 没有返回)` | 两条用例都只等"Emit 已返回"的**信号**;新用例另断言队列丢弃分支被走到 |
+| #323 | 造坏验证(overlay 把 `Apply` 加回去):`dead_entry_test.go:40: Manager 不得再有静默入口 Apply(方法集: Apply, ApplyChecked, ApplyWorkflowOverrides, Check, Clone, Get, Set, Snapshot, ValidateTightenOnly)` | 方法集里没有 `Apply`;`ApplyChecked` / `ApplyWorkflowOverrides` 都在 |
+| #324-#329 | 纯文档项:判据是**核实**(文件与行号逐条读过 + 实测) | 文档口径与实现一致;`docs/check-numbering.sh` 全绿 |
+
+#### 门禁第 7 步的前置条件(#324):**仓库根**也要装依赖
+
+> **这是"9/9 不可从干净 clone 复现"的那条前置条件**,此前**没有任何文档**记载。
+
+| 事实 | 依据 |
+| --- | --- |
+| eslint 与它的 4 个插件声明在**仓库根** `package.json` | 根 `package.json` 的 `devDependencies`:`@eslint/js` / `eslint` / `eslint-plugin-react-hooks` / `globals` / `typescript-eslint`;**`frontend/package.json` 里没有 eslint** |
+| `frontend/package.json` 的 lint 脚本是 `eslint .` | `frontend/package.json` → `"lint": "eslint ."`;`frontend/node_modules/.bin/` 里**没有** eslint(实测) |
+| 它能跑通,只因为 npm 会把**祖先目录**的 `node_modules/.bin` 加进 PATH | 实测:`cd frontend && npm run lint` → exit 0(根 `node_modules/.bin/eslint` 存在) |
+| 只装 `frontend/` 的干净 clone → 第 7 步 lint `exit 127` → 门禁**红** | fail closed 是对的,但"9/9"**不可复现**;此前 #215 只把 eslint"声明"这件事做了(声明在根 `package.json`),**没写"要装根级依赖"** |
+
+**结论**:从干净 clone 复现门禁,必须**两处**都装依赖:
+
+```bash
+npm install            # 仓库根 —— eslint 与插件(门禁第 7 步的 lint)
+cd frontend && npm install   # 前端自身的依赖(vite / vitest / typescript)
+```
+
+**`AGENTS.md`(仓库宪法)不归本代理** → 建议措辞见交付报告"需主代理执行"一节。
+
+### 轮次 87(续):第二十七轮(迭代 27 收口)—— 凭据形态的"键值粘连"泄漏 / 门禁死断言的三类新形态
+
+> 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 87"小节(**#318 / #319 / #320**)。
+>
+> 本轮只做**两项 P1 必修**:① 凭据在"**键值粘连**"形态下(`AK=AKIA…` /
+> `+AKIA…`)从**六个出口**明文泄漏;② 门禁第 6 步的断言扫描可被**三种手法**
+> 骗过(实测 9/9 全绿放行)。**纪律**:每条缺陷**先写会失败的测试** → 再修到绿,
+> 逐条给出**红时断言输出**;**不写恒真测试**。新增 Go 顶层用例 **+5 例**
+> (顶层 `func Test*` 864 → **869**;测试文件数 **163 不变** —— 本轮**未新增
+> 测试文件**,只改既有的 `logx/credential_test.go`);前端**未改动**。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `logx/credential_test.go`(改,+5 例) | **#318**"键值粘连"形态必须被脱敏:`TestMaskCoversKeyValueGluedCredentialShapes`(7 个形态 × 2 入口:`AK=AKIA…` / `+AKIA…` / `-AKIA…` / `X=sk-ant-…` / `X=ghp_…` / `X=eyJ…` / `+ghp_…`;**且键名 / diff 行标记必须保留** —— 脱敏不许毁掉可读性);`TestMaskCoversKeyValueGluedCredentialsAtOutlets`(三个出口的端到端:节点 output / state_json → `logx.Mask`、事件流 → `logx.MaskValue`、制品 → `logx.MaskCredentialValues`);`TestAWSAccessKeyPatternIsNotRedundant`(**给 `awsAccessKeyPattern` 补上"只有它能抓住"的用例** —— 终审指出"删掉它没有任何测试变红"是虚假信心:用一串**无数字**的 AWS 密钥 ID `AKIAABCDEFGHIJKL`,宽松前缀规则与高熵规则都要求含数字 → 只有它能命中);`TestBareBase64WithPaddingIsNotTruncated`(**base64 的 `=` 不得被截断** —— 用一串**恰好 24 字符**(含两个 `=` 填充)、驼峰起伏 < 4 次的 base64:去掉 `=` 就跌破裸值高熵门槛 → 整串明文泄漏);`TestBasicAuthBase64IsMasked`(`Basic <base64>` 四个形态 + **3 条英文短语反向对照** —— `Basic authentication` / `Basic Tokenization` / `Basic application` **不得**被误伤) |
+| `logx/credential_test.go`(改:`TestCredentialShapeCoverageMatrix`) | 覆盖矩阵从 **13 形态**扩到 **15 形态 × 2 出口**:新增 `AK=AKIA…(键值粘连)` 与 `+AKIA…(diff 行前缀)` 两行,两个出口**都必须**脱敏 |
+| `scripts/verify.sh`(改:第 6 步 `assertscan`) | **#320** 三类死断言判定(见下节);自检 **29 → 32** 条 |
+
+#### 红 → 绿(逐条,红时断言输出逐字摘录)
+
+| 编号 | 红(改前实测) | 绿(改后) |
+| --- | --- | --- |
+| #318 | `credential_test.go:247: Mask 出口仍含凭据明文: "AK=AKIAIOSFODNN7EXAMPLE" → "AK=AKIAIOSFODNN7EXAMPLE"`;`credential_test.go:284: 节点 output 出口仍含凭据明文: "AK=AKIAIOSFODNN7EXAMPLE"`;`credential_test.go:293: 事件流出口仍含凭据明文: {"output":"AK=AKIAIOSFODNN7EXAMPLE"}`;`credential_test.go:297: 制品出口仍含凭据明文: "AK=AKIAIOSFODNN7EXAMPLE"` | `AK=***`(键名保留)/ `+***`(行标记保留);三个出口均无明文;`AWS_ACCESS_KEY_ID=AKIA…`、`Basic <base64>`、PEM 块**不回归** |
+| #319 | `in="AIDAIOSFODNN7EXAMPLE" old="AIDAIOSFODNN7EXAMPLE"`;`in="Basic dXNlcjpwYXNz" old="Basic dXNlcjpwYXNz"` | 四种 AWS 前缀 → `***`;`Basic dXNlcjpwYXNz` → `Basic ***`;**反向对照**`"Basic authentication is supported by the API."` **逐字节不变** |
+| #320 | 第 6 步输出 `OK(25 个包均有真实执行并通过的用例,且测试代码里都有断言)`(隔离副本 + 三个绕过包 → **放行**);扫描器逐包:`bypassb1 total=1 live=1` / `bypassb2 total=1 live=1` / `bypassb3 total=1 live=1` | 第 6 步 `❌ VERIFY FAIL: 以下包的测试代码里没有可能触发的断言:` → `agentworkflow/bypassb1: …(零次循环)…` / `bypassb2: …(无匹配分支)…` / `bypassb3: …(未被调用的辅助函数)…`;本仓库 **21 个包**逐包 live 计数与改前**完全一致**(误报 0) |
+
+#### 门禁第 6 步:三类"死断言"(#320)与新增的 3 条自检
+
+**判据**(四类不可达,后两类之外的两类是本轮新增):**恒假分支**(既有)/
+**零次循环**(新)/ **无匹配分支**(新)/ **未被调用的辅助函数**(新)。
+报告里会写明**被哪条规则抓到**(原因列),自检据此断言**具体原因** ——
+证明是被**对应那条**规则抓到的,而不是被别的规则碰巧抓到。
+
+| # | 自检场景 | 方向 | 防的是哪个绕过 |
+| --- | --- | --- | --- |
+| 30 | 断言写在**永不执行**的 `for` 循环里(`for i := 0; i < 0; i++`)必须被抓 | 红 | 终审 P1-2 的 **B1**:把断言写进一个一次都不执行的循环 |
+| 31 | 断言写在**不匹配**的 `switch` 分支里(`switch 1 { case 2: … }`)必须被抓 | 红 | 终审 P1-2 的 **B2**:把断言写进一个永不匹配的 case |
+| 32 | 断言写在**从未被调用**的辅助函数里必须被抓;**同一条**自检同时断言"辅助函数**被调用**时不得被误报"(绿方向) | 红 + 绿 | 终审 P1-2 的 **B3**:把断言写进一个没人调用的辅助函数;绿方向防止新判据把正常代码全挡在门外 |
+
+**跨文件口径**(误报风险最高的一处):"未被调用"按**名字在本包内出现过**判定,
+且**按包收集**(包内**所有** `_test.go` 文件)—— 否则"定义在 `helpers_test.go`、
+调用在别的测试文件里"的辅助函数会被误判成"从未被调用" → **门禁误红**。
+
+**误报 0 的证据**:新扫描器与旧扫描器在本仓库 **21 个包 / 163 个测试文件**上
+**逐包 live 计数完全一致**(0 处差异);真实仓库 `./scripts/verify.sh` **9/9
+全绿**(第 6 步输出 `OK(21 个包均有真实执行并通过的用例,且测试代码里都有断言)`)。
+
+**耗时对比**:扫描器自身(163 个测试文件)改前 **52ms/次** → 改后 **54ms/次**
+(+2ms);门禁共调用 2 次(门禁 + 自检)→ **+4ms**;门禁总耗时 **123s**,
+**+0.003%**(AST 分析的增量落在噪声里)。
 
 ### 轮次 84:第二十轮(迭代 21 收口)—— mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决
 
@@ -2457,6 +2609,9 @@ await new Promise((r) => setTimeout(r, 0));   // ×2
 | --- | --- | --- | --- |
 | 85 | **第二十一轮(迭代 22 收口)**:跨文件动作落地(8 项)/ 守卫能力边界登记 | ✅ 已落地(工作区,待提交) | **#297-#304 共 8 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 85):**#297**(P1)`contextx` 自带 mode → 槽位映射表(与 `workflow/model.ModeSpec` 各演各的 → model 认了而 contextx 没认的 mode **产物静默丢弃**)→ 分派改由 `model.ModeSpecFor(mode).ContextSlot` 决定,`skill` 伪 mode 单列,`submit` 什么都不写,**新增 fail-closed 默认分支**(槽位不认识 → 显式报错,不再静默丢弃);**#298**(P1)mode 取值域没有对外出口(前端硬编码一份 → 后端加了 mode 用户选不到)→ `GET /api/modes` + `WorkflowService.Modes()` + 前端 `modes()` 双分支 + Designer 下拉改后端派生(加载中用 `FALLBACK_MODES` 兜底,控件不留空)+ **跨语言守卫**(前端兜底清单必须与 `model.AllModes()` 逐项一致);**#299**(P2)版本页显示的是重新编码的 YAML(整数 `3` → `3.0`,**内容差异不是排版差异**)→ 改读 `Repo.GetWorkflowVersionDSL` 原文,老库 `dsl_text` 为空 → 回退重编码;**#300**(P3)`template` 的 6 个零引用死常量(看着像清单 → 诱导后来者多抄一份)→ 删除 + 源码级守卫;**#301**(P2)备份 `version` **只写不读**(任何 JSON 都被当备份,"恢复成功"却什么也没恢复)→ 缺失/不识别 → `BAD_REQUEST`;备份**缺 `skill_configs`**(禁用的技能换机器后又可用)→ 导出补齐 + 恢复写回(按本机已有 Skill 过滤)+ 前端文案;**#302**(P3)前端 `types.ts` 的 `"PAUSED"` → 删;**#303**(P3)Wails 绑定过期 → 重新生成(先隔离副本实测:结构性差异只有 `cancelled: number` 一行);**#304**(P3)`api.ts` 的 `stats()` 类型缺 `cancelled` → 补。**另登记有意边界 #305**:运行期状态脱敏守卫的常量表只收**字符串字面量**常量 → 把 `contextx.StateKey*` 改成 `model.ContextSlot*` 的**别名会打掉那道守卫**(实测 8 条"无法解析" + 6 条"登记与实现漂移")→ 改用"字面量 + 两道跨包守卫"达成同一目的。**红→绿证据**:① contextx 源码扫描 6 条 mode 字面量 → 0 ② `/api/modes` 404 → 200 且逐项一致 ③ `VersionDSL` 返回 `max_iter: 3.0` → `3` ④ template 6 个常量 → 0 ⑤ 缺 `version` 的备份**不报错** → `BAD_REQUEST` ⑥ 导出无 `skill_configs` → 有且恢复后禁用状态还原。新增测试文件 **5 个 Go**(`contextx/mode_source_test.go` 5 / `app/application/version_dsl_test.go` 3 / `app/application/backup_skill_test.go` 7 / `api/modes_test.go` 3 / `template/dead_const_test.go` 1)+ 改 2 个既有前端文件(`api.test.ts` +2 / `Settings.test.tsx` +3)+ 新增前端测试文件 1 个(`designer.modes.test.tsx` 8);Go 测试文件 150 → **155**、顶层 `func Test*` 814 → **833**;前端 22 → **23** 文件 / 272 → **285** 用例;门禁 9 步通过(实测 **113s**) |
 | 86 | **第二十二轮(迭代 25 收口)**:数值有限性三层防线 / 门禁断言强度 / 跨包常量别名 / 前端请求竞态 / timeout 上界 | ✅ 已落地(工作区,待提交) | **#306-#311 共 6 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 86):**#306**(P1)持久层把 `json.Marshal` 的错误吞掉 → 列被写成**空串**(一个 `.nan` **连坐清空整张 map** + 版本快照变空)→ 新增 `persistence.marshalJSON`(唯一出口),7 处调用点全部**失败即报错**;**读出口不放宽**(老库的空串 `variables_json` 读成空 map);事件列走**可见降级**(占位载荷 + WARN,理由见 #313);**#307**(P1)校验期不查"数值必须有限" → 含 `.nan` 的工作流能存能跑,**条件恒假**、静默走错分支 → 新增 `validator.findNonFinite`(变量表 / 节点配置 / permissions 段递归查)→ 导入返回 **400** + 明确文案,工作流根本没被创建;**#308**(P2)门禁第 6 步的断言判据只看**存在性** → `if 1 != 1 { t.Fatal }` 恒不触发却能骗过整条门禁 → 判据升级为"**可能触发**"(go/ast 静态分析恒假分支;注释天然不算断言),自检 27 → **29** 条,真实仓库**误报 0**(3098 条断言全部可触发);**#309**(P2)状态脱敏守卫的常量解析不支持跨包别名(轮次 85 的 #305)→ 新增 `constAliases` + `resolveAliases`(一层跨包别名,别名链迭代到不动点),扫描范围加 `workflow/model`;**别名漂移仍能被发现**;**#310**(P2)前端请求竞态(旧前缀 / 旧执行的迟到响应覆盖新结果)→ 新增 `frontend/src/lib/request-guard.ts`,`EventsAudit`(输入不再每次按键发请求)+ `ExecutionMonitor`(守卫 + 切换时先清空上一条执行)接入;**#311**(P2)`timeout_seconds` 无上界 → `time.Duration` 溢出(立即超时 / 静默改用适配器默认 600s)→ 范围常量收敛到 `workflow/compiler`(`TimeoutSecondsMin/Max` = 0..86400,约定 13),校验期加上下界(**下界取 0** = 不设节点超时,与运行期口径一致)。另登记 3 条开放项:**#312**(运行期钳制 `timeout_seconds`,`executor.go` 不归本轮所有)、**#313**(`SaveEvent` 改回"失败即报错" + `api/sse_marshal_test.go` 的粗判据精化,`api/**` 不归本轮所有)、**#314**(导入期有限性预检,`workflow/dsl` 不归本轮所有,校验期已拦住故可省)。**红→绿证据**:① `variables_json="" len=0` → `SaveWorkflow` 报错且一行不落 ② 导入 200 → **400 + 明确文案** ③ 恒不触发的断言 → 门禁**红** ④ 别名化后 8+6 条报错 → 守卫**全绿** ⑤ 迟到响应覆盖 → 被丢弃 ⑥ `timeout_seconds: 10000000000` 校验通过 → 校验失败。新增测试文件 **3 个 Go**(`persistence/finite_json_test.go` 7 / `workflow/validator/finite_test.go` 6 / `workflow/validator/timeout_seconds_test.go` 4)+ 改 1 个既有 Go 文件(`workflow/runtime/state_mask_test.go` +2)+ 新增前端测试文件 **1 个**(`frontend/src/lib/request-guard.test.ts` 4)+ 改 2 个既有前端文件(`EventsAudit.test.tsx` +2 / `ExecutionMonitor.test.tsx` +2);Go 顶层 `func Test*` 833 → **853**;前端 23 → **24** 文件 / 285 → **293** 用例;门禁 9 步通过 |
+| 87 | **第二十四轮(迭代 28 收口)**:submit 产物进上下文链 / SSE 用例改确定性同步点 / 权限死入口清理 / 文档口径校正 | ✅ 已落地(工作区,待提交) | **#321-#329 共 9 条**(**#321**/**#322**/**#323** 落地,#317 关闭;#324-#329 为文档口径项,其中 #325 登记为开放项 —— 逐条见 `docs/OPTIMIZATION.md` 轮次 87):**#321**(P2)`submit` 模式产物**静默丢弃**,`last_output` 留**陈旧值** → 下游 `{{last_output}}` 拿到上一个节点的旧值且**无任何告警**("空槽位告警"只报空、不报陈旧)→ `model.ModeSpec` 给 `ModeSubmit` 设 `ContextSlot: last_output`,并把 mode → 槽位改成**全覆盖**(每个合法 mode 都必须有非空槽位 —— 结构性修法,"陈旧"从此不可达);**#322**(P2)SSE 慢客户端用例的 **5s 硬阈值** → 并行负载下误红 → 判据改成**确定性同步点**(等"Emit 已返回"的信号,不比秒数;超时只作死锁兜底),并新增一条用 `blockedWriter` 把"客户端卡住"变成确定事实的用例(两个同步点 + 断言队列丢弃分支被走到);**#323**(P3)`permission.Manager.Apply`(静默版)零调用点 → **删除**,并用反射断言锁住"不得再有静默入口";**#324**(P3)门禁第 7 步依赖**仓库根** `node_modules/.bin/eslint` → `docs/TESTING.md` 记录前置条件(`AGENTS.md` 不归本代理,措辞建议见交付报告);**#325**(P3)门禁自检计数是"人肉同步的常量" → **登记为开放项**(`scripts/**` 不归本代理,建议改法:自检注册表);**#326**(P3)`#297` 的"fail-closed 默认分支"表述与实现不符 → 写清 `contextx/context.go:261`(未知 mode → 静默不写)与 `:295`(未知**槽位** → 显式报错)是两类输入;**#327**(P3)`#290` 的断言判据描述已过时 → 改成 **go/ast 静态分析 + `isTestReceiver` 门控**(不再"任何 `X.Error(` 都算断言");**#328**(P3)第十四节口径过期(自称已按 `3e4a5b3` 逐条复核,实际其后还有 5 个 commit)→ 写明基线;**#329**(P3)顶层 `func Test*` 文档写 851 ≠ 实测 → 更新并写明统计口径与基线。**红→绿证据**:① 下游提示词 `"上次输出:执行完成-OLD"` → `"上次输出:提交摘要-NEW"` ② overlay 造坏(同步写客户端)→ `Emit 被慢客户端阻塞(触发事件的那次 Emit 没有返回)` ③ overlay 造坏(加回 `Apply`)→ `Manager 不得再有静默入口 Apply`。新增测试文件 **3 个 Go**(`workflow/runtime/submit_slot_test.go` 2 / `workflow/model/mode_slot_test.go` 3 / `permission/dead_entry_test.go` 1)+ 改 2 个既有 Go 文件(`api/sse_test.go` / `workflow/runtime/node_config_test.go`);Go 顶层 `func Test*` 853 → **869**(含第二轮在途改动带来的用例);门禁 9 步通过 |
+| 87(续) | **第二十七轮(迭代 27 收口)**:凭据形态的"键值粘连"泄漏 / 门禁死断言的三类新形态 | ✅ 已落地(工作区,待提交) | **#318-#320 共 3 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 87 小节的前三行):**#318**(P1)凭据在"**键值粘连**"形态下(`AK=AKIA…` / `+AKIA…`)从**六个出口**明文泄漏 —— 根因是凭据 token 化把 `=` / `+` 并进同一个 token,导致 AWS 密钥 ID 的 `^…$` 规则、已知前缀的 `HasPrefix`、高熵兜底**四路全不命中** → token 化改为**按片段判定**(摘掉行首 diff 前缀 / 按首个 `=` 切开且**只有右侧非空才切** —— base64 的填充在末尾 → **不截断 base64**),片段判不出时退回整段判定(既有行为逐字节不变);**#319**(P1)同源补漏:预筛提示词漏了 `aida` / `aroa` / `anpa` / `acca` 四个 AWS 前缀(连预筛都过不去)+ `Basic <base64>` 短一档(`dXNlcjpwYXNz`)漏判 → 预筛与 `awsAccessKeyPattern` 前缀集**对齐**,`basicAuthToken` 增加"**能解出含 ':' 的字节**"这第四档(英文短语解不出 ':' → 不误伤);**#320**(P1)门禁第 6 步的断言扫描可被**三种手法**骗过(实测 9/9 全绿放行)→ 增加三类死断言判定(**零次循环** / **无匹配分支** / **未被调用的辅助函数**),报告里写明被哪条规则抓到;**跨文件口径**:调用点按**包**收集(包内所有 `_test.go` 文件)→ 跨文件调用的辅助函数不会误判;**自检 29 → 32 条**(B1/B2/B3 三条红场景,B3 同时断言绿方向)。**红→绿证据**:① `Mask 出口仍含凭据明文: "AK=AKIAIOSFODNN7EXAMPLE"` → `AK=***` ② 隔离副本第 6 步`OK(25 个包均有真实执行并通过的用例…)` → `❌ VERIFY FAIL: …(零次循环)/(无匹配分支)/(未被调用的辅助函数)`。新增顶层 `func Test*` **+5 例**(顶层 864 → **869**;测试文件 163 **不变** —— 只改既有的 `logx/credential_test.go`);前端未改动;**误报 0**:新扫描器与旧扫描器在 21 个包 / 163 个测试文件上逐包 live 计数**完全一致**;门禁 **9/9 通过**(123s,+0.003% 耗时) |
+| 86(续) | **第二十三轮(迭代 26 收口)**:运行期 timeout 钳制 / SaveEvent 收口 / 导入期预检判定 | ✅ 已落地(工作区,待提交) | **#312-#314 共 3 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 86 续):**#312**(P1)运行期不钳制 `timeout_seconds` → **存量**工作流里的超大值照样溢出(`time.Duration` 溢出成负 deadline → **立即超时**;`1e20` → `int` 溢出成负 → **静默改用适配器默认 600s**)→ 运行期按 `workflow/compiler` 的 0..86400 钳制(超上界钳上界 / 负值归 0 / **先按浮点取值再钳制**),**保持 `cfg*(node, "字面量")` 形态**(契约探针仍然有牙齿:隔离副本造坏 → 探针立刻报"运行期没有读取它");**#313**(P2)`SaveEvent` 走"可见降级"(占位载荷)而不是"失败即返回错误" → 改回失败即报错,**递归风险已核实**(`persistFailGuard` 最多一级嵌套、不级联;`runtime.error` 载荷可 JSON 化 → 链路自然终止;嵌套 Emit 不死锁:`Bus.Emit` 先释放锁再分发);**#314**(P3)导入期有限性预检 —— **判定:不必做**(导入路径确实走校验器:`import → ImportYAML → saveModel → validateWorkflow → validator`),改为把该事实**锁成测试**(导入含 `.nan` → 400 + "有限数值" + 工作流根本没被创建)。另登记 3 条:**#315**(P2)SSE 的"失败事件"契约断言过粗 —— 拿"执行 ID 不得出现在流里"当判据,反而把正确的修法挡住 → 改成**顶层 `type`** 判据 + 新增 `runtime.error` **正向**断言;**#316**(P3)事件落库失败缺"载荷级"故障的回归锁 → 新增用例(只有一条 `runtime.error`、审计流里只有失败信号);**#317**(P3)`cfgInt`/`toInt` 失去生产调用方 —— 清理项,**仍开放**。**红→绿证据**:① `timeout = 10000000000 / -9223372036854775808 / -1 / 30`(小数秒)→ 全部落到 86400 / 0 / 0 / 0;script 节点 `FAILED(context deadline exceeded);耗时 547.637µs` → **SUCCESS** ② `SaveEvent 不得失败` → **返回错误且一行都不落库**;SSE 流里出现 `runtime.error`、**没有** `node.started` ③ 导入含 `.nan` → **400 + 明确文案**。新增测试文件 **2 个 Go**(`workflow/runtime/timeout_seconds_test.go` 2 / `workflow/runtime/event_persist_payload_test.go` 1)+ 改 3 个既有 Go 文件(`persistence/finite_json_test.go` / `api/sse_marshal_test.go` / `api/server_test.go` +1 例);Go 测试文件 158 → **160**、顶层 `func Test*` 854 → **857**;前端**未改动**(24 文件 / 293 用例不变);门禁 9 步通过 |
 | 84 | **第二十轮(迭代 21 收口)**:mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决 | ✅ 已落地(工作区,待提交) | **#291-#296 共 6 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 84):**#291**(P1)`mode` 取值域有**三份**清单(校验期只查必填不查取值 / 运行期不校验 / `ModeRequiresWrite` 对未知 mode 返回 false → **写权限检查被跳过**)→ 取值域收敛到 `workflow/model`(`AllModes`/`ModeSpecFor`/`IsValidMode`),校验期报 `INVALID_NODE`、运行期 fail closed(排在写权限检查**之后**,两道门都不绕),`ModeRequiresWrite(未知)=true`(fail closed,**有意**改掉旧断言);**#292** `compiler.KeyTask` 与 `contextx.StateKeyTask` 两份字面量 → compiler 消费 contextx 的定义 + 守卫测试;**#293** 统计把 FAILED 与 CANCELLED 混在一列 → 分列 + 成功率分母排除 CANCELLED + "各列之和 == 总数";**#294** 取消 WAITING_USER 后节点永远停在"等待中" → 非终态节点落 SKIPPED + `execution_nodes` 同步;**#295** `PAUSED` **从来不可达** → 状态机/运行期/持久层/前端徽章/事件常量整条移除,老库的遗留行**读出口归一为 CANCELLED**(不写库改数据);**#296** 8 个"只写不读"的列 → 逐列裁决(5 删 + 2 加读点 + 1 本就有读点),老库兼容靠**按表实际拥有的列拼 INSERT**(`persistence.configUpsert`,老库的 NOT NULL 无默认值列照常补齐)。**红→绿证据**:隔离副本实测旧代码下 ① 非法 mode `valid=true` ② 未知 mode 的写权限检查被跳过(节点跑成 SUCCESS)③ `ModeRequiresWrite("unknown")=false` ④ `failed` 列把 CANCELLED 也算进去 ⑤ 取消后节点停在 WAITING ⑥ 遗留 PAUSED 行原样读出 ⑦ 新库仍建着 5 个死列 ⑧ Dashboard 成功率 60%(应为 75%)。新增测试文件 **9 个 Go**(`workflow/validator/mode_domain_test.go` 3 / `workflow/runtime/mode_domain_test.go` 3 / `workflow/runtime/mode_contract_test.go` 3 / `workflow/runtime/cancel_skip_test.go` 2 / `workflow/model/execution_state_test.go` 1 / `workflow/compiler/taskkey_contract_test.go` 2 / `persistence/stats_test.go` 2 / `persistence/legacy_state_test.go` 3 / `persistence/dead_columns_test.go` 5)+ 改 4 个既有文件(`agent/mode_test.go` / `workflow/model/model_test.go` / `persistence/exec_state_guard_test.go` / `persistence/repo_cas_test.go`);前端 `Dashboard.test.tsx` +3 例 / `state-badge.test.tsx` +1 例;Go 测试文件 141 → **150**、顶层 `func Test*` 790 → **814**;前端 22 文件 / 268 → **272** 用例;门禁 9 步通过(实测 **112s**) |
 | 83 | **第十九轮(迭代 20 收口)**:空上下文可见 / 门禁第 6 步的断言维度 | ✅ 已落地(工作区,待提交) | **#280 关闭**:"上游什么都没产出"曾是**静默空上下文**(`contextx.Build` 总是把链键写进数据表 → 模板引擎按"键存在 = 可解析"判缺失 → `{{plan}}` 永远不被报成缺失 → 下游拿到空串、节点照常 SUCCESS、**零告警**)→ 改**上下文层报"空槽位"**(`contextx.BuildWithSlots` 产出"键存在但值为空"的链槽位清单;运行期把**被提示词引用到的**空槽位报成 `node.warning` / `reason="empty_context_slots"`),**可见但不阻断**;`template` 包的"键存在 = 可解析"口径**不动**(渲染层口径 ≠ 上下文层事实)。**#289 关闭**:门禁第 6 步只看"**有代码跑过**"→ 一个**零断言**的用例(`{ _ = 1 }`)真的执行、真的 pass → **9 步门禁全绿**(隔离副本实测 exit 0)→ 第 6 步加**第二个判据**:包里必须**真的有断言**(静态扫描;实测 `go vet -tests` **检测不出**零断言测试,断言数不在框架事件里);扫描**只限 `*_test.go`**且**先剥注释**(注释里的 `t.Errorf` 不是断言 —— 实测不剥注释会让只提注释的零断言包溜过去);自检 +4 条(23 → **27**)。**#290 新登记**:断言判据"按包 + 文本级"的粒度与实现 —— **有意边界,不修**(细到"每个用例"必然误报)。新增顶层用例 **+7 例**(`contextx/context_test.go` 4 / `workflow/runtime/context_chain_test.go` 3),**未新增测试文件**(141 → **141**),顶层 `func Test*` 782 → **789**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **113s**),新判据在真实仓库上**误报 0** |
 | 82 | **第十八轮(迭代 20)**:设置读失败可观测 / 内置 Agent 注册失败上抛 / Set 白名单化 | ✅ 已进主干(`3e4a5b3`) | #281-#283 共 **3 条**,**全部关闭**:**#281** `Settings.Info()` 吞掉 `git_working_dir` 的**读错误** → 静默回落到内存态目录,界面显示的不是库里那个,**用户一保存就把损坏行覆盖成内存值**(损坏事实消失)→ 改**三态分开**(读到 / `NOT_FOUND` 正常初始态 / 其它读失败)+ 记 ERROR + 响应新增 `git_working_dir_read_failed` 标记(`omitempty`,正常响应形状不变);启动路径同样留痕;**#282** `reloadAgents` 里 4 处 `_ = a.Agents.Register(...)` → 内置 Agent 注册失败**一行日志都没有**(此前不可达,但"不可达"不等于"永远不可达")→ 改 **ERROR 日志 + 上抛**(`NewApp` 启动即失败,零误伤风险);**#283** `SettingsService.Set(key, value)` **任意键写入**经 Wails IPC 暴露(`main.go:310` 的 `wails.NewService(app.Settings)` + 生成绑定 `settingsservice.ts:48`)→ 可绕过 `permMu` 写 `agent_policies`(并发保护失效)、绕过 `git_working_dir` 存在性与 `log_level` 校验 → 改**白名单三键** + **复用 `Update` 的同一套校验** + **值类型校验**(此前 `value any` 可把字符串 `"true"` 写进 `allow_script_nodes`),`agent_policies` **刻意排除**;`Update` 自己也改为复用 `Set`(设置写入的**唯一实现**)。新增测试文件 **3 个 Go**(`app/application/settings_read_failure_test.go` 6 例 / `app/application/agent_registration_test.go` 2 例 / `app/application/settings_set_whitelist_test.go` 8 例);新增专节"轮次 82"一节;Go 测试文件 138 → **141**,顶层 `func Test*` 766 → **782**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **118s**) |

@@ -663,6 +663,44 @@ func TestContract_WorkflowImport(t *testing.T) {
 	}
 }
 
+// TestContract_ImportRejectsNonFiniteVariables 导入含 `.nan` 的 DSL 必须
+// **失败**(400 WORKFLOW_INVALID),且工作流**根本没被创建**。
+//
+// 这条锁住的是"**导入路径走校验器**"这一事实(#314 的判断依据):
+// api 的 import 端点 → 应用层 ImportYAML → saveModel → validateWorkflow →
+// Engine.Validate → validator.Validate → findNonFinite。校验期已经拦住
+// 非有限值,所以**不必**在 DSL 解析期再加一层预检 —— 那只是"更早一点失败",
+// 不是"修好了什么";而 dsl 包是所有路径的入口,多一处判断就多一处可能误伤。
+//
+// 反面(没有校验期这一层时):导入返回 200,但 variables_json 整列被写成空串
+// → 一个坏值**连坐清空**整张变量表 → 条件变量恒假 → 静默走错分支,
+// 执行仍 COMPLETED(约定 14)。
+func TestContract_ImportRejectsNonFiniteVariables(t *testing.T) {
+	s := newTestServer(t)
+	yaml := "version: \"1\"\nworkflow:\n  id: wf-nan-import\n  name: 含 NaN 的导入\nvariables:\n  env: .nan\n  limit: 10\nnodes:\n  - id: a\n    type: agent\n    agent: mock-claude\n    mode: plan\nedges: []\n"
+	w := doServe(t, s, http.MethodPost, "/api/workflows/import", yaml,
+		map[string]string{"Content-Type": "application/yaml"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("导入含 .nan 的 DSL → %d,want 400(%s)", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if body["code"] != "WORKFLOW_INVALID" {
+		t.Errorf("错误码 = %v,want WORKFLOW_INVALID", body["code"])
+	}
+	// 用户必须看得到**为什么**(而不是一句"导入失败")。
+	if !strings.Contains(w.Body.String(), "有限数值") {
+		t.Errorf("错误响应必须指出是非有限值,实际: %s", w.Body.String())
+	}
+	// 工作流根本没被创建(不得留下"导入成功但变量全没了"的记录)。
+	code, _, raw := doReq(t, s, http.MethodGet, "/api/workflows/wf-nan-import", "")
+	if code != http.StatusNotFound {
+		t.Errorf("导入被拒后工作流不得存在 → %d,want 404(%s)", code, raw)
+	}
+}
+
 // TestContract_WorkflowValidate:合法 → 200 valid:true;非法 → 200
 // valid:false + 结构化 errors(不是 4xx);请求体本身畸形才是 400。
 func TestContract_WorkflowValidate(t *testing.T) {

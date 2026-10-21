@@ -28,17 +28,22 @@ func (f *fakeState) Delete(k string) error {
 	return nil
 }
 
-// TestCfgIntAcceptsAllIntShapes 锁住 P2-7:整数配置读取要认全所有形态。
+// TestCfgFloatAcceptsAllNumericShapes 锁住 P2-7:数值配置读取要认全所有形态。
 //
 // 数值类型随来源而变:YAML 整数是 int/uint64、JSON 整数是 float64、
 // 经 SQLite state_json 往返后是 float64(约定 #2)。此前只认 float64 与
 // int,YAML 来的 uint64 会被当成 0 —— 节点级 timeout_seconds /
 // retry.max_attempts 静默失效(不报错,只是不生效)。
-func TestCfgIntAcceptsAllIntShapes(t *testing.T) {
+//
+// 迭代 28(#317):本用例原先锁的是 `cfgInt`,而 `cfgInt` / `toInt` 在
+// timeout_seconds 改走 `cfgFloat` + 钳制之后**已无生产调用方**,被删除。
+// 断言强度**不变**(仍是"认全所有数值形态",字符串 "30" → 0),只是把
+// 被测对象换成现在真正在用的那个助手。
+func TestCfgFloatAcceptsAllNumericShapes(t *testing.T) {
 	cases := []struct {
 		name string
 		val  any
-		want int
+		want float64
 	}{
 		{"YAML 整数(uint64)", uint64(30), 30},
 		{"int", 30, 30},
@@ -50,8 +55,8 @@ func TestCfgIntAcceptsAllIntShapes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			node := &model.Node{ID: "n1", Config: map[string]any{"timeout_seconds": tc.val}}
-			if got := cfgInt(node, "timeout_seconds"); got != tc.want {
-				t.Errorf("cfgInt = %d,want %d(值类型 %T)", got, tc.want, tc.val)
+			if got := cfgFloat(node, "timeout_seconds"); got != tc.want {
+				t.Errorf("cfgFloat = %v,want %v(值类型 %T)", got, tc.want, tc.val)
 			}
 		})
 	}

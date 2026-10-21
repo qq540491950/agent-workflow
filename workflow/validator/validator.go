@@ -494,7 +494,7 @@ func validateRetrySubKeys(n model.Node, spec compiler.NodeConfigSpec,
 
 // validateTimeoutSeconds 校验 timeout_seconds 的取值范围(约定 13)。
 //
-// 运行期口径(workflow/runtime/executor.go 的 cfgInt + `req.Timeout > 0`):
+// 运行期口径(workflow/runtime/executor.go 的 cfgFloat + `req.Timeout > 0`):
 //
 //   - 值必须是**整数秒**:运行期按秒换算成 time.Duration,小数会被截断
 //     (静默改写用户配置);

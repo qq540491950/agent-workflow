@@ -20,13 +20,13 @@ import (
 // **静默丢弃**、回落到默认四项(approve/reject/continue/instruction),
 // 全程无报错(约定 14 同族:该用却没用 = 静默降级)。
 //
-// 与 cfgInt 同一族(数值要认全所有形态):配置值的类型随来源而变 ——
+// 与 cfgFloat 同一族(数值要认全所有形态):配置值的类型随来源而变 ——
 // YAML/JSON 解析出 []any,程序化构造(导入器/嵌入方/测试)是 []string。
 //
 // 现状说明(实测):引擎跑的是 exec.Snapshot(JSON 往返后的副本),
 // 所以经 Engine.Start 的路径上 responses 总是 []any —— 断言单态
 // 在**引擎路径上不可达**。但 runHumanNode 是导出的执行单元,配置读取
-// 口径应当与 cfgInt 一致(认全所有形态),否则换一个调用方就静默降级。
+// 口径应当与 cfgFloat 一致(认全所有形态),否则换一个调用方就静默降级。
 func TestHumanNodeResponsesAcceptsBothSliceShapes(t *testing.T) {
 	eng := newMinimalEngine(t)
 	env := &compiler.RunEnv{

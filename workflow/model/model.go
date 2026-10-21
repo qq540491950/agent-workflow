@@ -54,7 +54,8 @@ func AllNodeTypes() []NodeType {
 //   - 前端 Designer 的下拉:plan|execute|review|fix|test|submit —— 用户能选的。
 //
 // 三份清单的成员不一样,于是同一个 mode 在不同层的含义不同:
-//   - `mode: submit` 在上下文层没有槽位(产出不进上下文链);
+//   - 此前 `mode: submit` 在上下文层没有槽位(产出不进上下文链)——
+//     已于迭代 28 收口:submit 的产出现在写进 last_output;
 //   - `mode: skill` 是**节点类型**不是 agent 的 mode,却出现在上下文层;
 //   - 任何**拼错**的 mode(exectue / banana)在校验期与运行期都被放行,
 //     且因为"不在只读清单里"而被跳过写权限检查 —— 用户写错一个词,
@@ -81,6 +82,10 @@ const (
 	// ModeTest 只跑测试。
 	ModeTest = "test"
 	// ModeSubmit 提交代码(git commit,伴随写文件)。
+	//
+	// 产物(提交摘要 / commit message)进 last_output 槽位:提交也是
+	// "一次节点产出",下游引用 {{last_output}} 时应当拿到**它**,而不是
+	// 上一个 execute / fix 节点的旧产物(迭代 28 的 P2-1)。
 	ModeSubmit = "submit"
 )
 
@@ -101,7 +106,8 @@ const (
 	ContextSlotIssues = "issues"
 	// ContextSlotTestResult 测试结果:test 节点产出。
 	ContextSlotTestResult = "test_result"
-	// ContextSlotLastOutput 最近一次节点输出:execute / fix / skill 节点产出。
+	// ContextSlotLastOutput 最近一次节点输出:execute / fix / skill /
+	// submit 节点产出(这几个 mode 的产物都归"最近一次输出"这个槽位)。
 	ContextSlotLastOutput = "last_output"
 	// ContextSlotGitDiff Git diff(git 节点产出)。
 	ContextSlotGitDiff = "git_diff"
@@ -121,8 +127,15 @@ type ModeSpec struct {
 	RequiresWrite bool
 	// ContextSlot 该 mode 的产出写进哪个上下文槽位。
 	//
-	// 空串 = 该 mode 的产出**不进**上下文链(当前只有 submit:上下文层
-	// 此前没有 submit 分支,提交节点的产出不会传给下游节点)。
+	// **每个合法 mode 都必须有一个非空槽位**(迭代 28 的 P2-1):
+	// 空串意味着"该 mode 的产出不进上下文链",于是槽位里留着**上一个
+	// 节点的旧值** —— 下游 {{last_output}} 拿到的是**陈旧上下文**,
+	// 而"空槽位告警"只报"空"、不报"陈旧" → 全程无告警(约定 14 同族:
+	// 用户以为拿到的是最新产出,实际是旧的)。
+	//
+	// 因此 mode → 槽位的映射是**全覆盖**的:mode 要么刷新自己的专属
+	// 槽位(plan/review/test),要么刷新 last_output(execute/fix/skill/
+	// submit —— 它们都是"最近一次节点输出"的候选)。
 	ContextSlot string
 }
 
@@ -136,7 +149,7 @@ var modeSpecs = []ModeSpec{
 	{Name: ModeReview, ContextSlot: ContextSlotReview},
 	{Name: ModeFix, RequiresWrite: true, ContextSlot: ContextSlotLastOutput},
 	{Name: ModeTest, ContextSlot: ContextSlotTestResult},
-	{Name: ModeSubmit, RequiresWrite: true, ContextSlot: ""},
+	{Name: ModeSubmit, RequiresWrite: true, ContextSlot: ContextSlotLastOutput},
 }
 
 // AllModes 返回全部合法 mode(副本,顺序与 modeSpecs 一致)。
@@ -471,7 +484,7 @@ func NormalizeStateJSON(data map[string]any) map[string]any {
 //   - uint64 :YAML inline map 里的整数(goccy/go-yaml 的默认行为)。
 //
 // 两者不统一就会出现"同一字段三种类型"(int / float64 / uint64):
-// 运行期的读取点(cfgInt / retryPolicyOf)只认 int 与 float64,
+// 运行期的读取点(cfgFloat / retryPolicyOf)只认 int 与 float64,
 // uint64 会被静默当成 0 —— 节点级 timeout_seconds / retry.max_attempts
 // 直接失效。
 //

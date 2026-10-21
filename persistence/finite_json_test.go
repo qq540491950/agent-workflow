@@ -176,25 +176,33 @@ func TestListWorkflowsTreatsEmptyVariablesJSONAsEmptyMap(t *testing.T) {
 	}
 }
 
-// TestSaveEventKeepsAuditRecordWhenPayloadUnserializable 事件载荷含 NaN 时,
-// 审计记录**不得**变成空载荷 —— 事件本身必须还在表里,且"载荷丢了"这件事
-// 在 data_json 里看得见(见 SaveEvent 的注释:失败会改变 SSE 契约,故走
-// 可见降级而不是"整条事件不落库")。
-func TestSaveEventKeepsAuditRecordWhenPayloadUnserializable(t *testing.T) {
+// TestSaveEventFailsOnUnserializablePayload 事件载荷含 NaN 时,SaveEvent
+// 必须**失败即返回错误** —— 与其它列同一口径(持久层唯一的出口是
+// marshalJSON:失败即报错,一行都不落库)。
+//
+// 为什么不是"写一条占位载荷"(第二十五轮曾改成那样):占位载荷会让**失败的
+// 事件**在审计流里长得像一条正常事件(只是载荷里多了个标记),而这条事件在
+// SSE/UI 上恰恰**发不出去**(json.Marshal 同样失败)→ 审计流里多一条"看起来
+// 正常"的记录,实际内容却丢了。失败即报错让运行期走它**既有的**反应链
+// (计数 + ERROR 日志 + 一条 runtime.error 事件),审计流里留下的是**显式的
+// 失败信号**,而不是一条被改了样的正常事件。
+//
+// (第二轮 P1-1 的三层防线:持久层失败即报错 / 校验期数值必须有限 /
+// 导入期预检。)
+func TestSaveEventFailsOnUnserializablePayload(t *testing.T) {
 	db := newTestDB(t)
 	ev := event.New(event.NodeStarted, "exec-nan", "n1", map[string]any{"ratio": math.NaN()})
-	if err := db.SaveEvent(ev); err != nil {
-		t.Fatalf("SaveEvent 不得失败(事件必须留在审计流里): %v", err)
+	err := db.SaveEvent(ev)
+	if err == nil {
+		t.Fatal("载荷含 NaN 时 SaveEvent 必须返回错误(不得写占位载荷冒充正常事件)")
 	}
-	var raw string
-	if err := db.SQL().QueryRow(`SELECT data_json FROM events WHERE execution_id=?`, "exec-nan").Scan(&raw); err != nil {
-		t.Fatalf("读事件: %v", err)
+	// 一行都不落库:不得留下空载荷或占位载荷的行。
+	var n int
+	if err := db.SQL().QueryRow(`SELECT COUNT(1) FROM events WHERE execution_id=?`, "exec-nan").Scan(&n); err != nil {
+		t.Fatalf("查行数: %v", err)
 	}
-	if raw == "" {
-		t.Fatal("事件载荷不得写成空串(与'载荷本来就是空的'无法区分)")
-	}
-	if !strings.Contains(raw, "__unserializable__") {
-		t.Errorf("占位载荷必须写明'原始载荷未保存',实际: %s", raw)
+	if n != 0 {
+		t.Errorf("落库失败后不得留下事件行,实际有 %d 行", n)
 	}
 }
 

@@ -268,7 +268,7 @@ func nodeEnabled(node *model.Node) (bool, error) {
 	}
 }
 
-// cfgStr / cfgInt 读取节点配置的辅助函数。
+// cfgStr / cfgFloat / cfgStringList 读取节点配置的辅助函数。
 func cfgStr(node *model.Node, key string) string {
 	if v, ok := node.Config[key]; ok {
 		if s, ok := v.(string); ok {
@@ -280,7 +280,7 @@ func cfgStr(node *model.Node, key string) string {
 
 // cfgStringList 读取字符串列表型节点配置。
 //
-// **必须认全所有切片形态**(与 cfgInt 同一族理由):配置值的类型随来源而变 ——
+// **必须认全所有切片形态**(与 cfgFloat 同一族理由):配置值的类型随来源而变 ——
 //
 //	YAML / JSON 解析 → []any
 //	程序化构造(导入器、嵌入方、测试) → []string
@@ -309,44 +309,98 @@ func cfgStringList(node *model.Node, key string) []string {
 	}
 }
 
-// cfgInt 读取整数型节点配置。
+// cfgFloat 读取浮点型节点配置(数值形态随来源而变:int/uint/float64/json.Number)。
 //
-// 数值类型随来源而变:YAML 整数是 int/uint64、JSON 整数是 float64、
-// 经 SQLite state_json 往返后是 float64(约定 #2)。只认其中一种会让
-// 另一个来源的取值静默变成 0(timeout_seconds 静默失效是最典型后果)。
-// 这里把常见整型一次认全。
-func cfgInt(node *model.Node, key string) int {
-	if v, ok := node.Config[key]; ok {
-		return toInt(v)
+// 只认**数值**形态:字符串 "30" 不是数值 —— 运行期不得把字符串悄悄转成
+// 秒数(那是"用户配的值没生效"的另一种形态)。
+//
+// 非数值 / 缺省 → 0(= 调用方按"没配"处理)。
+func cfgFloat(node *model.Node, key string) float64 {
+	v, ok := node.Config[key]
+	if !ok {
+		return 0
+	}
+	return toFloat(v)
+}
+
+// toFloat 把任意数值形态转成 float64;不是数值时返回 0。
+//
+// **为什么必须先走浮点**:整数化会**先溢出**—— int(1e20) 在 int64 上是
+// -9223372036854775808(未定义值的实现结果),等钳制逻辑看到它时已经是负数
+// 了。用户配的 1e20 秒会静默变成"负数"(进而"不设超时")。钳制必须发生在
+// 整数化**之前**。
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case int8:
+		return float64(n)
+	case int16:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case uint:
+		return float64(n)
+	case uint8:
+		return float64(n)
+	case uint16:
+		return float64(n)
+	case uint32:
+		return float64(n)
+	case uint64:
+		return float64(n)
+	case float32:
+		return float64(n)
+	case float64:
+		return n
+	case json.Number:
+		if f, err := n.Float64(); err == nil {
+			return f
+		}
 	}
 	return 0
 }
 
-// toInt 把任意数值形态转成 int;无法判定时返回 0。
-func toInt(v any) int {
-	switch n := v.(type) {
-	case int:
-		return n
-	case int32:
-		return int(n)
-	case int64:
-		return int(n)
-	case uint:
-		return int(n)
-	case uint32:
-		return int(n)
-	case uint64:
-		return int(n)
-	case float64:
-		return int(n)
-	case float32:
-		return int(n)
-	case json.Number:
-		if i, err := n.Int64(); err == nil {
-			return int(i)
-		}
+// timeoutSecondsOf 把 timeout_seconds 的原始取值**钳制**到合法范围(秒)。
+//
+// 取值范围只有一份来源:workflow/compiler 的 TimeoutSecondsMin/Max
+// (约定 13:校验期与运行期同源)。
+//
+// 钳制语义:
+//
+//   - 超上界 → 钳到上界(86400 = 24h)。不钳的话 time.Duration(raw)*time.Second
+//     会溢出成负数 → context.WithTimeout 拿到负 deadline → 节点**立即超时**
+//     (用户配的 24 小时变成 0 秒)。这不是 fail closed:超大值原本就表现为
+//     "立即超时",钳到 24h 是**修复**而不是失败;
+//   - 负值 → 归 0(0 = 不设节点超时,与运行期 `req.Timeout > 0` 的口径一致);
+//   - 非数值 / 非整数 → 归 0(校验期已拦,运行期兜底:不得静默改用别的值)。
+//
+// 存量工作流里早就写着超大值(上界存在之前存进去的),校验期只拦**新写/新改**
+// 的工作流 —— 运行期这道钳制是它们唯一的防线。
+//
+// raw 由调用点用 `cfgFloat(node, "timeout_seconds")` 读出:**字面量**是契约
+// 要求 —— workflow/compiler/nodeconfig_contract_test.go 的 AST 探针只认
+// `cfg*(node, "字面量")` 形态,键名一旦变成变量/常量,探针就判"运行期不再
+// 读这个键",契约表与运行期就此漂移(约定 13)。
+func timeoutSecondsOf(raw any) int {
+	f := toFloat(raw)
+	if math.IsNaN(f) {
+		return 0
 	}
-	return 0
+	if f < float64(compiler.TimeoutSecondsMin) {
+		return compiler.TimeoutSecondsMin
+	}
+	if f > float64(compiler.TimeoutSecondsMax) {
+		return compiler.TimeoutSecondsMax
+	}
+	if f != math.Trunc(f) {
+		// 小数秒:校验期判非法(INVALID_NODE),运行期归 0 —— 不静默截断改写
+		// 用户配置(截断会把"配的 30.5 秒"变成"配的 30 秒")。
+		return 0
+	}
+	return int(f)
 }
 
 // runAgentNode 执行 Agent 节点:
@@ -481,7 +535,7 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		Instructions: instructions,
 		WorkingDir:   cfgStr(node, "working_dir"),
 		Environment:  nil,
-		Timeout:      cfgInt(node, "timeout_seconds"),
+		Timeout:      timeoutSecondsOf(cfgFloat(node, "timeout_seconds")),
 		// 有状态适配器(mock)据此按执行隔离计数,避免同一工作流
 		// 并发运行时决策序列互相错位。
 		ExecutionID: env.Exec.ID,
@@ -1068,7 +1122,7 @@ func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.N
 	// 超时与工作目录读节点配置(此前硬编码 120s、且始终用全局 Git 目录,
 	// 节点上写的 timeout_seconds / working_dir 都不生效)
 	timeout := defaultScriptTimeoutSeconds
-	if s := cfgInt(node, "timeout_seconds"); s > 0 {
+	if s := timeoutSecondsOf(cfgFloat(node, "timeout_seconds")); s > 0 {
 		timeout = s
 	}
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)

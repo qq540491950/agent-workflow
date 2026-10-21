@@ -593,7 +593,7 @@ echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推�
 # 计数变量的赋值发生在**函数体内**(不是子 shell),因此计数能真正累加。
 selfcheck_count=0
 # 期望的自检场景条数。**新增或删除任何一条自检场景,都必须同步改这里** ——
-# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 29 条:
+# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 32 条:
 #   1-3  交叉检查:windows 测试文件对照 / 测试文件类型错 / 源文件类型错
 #   4-9  孤儿包检查:windows·freebsd·js 各一条绿 + 一条红
 #   10   孤儿包检查:目录混包(两个 package 名)必须被抓
@@ -610,7 +610,9 @@ selfcheck_count=0
 #          Wails 平台脚手架(build/ios)必须继续被排除
 #   28-29 孤儿包候选:build/ 下的包必须在候选里 / testdata/ 下的包必须不在
 #          候选里(Go 工具链约定 —— 夹具目录不可见是正确行为)
-SELFCHECK_EXPECTED=29
+#   30-32 迭代 27(终审 P1-2)的三类"死断言"绕过:零次循环 / 无匹配分支 /
+#          未被调用的辅助函数(最后一条同时断言绿方向)
+SELFCHECK_EXPECTED=32
 
 # selfcheck_ok <标签> <命令...> —— 断言命令必须**成功**(绿方向)。
 selfcheck_ok() {
@@ -1095,12 +1097,30 @@ MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
 # 实现:用 go/ast 做静态分析(见下面的 assertscan)。**注释天然不算断言**
 # (AST 里没有注释节点)—— 此前靠 strip_go_comments 去注释,现在不再需要。
 #
+# **四类"不可达"(迭代 27 终审 P1-2 补齐)**:终审实测,此前只认第一类,
+# 另外三类都能让门禁 **9/9 全绿放行**:
+#
+#   1. **恒假分支** —— 条件能被静态求值成 false(`false` / `1 != 1` /
+#      `!true` / `true && false` / 包级布尔常量 false);
+#   2. **零次循环** —— for 的条件恒假(`for i := 0; i < 0; i++`)或
+#      range 一个**空**字面量(`for range []int{} {}`);
+#   3. **无匹配分支** —— switch 的 tag 是常量、**没有任何** case 命中、
+#      也没有 default(`switch 1 { case 2: … }`);
+#   4. **未被调用的辅助函数** —— 函数体内有断言,但该函数在**本包内**
+#      没有任何调用点(非 Test*/Benchmark*/Fuzz*/Example*/init/main)。
+#
+# 第 4 条的**跨文件**口径:调用点按**包**收集(包内所有 `_test.go` 文件),
+# 不是按单个文件 —— 否则"定义在 helpers_test.go、调用在别的测试文件里"
+# 的辅助函数会被误判成"从未被调用"(假阳性 → 门禁误红)。
+#
 # 已知边界(**有意取舍**,登记在案,不是缺陷):
 #   - 判据是**按包**的:"1 个真断言 + 9 个零断言用例"的包照样通过;
 #   - 接收者名不遵循 t/tb/tt 惯例的 testing.T 认不出来(极罕见);
 #   - 断言写在**非测试文件**里的 testing 助手中(本仓库零命中)认不出来;
 #   - 恒假判定只覆盖**常量**表达式:条件里一旦出现运行期变量,就保守地
 #     认为该分支**可能**触发(偏松不偏严,不会造成误报);
+#   - "未被调用"按**名字在本包内出现过**判定:函数值/方法值等**非调用**
+#     形态也算"出现过" → 偏保守(宁可漏判,不可误报);
 #   - 解析失败的测试文件按"没有断言"计(拿不到证据时偏严 → 门禁红)。
 #
 # 门禁与**自检**走同一个函数 —— 理由同 real_usage_verdict:自检若自己另写
@@ -1144,7 +1164,7 @@ import (
 // assertscan:判断测试代码里的断言**是否可能触发**。
 //
 // 输入(manifest):每行 "包导入路径\t测试文件的绝对路径"。
-// 输出:每行 "包导入路径\t断言总数\t可能触发的断言数"。
+// 输出:每行 "包导入路径\t断言总数\t可能触发的断言数\t不可达原因"。
 
 func main() {
 	pkgs, err := readManifest(os.Stdin)
@@ -1155,8 +1175,8 @@ func main() {
 	out := bufio.NewWriter(os.Stdout)
 	defer out.Flush()
 	for _, pkg := range pkgs {
-		total, live := scanPackage(pkg)
-		fmt.Fprintf(out, "%s\t%d\t%d\n", pkg.name, total, live)
+		total, live, reasons := scanPackage(pkg)
+		fmt.Fprintf(out, "%s\t%d\t%d\t%s\n", pkg.name, total, live, strings.Join(reasons, ","))
 	}
 }
 
@@ -1200,19 +1220,21 @@ type pkgFiles struct {
 	paths []string
 }
 
-// constVal 是一个常量(布尔或数值)。
+// constVal 是一个常量(布尔 / 数值 / 字符串)。
 type constVal struct {
 	isBool bool
 	b      bool
 	isNum  bool
 	n      float64
+	isStr  bool
+	s      string
 }
 
-// scanPackage 扫描一个包的全部测试文件,返回 (断言总数, 可能触发的断言数)。
+// scanPackage 扫描一个包的全部测试文件,返回 (断言总数, 可能触发的断言数, 不可达原因)。
 //
 // 解析失败的文件按"没有断言"计:拿不到证据时必须偏严(门禁红),
 // 绝不能因为解析失败就当成"有断言"(门禁绿)。
-func scanPackage(pkg *pkgFiles) (int, int) {
+func scanPackage(pkg *pkgFiles) (int, int, []string) {
 	fset := token.NewFileSet()
 	var files []*ast.File
 	for _, p := range pkg.paths {
@@ -1229,23 +1251,44 @@ func scanPackage(pkg *pkgFiles) (int, int) {
 			consts[name] = v
 		}
 	}
+	// 本包内出现过的标识符(按**包**收集,不是按文件)——
+	// "在 a_test.go 里定义、在 b_test.go 里调用"的辅助函数必须算"有调用点"。
+	refs := packageRefs(files)
 	total, live := 0, 0
+	deadReasons := map[string]bool{}
 	for _, f := range files {
-		c := &counter{consts: consts}
+		c := &counter{consts: consts, refs: refs, deadReasons: map[string]bool{}}
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
 				if d.Body != nil {
-					c.walk(d.Body, false)
+					c.walk(d.Body, c.funcUnreachableReason(d))
 				}
 			default:
-				c.walk(decl, false)
+				c.walk(decl, "")
 			}
 		}
 		total += c.total
 		live += c.live
+		for r := range c.deadReasons {
+			deadReasons[r] = true
+		}
 	}
-	return total, live
+	reasons := make([]string, 0, len(deadReasons))
+	for r := range deadReasons {
+		reasons = append(reasons, r)
+	}
+	sortStrings(reasons)
+	return total, live, reasons
+}
+
+// sortStrings 排序(避免输出顺序随 map 迭代抖动)。
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
 }
 
 // fileConsts 收集文件里包级 const 的常量值(布尔/数值)。
@@ -1308,15 +1351,77 @@ func constValueOf(e ast.Expr) (constVal, bool) {
 	return constVal{}, false
 }
 
+// packageRefs 收集本包测试文件里出现过的标识符(计数)。
+//
+// **函数声明自身的名字不算引用** —— 否则每个函数都"引用自己",
+// "从未被调用"的判定就永远不成立。
+//
+// **按包收集(不是按文件)**:辅助函数常常定义在 helpers_test.go 里、
+// 在别的测试文件里调用 —— 只看单个文件会把它误判成"从未被调用"
+// (假阳性 → 门禁误红)。
+func packageRefs(files []*ast.File) map[string]int {
+	refs := map[string]int{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				collectIdents(decl, refs)
+				continue
+			}
+			if fd.Recv != nil {
+				collectIdents(fd.Recv, refs)
+			}
+			collectIdents(fd.Type, refs)
+			if fd.Body != nil {
+				collectIdents(fd.Body, refs)
+			}
+		}
+	}
+	return refs
+}
+
+// collectIdents 把节点里出现过的标识符计进 refs。
+func collectIdents(n ast.Node, refs map[string]int) {
+	if n == nil {
+		return
+	}
+	ast.Inspect(n, func(m ast.Node) bool {
+		if id, ok := m.(*ast.Ident); ok {
+			refs[id.Name]++
+		}
+		return true
+	})
+}
+
 // counter 累计断言数。
 type counter struct {
 	consts map[string]constVal
-	total  int
-	live   int
+	// refs 是本包内出现过的标识符计数("从未被调用"的判据)。
+	refs map[string]int
+	// locals 是**临时**绑定的局部常量(for 的循环变量)。
+	locals map[string]constVal
+	// deadReasons 记录出现过的"不可达"种类。
+	deadReasons map[string]bool
+	total       int
+	live        int
 }
 
-// walk 遍历 AST。dead 表示"当前处在恒假分支里"(该分支里的断言不可能触发)。
-func (c *counter) walk(n ast.Node, dead bool) {
+// 不可达原因(自检按这些关键字断言"是被哪条规则抓到的")。
+const (
+	reasonFalseBranch = "恒假分支"
+	reasonZeroLoop    = "零次循环"
+	reasonNoCaseMatch = "无匹配分支"
+	reasonUncallable  = "未被调用的辅助函数"
+)
+
+// walk 遍历 AST。dead 是"当前处在不可达处"的**原因**(空串 = 可能触发)。
+//
+// 不可达的种类(迭代 27 终审 P1-2 补齐的三类):
+//   - 恒假分支:条件能被静态求值成 false;
+//   - 零次循环:for 的条件恒假 / range 一个空字面量;
+//   - 无匹配分支:switch 的 tag 是常量、没有任何 case 命中、也没有 default;
+//   - 未被调用的辅助函数:见 funcUnreachableReason。
+func (c *counter) walk(n ast.Node, dead string) {
 	if n == nil {
 		return
 	}
@@ -1335,11 +1440,51 @@ func (c *counter) walk(n ast.Node, dead bool) {
 		}
 		c.walk(x.Cond, dead)
 		// 条件恒假 → 整个 then 分支不可达。
-		c.walk(x.Body, dead || c.staticallyFalse(x.Cond))
+		c.walk(x.Body, c.deadUnder(dead, c.staticallyFalse(x.Cond), reasonFalseBranch))
 		if x.Else != nil {
 			// else 分支在 then 不成立时执行:外层的 dead 仍然适用。
 			c.walk(x.Else, dead)
 		}
+		return
+	case *ast.ForStmt:
+		if x.Init != nil {
+			c.walk(x.Init, dead)
+		}
+		condFalse := false
+		if x.Cond != nil {
+			c.walk(x.Cond, dead)
+			// 三段式 for 的条件用的是**循环变量**("for i := 0; i < 0; i++"
+			// 里的 i)—— 不把它绑成常量就求不出"恒假"。
+			c.withInitBindings(x.Init, func() {
+				condFalse = c.staticallyFalse(x.Cond)
+			})
+		}
+		// 条件恒假(for i := 0; i < 0; i++)→ 循环体一次都不执行。
+		c.walk(x.Body, c.deadUnder(dead, condFalse, reasonZeroLoop))
+		if x.Post != nil {
+			c.walk(x.Post, dead)
+		}
+		return
+	case *ast.RangeStmt:
+		if x.X != nil {
+			c.walk(x.X, dead)
+		}
+		// range 一个**空**字面量 → 零次迭代 → 循环体不可达。
+		c.walk(x.Body, c.deadUnder(dead, c.rangeIsEmpty(x.X), reasonZeroLoop))
+		return
+	case *ast.SwitchStmt:
+		if x.Init != nil {
+			c.walk(x.Init, dead)
+		}
+		if x.Tag != nil {
+			c.walk(x.Tag, dead)
+		}
+		if c.switchUnreachable(x) {
+			// 常量 tag、没有任何 case 命中、也没有 default → 整个 switch 不可达。
+			c.walk(x.Body, c.deadUnder(dead, true, reasonNoCaseMatch))
+			return
+		}
+		c.walkSwitchBody(x, dead)
 		return
 	}
 	ast.Inspect(n, func(m ast.Node) bool {
@@ -1350,19 +1495,265 @@ func (c *counter) walk(n ast.Node, dead bool) {
 			return true
 		}
 		switch m.(type) {
-		case *ast.IfStmt, *ast.FuncDecl, *ast.FuncLit:
+		case *ast.IfStmt, *ast.FuncDecl, *ast.FuncLit,
+			*ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt:
 			// 交给 walk 处理(它要按 dead 分支传播),不再由 Inspect 下探。
 			c.walk(m, dead)
 			return false
 		}
 		if call, ok := m.(*ast.CallExpr); ok && isAssertionCall(call) {
 			c.total++
-			if !dead {
+			if dead == "" {
 				c.live++
+			} else {
+				c.deadReasons[dead] = true
 			}
 		}
 		return true
 	})
+}
+
+// withInitBindings 在"把 for 的 Init 绑定到常量"的前提下执行 fn。
+//
+// 三段式 for 的条件用的是**循环变量**("for i := 0; i < 0; i++" 里的 i),
+// 它不是包级常量 —— 不绑定就求不出"恒假"。
+func (c *counter) withInitBindings(init ast.Stmt, fn func()) {
+	bind := c.initBindings(init)
+	if len(bind) == 0 {
+		fn()
+		return
+	}
+	if c.locals == nil {
+		c.locals = map[string]constVal{}
+	}
+	saved := map[string]constVal{}
+	for k, v := range bind {
+		if old, ok := c.locals[k]; ok {
+			saved[k] = old
+		} else {
+			saved[k] = constVal{}
+		}
+		c.locals[k] = v
+	}
+	fn()
+	for k, v := range saved {
+		if v == (constVal{}) {
+			delete(c.locals, k)
+		} else {
+			c.locals[k] = v
+		}
+	}
+}
+
+// initBindings 取出 for 的 Init 里绑定到常量的循环变量。
+func (c *counter) initBindings(init ast.Stmt) map[string]constVal {
+	out := map[string]constVal{}
+	as, ok := init.(*ast.AssignStmt)
+	if !ok || (as.Tok != token.DEFINE && as.Tok != token.ASSIGN) {
+		return out
+	}
+	if len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+		return out
+	}
+	name, ok := as.Lhs[0].(*ast.Ident)
+	if !ok {
+		return out
+	}
+	if v, ok := constValueOf(as.Rhs[0]); ok {
+		out[name.Name] = v
+		return out
+	}
+	if id, ok := as.Rhs[0].(*ast.Ident); ok {
+		if v, ok := c.consts[id.Name]; ok {
+			out[name.Name] = v
+		}
+	}
+	return out
+}
+
+// deadUnder 合并"外层不可达原因"与"本层新增的不可达原因"。
+//
+// 外层原因**优先**:最外层的不可达才是"这条断言为什么永远不触发"的
+// 根因(内层只是叠加)。
+func (c *counter) deadUnder(outer string, hit bool, reason string) string {
+	if outer != "" {
+		return outer
+	}
+	if hit {
+		return reason
+	}
+	return ""
+}
+
+// walkSwitchBody 逐个 case 判定可达性。
+//
+// switch 整体可达时,某个 case 仍可能不可达(tagless switch 的
+// `case false:` / 常量 tag 的无匹配 case)。
+func (c *counter) walkSwitchBody(x *ast.SwitchStmt, dead string) {
+	for _, stmt := range x.Body.List {
+		cc, ok := stmt.(*ast.CaseClause)
+		if !ok {
+			c.walk(stmt, dead)
+			continue
+		}
+		for _, e := range cc.List {
+			c.walk(e, dead)
+		}
+		caseDead := c.deadUnder(dead, !c.caseReachable(x, cc), reasonNoCaseMatch)
+		for _, s := range cc.Body {
+			c.walk(s, caseDead)
+		}
+	}
+}
+
+// switchUnreachable 判定 switch 是不是整体不可达。
+//
+// 判据:tag 是常量(且**没有任何** case 命中)、也没有 default。
+// tag 求不出来 → 保守(判为可达)。
+func (c *counter) switchUnreachable(x *ast.SwitchStmt) bool {
+	tag, ok := c.switchTagValue(x.Tag)
+	if !ok {
+		return false
+	}
+	for _, stmt := range x.Body.List {
+		cc, ok := stmt.(*ast.CaseClause)
+		if !ok {
+			continue
+		}
+		if len(cc.List) == 0 {
+			return false // 有 default → 至少一条分支可达
+		}
+		for _, e := range cc.List {
+			cv, known := c.caseValue(e)
+			if !known {
+				return false // 求不出 → 保守:认为可能命中
+			}
+			if constEqual(tag, cv) {
+				return false // 命中 → switch 可达
+			}
+		}
+	}
+	return true
+}
+
+// caseReachable 判定某个 case 分支可达吗。
+func (c *counter) caseReachable(x *ast.SwitchStmt, cc *ast.CaseClause) bool {
+	if len(cc.List) == 0 {
+		return true // default:总是可达
+	}
+	tag, ok := c.switchTagValue(x.Tag)
+	if !ok {
+		return true
+	}
+	for _, e := range cc.List {
+		cv, known := c.caseValue(e)
+		if !known {
+			return true
+		}
+		if constEqual(tag, cv) {
+			return true
+		}
+	}
+	return false
+}
+
+// switchTagValue 取 switch 的 tag 常量值。
+//
+// tag == nil(tagless switch)→ 隐含的 tag 是 true。
+func (c *counter) switchTagValue(tag ast.Expr) (constVal, bool) {
+	if tag == nil {
+		return constVal{isBool: true, b: true}, true
+	}
+	if b := c.evalBool(tag); b.known {
+		return constVal{isBool: true, b: b.v}, true
+	}
+	if s, ok := c.evalStr(tag); ok {
+		return constVal{isStr: true, s: s}, true
+	}
+	if n, ok := c.evalNum(tag); ok {
+		return constVal{isNum: true, n: n}, true
+	}
+	return constVal{}, false
+}
+
+// caseValue 取一个 case 表达式的常量值。
+func (c *counter) caseValue(e ast.Expr) (constVal, bool) {
+	if b := c.evalBool(e); b.known {
+		return constVal{isBool: true, b: b.v}, true
+	}
+	if s, ok := c.evalStr(e); ok {
+		return constVal{isStr: true, s: s}, true
+	}
+	if n, ok := c.evalNum(e); ok {
+		return constVal{isNum: true, n: n}, true
+	}
+	return constVal{}, false
+}
+
+// constEqual 比较两个常量值是否相等(类型必须一致)。
+func constEqual(a, b constVal) bool {
+	switch {
+	case a.isBool && b.isBool:
+		return a.b == b.b
+	case a.isNum && b.isNum:
+		return a.n == b.n
+	case a.isStr && b.isStr:
+		return a.s == b.s
+	}
+	return false
+}
+
+// rangeIsEmpty 判定 range 的对象是不是"**零元素**"的字面量。
+//
+// `for range []int{} {}` / `for _, v := range "" {}` 这类循环体一次都不执行
+// → 里面的断言永远不会被触发。
+func (c *counter) rangeIsEmpty(x ast.Expr) bool {
+	switch e := x.(type) {
+	case *ast.CompositeLit:
+		return len(e.Elts) == 0
+	case *ast.BasicLit:
+		if e.Kind == token.STRING {
+			s, err := strconv.Unquote(e.Value)
+			return err == nil && s == ""
+		}
+	}
+	return false
+}
+
+// funcUnreachableReason 判定一个函数是不是"不可达",返回不可达原因。
+//
+// 判据:它是**辅助函数**(非 Test*/Benchmark*/Fuzz*/Example*/init/main),
+// 且它的名字在**本包的所有测试文件里一次都没出现过** → 没有任何调用点
+// → 函数体里的断言永远不会被触发。
+//
+// **为什么 Test* 排除在外**:TestXxx 由测试框架调用 —— 它就是入口。
+// 同理 Benchmark*/Fuzz*/Example* 与 init/main。
+//
+// **为什么按包收集引用点**(见 packageRefs):跨文件调用的辅助函数
+// (定义在 a_test.go、调用在 b_test.go)在本包内**有**调用点,
+// 只看单个文件会误报。
+func (c *counter) funcUnreachableReason(fn *ast.FuncDecl) string {
+	name := fn.Name.Name
+	if !isHelperFuncName(name) {
+		return ""
+	}
+	if c.refs[name] > 0 {
+		return ""
+	}
+	return reasonUncallable
+}
+
+// isHelperFuncName 判定一个函数名是不是"辅助函数"(而不是测试入口)。
+func isHelperFuncName(name string) bool {
+	if name == "init" || name == "main" {
+		return false
+	}
+	for _, p := range []string{"Test", "Benchmark", "Fuzz", "Example"} {
+		if strings.HasPrefix(name, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // isAssertionCall 判断一个调用是不是"断言"。
@@ -1407,7 +1798,7 @@ func isTestReceiver(name string) bool {
 			return false
 		}
 	}
-	return true
+	return false
 }
 
 // staticallyFalse 判断条件能否被静态求值成 false。
@@ -1436,6 +1827,9 @@ func (c *counter) evalBool(e ast.Expr) boolVal {
 			return boolVal{v: true, known: true}
 		case "false":
 			return boolVal{v: false, known: true}
+		}
+		if v, ok := c.locals[x.Name]; ok && v.isBool {
+			return boolVal{v: v.b, known: true}
 		}
 		if v, ok := c.consts[x.Name]; ok && v.isBool {
 			return boolVal{v: v.b, known: true}
@@ -1542,6 +1936,9 @@ func (c *counter) evalNum(e ast.Expr) (float64, bool) {
 	case *ast.ParenExpr:
 		return c.evalNum(x.X)
 	case *ast.Ident:
+		if v, ok := c.locals[x.Name]; ok && v.isNum {
+			return v.n, true
+		}
 		if v, ok := c.consts[x.Name]; ok && v.isNum {
 			return v.n, true
 		}
@@ -1649,14 +2046,15 @@ assert_scan_report() {
 	}
 	rm -f "$as_manifest"
 	printf '%s\n' "$as_scan" | awk -F'\t' '
-		{ tot[$1] += $2; live[$1] += $3; seen[$1] = 1 }
+		{ tot[$1] += $2; live[$1] += $3; seen[$1] = 1
+		  if ($4 != "") reason[$1] = (reason[$1] == "" ? $4 : reason[$1] "," $4) }
 		END {
 			for (p in seen) {
 				if (live[p] > 0) continue
 				if (tot[p] == 0) {
 					print "  " p ": 测试代码里没有任何断言(用例跑了,但什么都没验证)"
 				} else {
-					print "  " p ": 测试代码里的断言都在恒假分支里,永远不会被触发(等价于没有断言)"
+					print "  " p ": 测试代码里的断言都在不可达处(" reason[p] "),永远不会被触发(等价于没有断言)"
 				}
 			}
 		}' | sort
@@ -1688,7 +2086,9 @@ NO_ASSERT=$(assert_scan_report "$ROOT" "$CHECK_PKGS") ||
 USAGE_CHECK_DIR=$(mktemp -d /tmp/awo-verify-usagecheck.XXXXXX)
 mkdir -p "$USAGE_CHECK_DIR/good" "$USAGE_CHECK_DIR/zero" "$USAGE_CHECK_DIR/skip" "$USAGE_CHECK_DIR/fake" \
 	"$USAGE_CHECK_DIR/noassert" "$USAGE_CHECK_DIR/asserted" "$USAGE_CHECK_DIR/commentonly" \
-	"$USAGE_CHECK_DIR/deadassert" "$USAGE_CHECK_DIR/liveassert"
+	"$USAGE_CHECK_DIR/deadassert" "$USAGE_CHECK_DIR/liveassert" \
+	"$USAGE_CHECK_DIR/deadloop" "$USAGE_CHECK_DIR/deadcase" \
+	"$USAGE_CHECK_DIR/deadhelper" "$USAGE_CHECK_DIR/livehelper"
 printf 'module awo/usagecheck\n\ngo %s\n' "$SELF_GO_VER" >"$USAGE_CHECK_DIR/go.mod"
 printf 'package good\n\nimport "testing"\n\nfunc TestGood(t *testing.T) { _ = 1 }\n' >"$USAGE_CHECK_DIR/good/good_test.go"
 printf 'package zero\n\nfunc helperOnly() {}\n' >"$USAGE_CHECK_DIR/zero/zero_test.go"
@@ -1716,6 +2116,19 @@ printf 'package liveassert\n\nimport "testing"\n\nfunc TestLiveAssert(t *testing
 # 否则这个包会被判成"有断言"而放行(实测:本仓库的测试文件大量在注释里
 # 写着"这里应该 t.Errorf(...)",不处理注释等于判据失效)。
 printf 'package commentonly\n\nimport "testing"\n\n// 这里应该 t.Errorf(但注释不是断言)\nfunc TestCommentOnly(t *testing.T) {\n\t_ = 1\n}\n' >"$USAGE_CHECK_DIR/commentonly/commentonly_test.go"
+# ---- 迭代 27(终审 P1-2):三类"死断言"绕过形态的夹具 ------------------------
+# 这三个夹具对应终审实测到的三种"9/9 全绿放行"的绕过:
+#   B1 断言写在**永不执行**的 for 循环里(for i := 0; i < 0; i++);
+#   B2 断言写在**不匹配**的 switch 分支里(常量 tag、无 default);
+#   B3 断言写在**从未被调用**的辅助函数里。
+# 判据必须把它们全部抓住;否则"新增一个永远不执行的断言包"就能绕过门禁。
+printf 'package deadloop\n\nimport "testing"\n\nfunc TestDeadLoop(t *testing.T) {\n\tfor i := 0; i < 0; i++ {\n\t\tt.Fatal("不可能")\n\t}\n\t_ = 1\n}\n' >"$USAGE_CHECK_DIR/deadloop/deadloop_test.go"
+printf 'package deadcase\n\nimport "testing"\n\nfunc TestDeadCase(t *testing.T) {\n\tswitch 1 {\n\tcase 2:\n\t\tt.Fatal("不可能")\n\t}\n\t_ = 1\n}\n' >"$USAGE_CHECK_DIR/deadcase/deadcase_test.go"
+# B3:断言在**从未被调用**的辅助函数里(本包内没有任何调用点)。
+printf 'package deadhelper\n\nimport "testing"\n\nfunc TestDeadHelper(t *testing.T) {\n\t_ = 1\n}\n\nfunc neverCalled(t *testing.T) {\n\tt.Fatal("不可能")\n}\n' >"$USAGE_CHECK_DIR/deadhelper/deadhelper_test.go"
+# 绿对照(与 B3 同一族):辅助函数**被调用**了 → 它的断言可能触发 →
+# 绝不能被"未被调用"这条新判据误报(否则新判据把正常代码全挡在门外)。
+printf 'package livehelper\n\nimport "testing"\n\nfunc TestLiveHelper(t *testing.T) {\n\thasAssertion(t)\n}\n\nfunc hasAssertion(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/livehelper/livehelper_test.go"
 USAGE_TEXT_LOG="$USAGE_CHECK_DIR/test.log"
 if ! ( cd "$USAGE_CHECK_DIR" && go test -count=1 -v ./... ) >"$USAGE_TEXT_LOG" 2>&1; then
 	# 隔离模块自己跑不起来 = 自检环境不可用 → 必须红,不能静默跳过
@@ -1774,7 +2187,7 @@ selfcheck_red "第 6 步判定必须能区分:正常包不在报告里 → 断�
 #      那条红断言就是恒真的);
 #   2. 零断言的包 → 必须被报出来(红方向:证明判据真的在区分);
 #   3. 反向对照:对有断言的包断言"必须在报告里"必须失败(证明它能判负)。
-ASSERT_REPORT=$(assert_scan_report "$USAGE_CHECK_DIR" "awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip awo/usagecheck/fake awo/usagecheck/noassert awo/usagecheck/asserted awo/usagecheck/commentonly awo/usagecheck/deadassert awo/usagecheck/liveassert") ||
+ASSERT_REPORT=$(assert_scan_report "$USAGE_CHECK_DIR" "awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip awo/usagecheck/fake awo/usagecheck/noassert awo/usagecheck/asserted awo/usagecheck/commentonly awo/usagecheck/deadassert awo/usagecheck/liveassert awo/usagecheck/deadloop awo/usagecheck/deadcase awo/usagecheck/deadhelper awo/usagecheck/livehelper") ||
 	fail "门禁自检失败:第 6 步的断言扫描函数自身执行失败(自检环境不可用 —— 必须红,不能静默跳过)"
 selfcheck_ok "第 6 步断言扫描:有断言的包不得被误报(否则新判据把正常代码挡在门外)" usage_expect "awo/usagecheck/asserted" "$ASSERT_REPORT" "no"
 selfcheck_ok "第 6 步断言扫描:零断言的包必须被抓(否则'新增一个恒真测试包'就能绕过门禁 —— #289 的绕过本身)" usage_expect "awo/usagecheck/noassert" "$ASSERT_REPORT" "yes" "没有任何断言"
@@ -1783,6 +2196,24 @@ selfcheck_ok "第 6 步断言扫描:只在注释里提到断言的包必须被�
 selfcheck_ok "第 6 步断言扫描:恒不触发的断言(在恒假分支里)必须被抓(否则'新增一个恒真测试包'就能绕过门禁 —— 终验 P2-1 的绕过本身)" usage_expect "awo/usagecheck/deadassert" "$ASSERT_REPORT" "yes" "恒假分支"
 # 绿对照:正常分支里的断言不得被误判成"恒不触发"(否则新判据把正常代码全挡在门外)。
 selfcheck_ok "第 6 步断言扫描:运行期才成立的正常断言不得被误判成恒不触发(新判据不能过严)" usage_expect "awo/usagecheck/liveassert" "$ASSERT_REPORT" "no"
+# ---- 迭代 27(终审 P1-2):三类"死断言"绕过形态 ----------------------------
+# 终审实测:这三种绕过都能让门禁 **9/9 全绿放行**(断言被计成"live")。
+# 判据必须把它们抓住;每条自检都断言**具体原因**,证明是被**对应那条**
+# 新规则抓到的(而不是被别的规则碰巧抓到)。
+selfcheck_ok "第 6 步断言扫描:写在**永不执行**的 for 循环里的断言必须被抓(否则'把断言写进 for i:=0;i<0;i++'就能绕过门禁 —— 终审 P1-2 的 B1)" usage_expect "awo/usagecheck/deadloop" "$ASSERT_REPORT" "yes" "零次循环"
+selfcheck_ok "第 6 步断言扫描:写在**不匹配**的 switch 分支里的断言必须被抓(否则'把断言写进 switch 1 { case 2: }'就能绕过门禁 —— 终审 P1-2 的 B2)" usage_expect "awo/usagecheck/deadcase" "$ASSERT_REPORT" "yes" "无匹配分支"
+# B3 的自检同时断言**绿方向**:辅助函数**被调用**时,它的断言必须仍然算
+# "可能触发"(否则"未被调用"这条新判据会把正常代码全挡在门外)。
+assert_expect_dead() {
+	aed_pkg="$1"
+	aed_rep="$2"
+	aed_reason="$3"
+	aed_keep="$4"
+	usage_expect "$aed_pkg" "$aed_rep" "yes" "$aed_reason" || return 1
+	usage_expect "$aed_keep" "$aed_rep" "no" || return 1
+	return 0
+}
+selfcheck_ok "第 6 步断言扫描:写在**从未被调用**的辅助函数里的断言必须被抓(否则'把断言写进没人调用的辅助函数'就能绕过门禁 —— 终审 P1-2 的 B3);同一条自检同时断言'辅助函数被调用时不得被误报'(绿方向)" assert_expect_dead "awo/usagecheck/deadhelper" "$ASSERT_REPORT" "未被调用的辅助函数" "awo/usagecheck/livehelper"
 selfcheck_red "第 6 步断言扫描必须能区分:有断言的包不在报告里 → 断言'在报告里'必须失败" usage_expect "awo/usagecheck/asserted" "$ASSERT_REPORT" "yes"
 rm -rf "$USAGE_CHECK_DIR"
 USAGE_CHECK_DIR=""

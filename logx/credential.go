@@ -1,6 +1,8 @@
 package logx
 
 import (
+	"bytes"
+	"encoding/base64"
 	"regexp"
 	"strings"
 )
@@ -63,7 +65,8 @@ import (
 var credentialShapeHints = []string{
 	"sk-", "sk_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
 	"glpat-", "xox", "xapp-", "npm_", "hf_", "ya29.", "eyj", "akia", "asia",
-	"aiza", "abia", "pk-", "rk-", "dop_v1_", "sq0atp-", "lin_api_", "hvs.",
+	"aiza", "abia", "aida", "aroa", "anpa", "acca",
+	"pk-", "rk-", "dop_v1_", "sq0atp-", "lin_api_", "hvs.",
 	"pypi-", "shpat_", "shpca_", "shppa_", "bearer", "basic", "-----begin",
 	"hooks.slack.com",
 }
@@ -149,6 +152,17 @@ var authSchemeWords = map[string]bool{"bearer": true, "basic": true}
 
 // credentialTokenPattern 切出文本里的"候选值"(不含点号:点号分隔的是
 // 句子成分或路径,不是凭据的一部分)。
+//
+// **'=' / '+' / '-' 留在字符集里是有意的**(迭代 27 P1-1 的教训):
+//
+//   - '=' 是 base64 的**合法字符**(PEM 块、Basic <b64> 的填充)。把它从
+//     字符集里删掉会把 base64 **截断** → 长串 base64 跌破裸值语境的高熵
+//     门槛(≥24)→ 整串明文泄漏(回归锁见 credential_test.go 的
+//     TestBareBase64WithPaddingIsNotTruncated)。
+//   - '+' / '-' 是 **diff 行前缀**("+AKIA…"),同时也是 base64 的合法字符。
+//
+// 真正需要切开的是"**键值粘连**"形态(AK=AKIA…):那由
+// splitCredentialToken 处理 —— 按**首个** '=' 切,且**只有右侧非空才切**。
 var credentialTokenPattern = regexp.MustCompile(`[A-Za-z0-9_\-~+/=]+`)
 
 // strictCredentialPrefixes 是"前缀本身就有辨识度"的已知凭据前缀。
@@ -323,6 +337,15 @@ func maskAuthSchemes(text string) string {
 //
 // 已知前缀 / JWT / AWS 密钥这些"硬性"形态不受这两条护栏约束 ——
 // 它们在路径里也仍然是凭据。
+//
+// **判定顺序**(迭代 27 P1-1 的修法):
+//
+//  1. 先按 **token 切分**后的片段判定(键值粘连 / diff 行前缀形态);
+//  2. 片段都判不出时,再退回**整段**判定(宁可多遮,不许漏)。
+//
+// 第 1 步是必须的:此前只判整段,而"AK=AKIA…"的整段既不匹配 AWS 密钥
+// (规则锚定 ^…$)、又匹配不上已知前缀(前缀不在 token 开头)、还不满足
+// 高熵门槛(没有小写)→ **四路全不命中** → 凭据从六个出口全部泄漏。
 func maskBareValues(text string) string {
 	matches := credentialTokenPattern.FindAllStringIndex(text, -1)
 	if matches == nil {
@@ -330,24 +353,116 @@ func maskBareValues(text string) string {
 	}
 	var b strings.Builder
 	last := 0
+	replace := func(start, end int) {
+		b.WriteString(text[last:start])
+		b.WriteString(maskPlaceholder)
+		last = end
+	}
 	for _, m := range matches {
 		tok := text[m[0]:m[1]]
-		mask := false
-		switch {
-		case credentialShapeHard(tok):
-			mask = true
-		case highEntropy(tok, false):
-			mask = !isPathSegment(text, m[0], m[1]) && !isCamelIdentifier(tok)
+		// 整段是否处在路径语境:片段继承它的保护(否则 "/dir/<高熵>=1"
+		// 形态会比整段判定**多**遮一次,改变既有行为)。
+		wholeIsPath := isPathSegment(text, m[0], m[1])
+		masked := false
+		for _, cand := range splitCredentialToken(tok, m[0]) {
+			if !candidateIsCredential(text, cand, wholeIsPath) {
+				continue
+			}
+			replace(cand.start, cand.end)
+			masked = true
 		}
-		if !mask {
+		if masked {
 			continue
 		}
-		b.WriteString(text[last:m[0]])
-		b.WriteString(maskPlaceholder)
-		last = m[1]
+		// 片段都判不出 → 退回整段判定(既有行为,逐字节保持不变)。
+		if candidateIsCredential(text, newCredentialCandidate(m[0], m[1], tok), wholeIsPath) {
+			replace(m[0], m[1])
+		}
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+// credentialCandidate 是一个待判定的候选片段(裸值形态判定的一个单元)。
+type credentialCandidate struct {
+	// start/end 是片段在原文中的位置(就地替换用)。
+	start, end int
+	// text 是片段原文(长度判定 / 驼峰判定用)。
+	text string
+	// core 是**形态判定**用的形态:去掉末尾的 base64 填充('=')。
+	// AWS 密钥 ID / 已知前缀都不接受尾随的 '=',填充必须先摘掉。
+	core string
+}
+
+// newCredentialCandidate 造一个候选片段。
+func newCredentialCandidate(start, end int, text string) credentialCandidate {
+	return credentialCandidate{
+		start: start,
+		end:   end,
+		text:  text,
+		core:  strings.TrimRight(text, "="),
+	}
+}
+
+// splitCredentialToken 把一个裸值 token 切成候选片段。
+//
+// **迭代 27 P1-1 的修法** —— "键值粘连"形态:
+//
+//	AK=AKIAIOSFODNN7EXAMPLE → 键 "AK" + 值 "AKIAIOSFODNN7EXAMPLE"
+//	+AKIAIOSFODNN7EXAMPLE   → 值 "AKIAIOSFODNN7EXAMPLE"(去掉 diff 行前缀)
+//
+// 规则(每条都有对应的回归用例):
+//
+//  1. **行首 diff 前缀**('+' / '-')是行标记,不是凭据字符 → 判定时摘掉
+//     (但**保留在输出里**:diff 的行标记是审计证据);
+//  2. **键值分隔符**:按**首个** '=' 切开 —— 但**只有右侧非空才切**;
+//  3. **base64 填充**:末尾的 '=' / '==' 是 base64 的填充,不是分隔符
+//     → 先摘掉末尾的 '=' 再找分隔符(base64 因此**不被截断**);
+//  4. 右侧若还含 '='(键值粘连套娃:foo=bar=AKIA…)→ 递归继续切。
+func splitCredentialToken(tok string, base int) []credentialCandidate {
+	// 1. 行首 diff 前缀
+	off := 0
+	if len(tok) > 1 && (tok[0] == '+' || tok[0] == '-') {
+		off = 1
+	}
+	core := tok[off:]
+	// 3. 末尾 base64 填充
+	body := strings.TrimRight(core, "=")
+	eq := strings.IndexByte(body, '=')
+	if eq < 0 {
+		return []credentialCandidate{newCredentialCandidate(base+off, base+len(tok), core)}
+	}
+	// 2/4. 切开
+	left := body[:eq]
+	right := core[eq+1:]
+	out := make([]credentialCandidate, 0, 2)
+	if left != "" {
+		out = append(out, newCredentialCandidate(base+off, base+off+len(left), left))
+	}
+	out = append(out, splitCredentialToken(right, base+off+eq+1)...)
+	return out
+}
+
+// candidateIsCredential 判定一个候选片段是不是凭据形态。
+//
+// 判据与整段判定**同源**(同一条 credentialShapeHard + 高熵规则):
+//
+//   - **硬性形态**(PEM / AWS 密钥 ID / JWT / 已知前缀)→ 是凭据;
+//   - **高熵长串** → 是凭据,但受"路径段"与"驼峰标识符"两条护栏约束。
+//
+// wholeIsPath:整段 token 是否处在路径语境 —— 片段继承它的保护
+// (否则 "/dir/<高熵>=1" 形态会比整段判定**多**遮一次,改变既有行为)。
+func candidateIsCredential(text string, cand credentialCandidate, wholeIsPath bool) bool {
+	if credentialShapeHard(cand.core) {
+		return true
+	}
+	if !highEntropy(cand.text, false) {
+		return false
+	}
+	if wholeIsPath {
+		return false
+	}
+	return !isPathSegment(text, cand.start, cand.end) && !isCamelIdentifier(cand.text)
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +643,12 @@ func schemeTokenIsCredential(scheme, key, tok string) bool {
 //
 // 刻意要求较强的信号(base64 里含数字 / 有 '=' 填充 / 大小写混合且够长):
 // "Basic authentication" 这类英文短语不能被当成凭据。
+//
+// **第四档(user:pass 形态,迭代 27 补)**:短一档的 base64
+// ("dXNlcjpwYXNz" = 12 字符,无填充、无数字)上面三条都判不出,但它**确实**
+// 是 Basic 凭据。判据必须**解出 user:pass 的结构**:base64 解码后含 ':'
+// → 才是凭据。否则英文短语("Basic Tokenization"、"Basic application")
+// 会被误伤 —— 它们也是合法 base64 字符集,只是解不出 ':'。
 func basicAuthToken(tok string) bool {
 	if len(tok) < 8 {
 		return false
@@ -547,7 +668,31 @@ func basicAuthToken(tok string) bool {
 	if hasDigit(tok) {
 		return len(tok) >= 12
 	}
-	return hasUpper(tok) && hasLower(tok) && len(tok) >= 16
+	if hasUpper(tok) && hasLower(tok) && len(tok) >= 16 {
+		return true
+	}
+	return looksLikeUserPassBase64(tok)
+}
+
+// looksLikeUserPassBase64 判定一个 token 是不是 base64 编码的 user:pass。
+//
+// 判据:能解出字节(base64 / base64url,带填充与无填充都认),且解出来的
+// 字节里含 ':' —— 那才是 Basic 凭据的结构特征。
+func looksLikeUserPassBase64(tok string) bool {
+	encodings := []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	}
+	for _, enc := range encodings {
+		raw, err := enc.DecodeString(tok)
+		if err != nil {
+			continue
+		}
+		if bytes.ContainsRune(raw, ':') {
+			return true
+		}
+	}
+	return false
 }
 
 // isAuthorizationKey 判定键名是不是 Authorization 头(这类键后面的值

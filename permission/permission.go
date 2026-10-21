@@ -601,11 +601,6 @@ func (m *Manager) Clone() *Manager {
 	}
 }
 
-// Apply 应用覆盖到当前实例(与 ApplyWorkflowOverrides 相同结构)。
-func (m *Manager) Apply(overrides map[string]any) {
-	m.ApplyWorkflowOverrides(overrides)
-}
-
 // Snapshot 返回当前**有效**策略(给前端展示)。
 func (m *Manager) Snapshot() map[string]Policy {
 	if m.parent != nil {

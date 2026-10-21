@@ -101,8 +101,24 @@ func TestSSEMarshalFailureIsVisible(t *testing.T) {
 	if !strings.Contains(out, "exec-good") {
 		t.Errorf("坏事件之后正常事件仍应送达(一条坏事件不得掐断整条流),实际输出: %q", out)
 	}
-	if strings.Contains(out, "exec-bad") {
-		t.Errorf("序列化失败的事件不应被当作正常事件发出,实际输出: %q", out)
+	// 失败的**事件**不得被当作**正常事件**发出。
+	//
+	// 判据是**顶层 type 字段**:坏事件是 node.started,若它被当作正常事件
+	// 发出,流里就会出现 {"type":"node.started",...}。注意不能拿执行 ID
+	// 当判据 —— 运行期对"落库失败"的既定反应是一条 runtime.error 事件
+	// (显式的失败信号,**带上执行 ID 正是它的价值所在**:运维据此知道是
+	// 哪次执行出了问题)。
+	//
+	// runtime.error 的载荷里带着 "event_type":"node.started"(是**嵌套**
+	// 字段,不是顶层 type),所以这两条判据互不干扰。
+	if strings.Contains(out, `"type":"node.started"`) {
+		t.Errorf("序列化失败的事件不得被当作正常事件发出(顶层 type 仍是它),实际输出: %q", out)
+	}
+	// 失败必须有**显式信号**:runtime.error 是运行期既有的失败信号
+	// (persistence.SaveEvent 失败即报错 → 运行期计数 + ERROR 日志 +
+	// runtime.error 事件)。没有它,失败就只剩一条日志 = 静默(约定 14)。
+	if !strings.Contains(out, `"type":"runtime.error"`) {
+		t.Errorf("事件落库失败必须留下显式的失败信号(runtime.error),实际输出: %q", out)
 	}
 
 	// 关键断言:必须有可追溯的告警。
