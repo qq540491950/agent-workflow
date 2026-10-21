@@ -753,6 +753,9 @@ func TestLogLevelConcurrentAccess(t *testing.T) {
 func TestRestoreBackupRejectsInvalidWorkflow(t *testing.T) {
 	a := newTestApp(t)
 	res, err := a.Settings.RestoreBackup(map[string]any{
+		// version 是备份契约的必填字段(恢复端据此确认格式):此前
+		// 只写不读,这里是手搓的备份,补上导出端真实会写的值。
+		"version": 1,
 		"workflows": []any{
 			// 合法
 			map[string]any{
@@ -803,6 +806,8 @@ func TestRestoreBackupRejectsInvalidWorkflow(t *testing.T) {
 func TestRestoreBackupRejectsBrokenAgentConfig(t *testing.T) {
 	a := newTestApp(t)
 	res, err := a.Settings.RestoreBackup(map[string]any{
+		// version 是备份契约的必填字段(恢复端据此确认格式)。
+		"version":   1,
 		"workflows": []any{},
 		"agent_configs": map[string]any{
 			// timeout_seconds 是 int,给字符串 → 结构非法

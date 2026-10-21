@@ -1070,6 +1070,12 @@ float64 陷阱)已经用解码归一拿到了。
 > `template/**`、`frontend/src/lib/types.ts`、`frontend/bindings/**` 归他人所有),
 > 已备好**可直接照抄的改法**,主代理按图施工即可。
 
+> **本表的 8 项已在第二十一轮(迭代 22 收口,轮次 85)全部落地** ——
+> 逐条的落地方式、验证与"红 → 绿"证据见第十三节末"轮次 85"小节。
+> 其中第 1 项的**改法被实测修正**(见 #305:别名会打掉运行期状态脱敏守卫,
+> 改为"字面量 + 两道跨包守卫"),第 5 项按本轮任务要求**拆成两项**落地
+> (`version` 校验 + `skill_configs` 补齐)。
+
 | # | 事项 | 精确改法 |
 | --- | --- | --- |
 | 1 | **`contextx` 消费共享的 mode/槽位定义** | `contextx/context.go`:把 `StateKeyTask/Plan/Review/Issues/TestResult/LastOutput/GitDiff/Iteration/RelevantFiles/UserInstruction` 改为引用 `model.ContextSlot*`(值不变,`model` 已在 import 里);`SaveNodeOutput` / `BuildWithSlots` 的 mode switch 改为**按 `model.ModeSpecFor(mode).ContextSlot` 分派**(注意:`skill` 是**伪 mode**,不在 `model.AllModes()` 里,要单列);`submit` 的 `ContextSlot` 现为空 —— 若要让它进上下文链,先在 `model.modeSpecs` 里给它 `ContextSlot: model.ContextSlotLastOutput`,再改 contextx。守卫测试已就位:`workflow/runtime/mode_contract_test.go` 的 `TestModeContextSlotMatchesContextx` 会**在两边不一致时立刻变红** |
@@ -1081,6 +1087,43 @@ float64 陷阱)已经用解码归一拿到了。
 | 7 | **重新生成 Wails 绑定** | `frontend/bindings/**` 是**生成物**,当前**已过期**(含本轮之前若干 commit 的注释与字段变化)。本轮新增的 `persistence.WorkflowStats.cancelled` 需要重新生成才会出现在类型里:隔离副本实测 `wails3 generate bindings -f '-tags server,production -trimpath -buildvcs=false -ldflags="-w -s"' -clean=true -ts -i` 的**结构性**差异只有 `"cancelled": number;` 一行(其余是别的 commit 的注释)→ 建议由主代理**统一**重新生成一次(避免与他人改动冲突) |
 | 8 | **`api.ts` 的 stats 返回类型** | `frontend/src/lib/api.ts:718` 的 `stats()` 内联类型**缺 `cancelled`**(运行时数据已有,只是类型没跟上)→ 补 `cancelled: number`。(本轮按"api.ts 只许改 CODE_HINTS"的写入边界**未动**该文件;Dashboard 用的是自己的 `WfStats` 接口,功能不受影响) |
 
+### 轮次 85:第二十一轮(迭代 22 收口)—— 跨文件动作落地(8 项)与一处"守卫能力边界"的登记
+
+> **本轮是"施工轮"**:第二十轮(轮次 84)收口时列了 **8 条"需主代理接手"的
+> 跨文件动作**(那一轮的相关文件归别的代理所有,只能把精确改法写下来)。
+> 本轮把这 8 条**全部落地**,并顺带记下一条施工过程中撞见的**硬约束**
+> (#305):运行期状态脱敏守卫的常量解析能力有限,它**挡住了**"把
+> `contextx.StateKey*` 改成 `model.ContextSlot*` 的别名"这条最直观的收敛改法。
+>
+> **本轮的一条方法论**:"同一份事实只有一处定义"不等于"必须用别名"。
+> 别名只是手段,**目的是"改一边时另一边会立刻变红"** —— 只要有守卫
+> 把两边钉死(且守卫是**跨包**的、覆盖全部 10 个键),字面量 + 守卫
+> 同样满足目的;而当别名会**打掉别人的守卫**时,字面量 + 守卫才是
+> 唯一能同时满足两边的方案(见 #305)。
+
+| 编号 | 来源 | 缺陷 | 触发路径与影响 | 修复(已落地) |
+| --- | --- | --- | --- | --- |
+| **#297** | 第二十一轮(迭代 22) | **P1** `contextx` 自带一份 **mode → 槽位**的映射表 | `contextx.SaveNodeOutput` 用 `switch mode { case "plan": … case "execute", "fix", "skill": … }` 硬编码了一份 mode 清单与槽位映射,与 `workflow/model.ModeSpec` **各演各的**:model 认了某个 mode 而 contextx 没认 → 该 mode 的产物**静默丢弃**(下游拿到空上下文照常执行,用户看不出任何异常);反过来 contextx 认了 model 已删的 mode → 写进一个不该写的槽位 | **分派改由 model 决定**:`SaveNodeOutput` 先 `model.ModeSpecFor(mode).ContextSlot` 取出目标槽位,再**按槽位**分派(每个槽位一个分支);`skill` 作为**伪 mode**(节点类型,不在取值域里)单列 → `last_output`;`submit` 的 `ContextSlot` 为空 → **什么都不写**(与 model 声明一致);**不认识的 mode → 不写**(fail closed)。**新增 fail-closed 默认分支**:槽位不认识时**显式返回错误**而不是静默丢弃(约定 14:该失败却成功等同 P0)—— 此前"匹配不到就什么都不写",model 侧新增一个槽位就会让该 mode 的产出无声消失。`BuildWithSlots` 的 mode 分派改用 `model.Mode*` 常量。**验证**:`contextx/mode_source_test.go`(5 例:**源码级扫描**"contextx 不得自带 mode 字面量清单" + 逐 mode 的槽位归属 + 伪 mode + 槽位解析 + 10 个键名与 model 逐项一致)、`workflow/runtime/mode_contract_test.go`(3 例,跨包守卫,仍全绿) |
+| **#298** | 第二十一轮 | **P1** mode 取值域**没有对外出口**(前端硬编码一份) | 前端 `Designer.tsx` 的 mode 下拉写死 `["plan","execute","review","fix","test","submit"]`:后端加了 mode 而前端没跟上 → 用户在下拉里**选不到**新 mode(运行期却认);前端留着后端已删的 mode → 用户选了必然被校验期判非法,而界面给不出任何解释 | **后端出端点 + 前端改后端派生**:`api/server.go` 加 `GET /api/modes`(→ `model.AllModes()`),`app/application` 加 `WorkflowService.Modes()`(桌面模式经 Wails 绑定),`frontend/src/lib/api.ts` 加 `modes()`(**双分支**:桌面走绑定、浏览器走 HTTP),`Designer.tsx` 的下拉改为**从后端取**。**兜底**:加载中/失败时用 `FALLBACK_MODES` 兜底(控件不能空着 —— 空下拉框会让用户以为"这个节点不能设 mode"),失败同时 `reportError`。**跨语言守卫**:`api/modes_test.go` 扫 `Designer.tsx` 的 `FALLBACK_MODES` 数组,要求与 `model.AllModes()` **逐项一致**(兜底清单也出现在用户面前,漂移同样是缺陷)。**验证**:`api/modes_test.go`(3 例:端点逐项一致 / 服务器与桌面同一份 / 前端兜底清单逐项一致)、`frontend/src/lib/api.test.ts`(+2 例:双分支)、`frontend/src/pages/designer.modes.test.tsx`(8 例,新文件) |
+| **#299** | 第二十一轮 | **P2** 版本页显示的是"**重新编码**"的 YAML,不是当初的原文 | `VersionDSL` 用 `dsl.FromModel(snapshot).EncodeYAML()` 重新编码:快照存的是**模型**(JSON),模型里的整数在 JSON 往返后变成 `float64`,再编码成 YAML 就成了 `3.0` —— 用户看到"我的变量 `max_iter` 从 3 变成了 3.0",而工作流一个字节都没改(实测:`max_iter: 3` → `max_iter: 3.0`)。**这不是排版差异,是内容差异** | **读原文**:`app/application.VersionDSL` 改调 `Repo.GetWorkflowVersionDSL`(读 `workflow_versions.dsl_text` —— 版本快照里唯一保存"当初那份 YAML 原文"的列);**老库兼容**:`dsl_text` 为空(老版本没写这一列)→ **回退**到从 `snapshot_json` 重编码(老版本仍能打开,只是回到旧的显示口径);版本不存在 → `NOT_FOUND`(两条读路径同口径)。**验证**:`app/application/version_dsl_test.go`(3 例,新文件:原文逐字返回 / 老库回退 / NOT_FOUND) |
+| **#300** | 第二十一轮 | **P3** `template` 包有 6 个**零引用**的死常量 | `template.VarTask/VarPlan/VarGitDiff/VarReview/VarTestResult/VarIteration` 只有自己的定义,且只是 12 个上下文槽位里的 6 个 —— 它们不是"清单"而是历史残留。危险的不是"没人用",而是**看起来像清单**:读代码的人会以为"模板支持的标准变量就是这 6 个",新增槽位时照着它加一个 → 又多一份会漂移的来源(约定 13) | **删除**。删掉后编译器不会报错(导出常量没人引用是合法的),所以**另加源码级守卫**锁住"不得再出现"。**验证**:`template/dead_const_test.go`(1 例,新文件) |
+| **#301** | 第二十一轮 | **P2** 备份的 `version` **只写不读**;备份**缺 `skill_configs`** | ① `version` 导出时写了(恒为 1),恢复时从头到尾没看过 → 拿一份格式完全不同的 JSON 来恢复也会被当成"备份"照单全收,用户看到"恢复成功"却什么也没恢复;② 备份里**根本没有**技能段 → 换机器恢复后,此前**禁用**的技能又全部可用了(禁用的技能在运行期会被拒绝调用,这是一条与安全相关的状态) | **`version` 校验**:`RestoreBackup` 缺失/不认识 → 显式 `BAD_REQUEST`(fail closed;未来的 `version: 2` 不能被当前版本硬读成老格式);**`skill_configs` 补齐**:导出带上"本机全部技能的启用状态"(注册表 − 禁用集合 —— 库里只有"显式设置过"的行,没设置过的默认启用),恢复时**按本机已有 Skill 过滤**后写回(不存在的技能跳过并如实计数,与未知 Agent 同一口径)。**向后兼容**:现有备份的 `version` 恒为 1 → 识别为 v1 走正常路径;老备份没有 `skill_configs` 段 → **视为"不恢复技能状态"**,不报错、不改动本机的技能状态。**前端文案**:`Settings.tsx` 补上"技能启用状态"与"恢复时按版本号校验格式"。**验证**:`app/application/backup_skill_test.go`(7 例,新文件) |
+| **#302** | 第二十一轮 | **P3** 前端 `ExecutionState` 联合类型里还留着 `"PAUSED"` | 后端已在轮次 84 整条移除不可达的 `PAUSED`(老库遗留行在**读出口**归一为 `CANCELLED`),前端类型却还列着它 → 用户永远看不到这个状态,留着只会让人以为"还有一种暂停中的执行",并写出永远走不到的分支 | **删除**(`frontend/src/lib/types.ts`)。前端徽章对未知状态有回退(显示原始文本),老库的遗留行读出来是 `CANCELLED`,行为不受影响 |
+| **#303** | 第二十一轮 | **P3** `frontend/bindings/**` 是**生成物**,已过期 | 绑定里缺 `persistence.WorkflowStats.cancelled` 字段、缺 `git_working_dir_read_failed` 标记,注释也停在若干 commit 之前 —— 前端拿到的是"上一版的后端" | **重新生成**:`wails3 generate bindings -f '-buildvcs=false' -clean=true -ts -i`(wails3 v3.0.0-beta.20;`~/go/bin`)。**先在隔离副本实测**再在真实仓库执行:结构性差异只有 `cancelled: number` 一行,其余是注释与本轮新增的 `WorkflowService.Modes()` 绑定。生成后前端绑定导出清单守卫(`api.test.ts` 的"导出清单与真实 wails 绑定一致")同步更新(`workflowservice` 多 `Modes`) |
+| **#304** | 第二十一轮 | **P3** `api.ts` 的 `stats()` 内联类型缺 `cancelled` | 运行时数据已有 `cancelled` 列(轮次 84 加的),只是类型没跟上 → 消费方按类型写代码时会以为该字段不存在 | **补上** `cancelled: number`(并加注释说明它与 `failed` 分列) |
+| **#305** | 第二十一轮 | **P2(有意边界,不修)** 运行期状态脱敏守卫的**常量解析能力有限**,挡住了"改成别名"这条最直观的收敛改法 | `workflow/runtime/state_mask_test.go` 的 `TestStateWritesAreClassified` 会**源码扫描**所有状态写入点,把键名解析成字符串再逐个登记分类(漏登记 = 落库明文或执行语义被改写)。它的常量表(`constStringValues`)**只收字符串字面量常量**,别名(选择器表达式)解析不出来 → 守卫会报"状态键写法 `contextx.StateKeyX` 无法解析"并连带判定"登记与实现漂移"。因此把 `contextx.StateKey*` 改成 `= model.ContextSlot*` 的别名会**直接打掉这道守卫**(实测:8 条"无法解析" + 6 条"登记与实现漂移") | **有意边界,不修**:守卫文件在 `workflow/**` 下(本轮只读),且它本身的判据是合理的(状态键必须能被静态解析出来才能保证落库脱敏)。**改法调整**:`contextx.StateKey*` **保持字面量**,而"两份定义会漂移"这件事由**两道跨包守卫**钉死:`workflow/runtime/mode_contract_test.go` 的 `TestModelSlotKeysMatchContextx`(10 个键逐项比对)+ `contextx/mode_source_test.go` 的 `TestStateKeysMatchModelContextSlots`。**目的**("改一边另一边立刻变红")照样达成 —— 只是靠守卫而不是靠别名。**登记**:将来若要改成别名,必须**先**让状态脱敏守卫支持"解析选择器常量"(它可以按 import 别名去目标包收常量表),否则打掉的是一道与本条无关的防线 |
+
+#### 本轮的**红 → 绿**证据(逐条)
+
+| # | 旧代码上的实测输出 | 现在 |
+| --- | --- | --- |
+| #297 | `contextx/context.go` 里有 `case "plan"` / `case "review"` / `case "execute", "fix", "skill"` / `case "test"` 四组字面量;`contextx/mode_source_test.go` 报 "contextx/context.go 里出现 mode 的字面量 \"plan\"…" | 源码级扫描 0 命中;逐 mode 的槽位归属由 `model.ModeSpecFor` 决定 |
+| #298 | `Designer.tsx` 的下拉写死 `["plan","execute","review","fix","test","submit"]`;后端无 `/api/modes` | 端点返回 `model.AllModes()`;下拉渲染后端给的清单(页面级用例:点画布节点 → 打开 mode 下拉 → 断言"后端给的 mode 在、前端兜底里的 `submit` 不在") |
+| #299 | `VersionDSL` 返回 `max_iter: 3.0`(原文是 `3`) | 返回 `max_iter: 3` |
+| #300 | `template/template.go:38-43` 六个常量 | 已删除;源码扫描守卫锁住 |
+| #301 | 恢复一份没有 `version` 的备份 → **返回"恢复成功"**;导出结果里没有 `skill_configs` 键 | 缺 `version` → `ValidationError(BAD_REQUEST)`;导出含 `skill_configs`;恢复后禁用状态还原;老备份仍能恢复且不改动技能状态 |
+| #304 | `stats()` 的内联类型无 `cancelled` | 已有 `cancelled: number` |
+
 ## 十四、仍然开放(轮次 61-83 之后)
 
 > 下面是**当前**的完整开放清单。前面各轮登记过的开放项,**已修的划掉并
@@ -1088,6 +1131,14 @@ float64 陷阱)已经用解码归一拿到了。
 >
 > **本节已按 HEAD(`3e4a5b3`)+ 第十九轮(迭代 20 收口)逐条复核**(读代码 + 实测探针
 > + 跑门禁 + 独立终验),不是从上一版沿抄的。每条后面标注了复核依据。
+>
+> **第二十一轮(迭代 22 收口,轮次 85)的增量**:关闭 **8 条**"需主代理接手"的
+> 跨文件动作(contextx 消费共享 mode 定义 / API 暴露 mode 列表 / 版本页读
+> `dsl_text` 原文 / 删 template 死常量 / 备份两项 / 前端 types.ts 的 PAUSED /
+> 重新生成 Wails 绑定 / api.ts 的 stats 类型)—— 逐条见第十三节末"轮次 85"
+> 小节;**另登记 1 条有意边界 #305**(运行期状态脱敏守卫的常量解析能力有限,
+> 它挡住了"把 `contextx.StateKey*` 改成 `model.ContextSlot*` 的别名"这条
+> 改法 —— 改用"字面量 + 两道跨包守卫"达成同一目的)。
 >
 > **第二十轮(迭代 21 收口,轮次 84)的增量**:关闭 **6 条**清单收敛类缺陷
 > (**#291** mode 取值域三份清单 / **#292** 任务键两份字面量 /

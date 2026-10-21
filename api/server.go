@@ -54,6 +54,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/version", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		return writeJSON(w, VersionInfo(), nil)
 	}))
+	// mode 列表:唯一来源是 workflow/model.AllModes(约定 13)。
+	//
+	// 前端此前自己硬编码了一份 mode 清单 —— 后端加了 mode 而前端没跟上,
+	// 用户在下拉里选不到新 mode;前端留着后端已删的 mode,用户选了必然
+	// 被校验期判非法。两种模式拿的是同一份数据(桌面模式走 Wails 绑定
+	// 的 WorkflowService.Modes)。
+	s.mux.HandleFunc("GET /api/modes", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		return writeJSON(w, model.AllModes(), nil)
+	}))
 	s.mux.HandleFunc("GET /api/workflows", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		wfs, err := s.app.Workflows.List()
 		return writeJSON(w, wfs, err)

@@ -253,3 +253,32 @@ describe("Settings 备份明文范围文案", () => {
     expect(document.body.textContent ?? "").not.toContain("环境变量以明文导出");
   });
 });
+
+// 备份含三段(工作流 / Agent 配置 / 技能启用状态),恢复时按版本号校验
+// 格式。文案必须与实际导出一致 —— 否则用户按旧口径理解:
+//   - 以为"备份里没有技能状态"→ 换机器后技能开关全变回可用,毫无察觉;
+//   - 以为"随便一个 JSON 都能恢复"→ 格式不认识的文件被拒时一头雾水。
+describe("Settings 备份内容与版本校验文案", () => {
+  it("写明备份含技能启用状态", async () => {
+    renderSettings();
+    await settle();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("技能启用状态");
+    expect(text).toContain("skill_configs");
+  });
+
+  it("写明恢复时按版本号校验格式(不认识的会被拒)", async () => {
+    renderSettings();
+    await settle();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("版本号");
+    expect(text).toContain("拒绝");
+  });
+
+  it("写明老备份仍能恢复(只是没有技能状态)", async () => {
+    renderSettings();
+    await settle();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("仍能恢复");
+  });
+});

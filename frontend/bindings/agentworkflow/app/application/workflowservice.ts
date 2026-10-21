@@ -61,6 +61,21 @@ export function List(): $CancellablePromise<(model$0.Workflow | null)[] | null> 
 }
 
 /**
+ * Modes 返回 agent 节点的合法 mode 列表(前端下拉的唯一来源)。
+ * 
+ * 唯一来源是 workflow/model.AllModes(约定 13:同一份语义只有一处定义):
+ * 前端此前自己硬编码了一份 mode 清单 —— 后端加了 mode 而前端没跟上,
+ * 用户在下拉里**选不到**新 mode(运行期却认);反过来前端还留着后端已删的
+ * mode,用户选了必然失败(校验期直接判非法)。
+ * 
+ * 桌面模式经 Wails 绑定暴露(WorkflowService 已注册),服务器模式经
+ * GET /api/modes —— 两种模式同一份数据(约定 10)。
+ */
+export function Modes(): $CancellablePromise<string[] | null> {
+    return $Call.ByID(1698433742);
+}
+
+/**
  * Save 创建或更新(传入带 ID 的 workflow;存在则版本+1)。
  * 
  * 模型级入口:调用方已经持有模型,**没有原始载荷**,因此不做顶层键校验
@@ -95,7 +110,17 @@ export function Validate(wf: model$0.Workflow | null): $CancellablePromise<valid
 }
 
 /**
- * VersionDSL 返回指定版本的 DSL 文本(从版本快照导出)。
+ * VersionDSL 返回指定版本的 DSL 文本。
+ * 
+ * 读的是版本快照里存下的**原文**(workflow_versions.dsl_text),
+ * 不是拿模型快照重新编码一遍 —— 两者**不等价**:快照存的是模型
+ * (JSON),模型里的数字在 JSON 往返后变成 float64,再编码成 YAML 就成了
+ * `3.0`。用户看到的是"我的变量 max_iter 从 3 变成了 3.0",而工作流
+ * 一个字节都没改 —— 这不是排版差异,是内容差异(约定 14:显示与事实
+ * 不一致等同"该失败却成功")。
+ * 
+ * **向后兼容**:老库(本轮之前建的)可能没有这一列的值(为空)→ 回退到
+ * 从 snapshot_json 重新编码,保证老版本仍能打开(只是回到旧的显示口径)。
  */
 export function VersionDSL(id: string, version: number): $CancellablePromise<string> {
     return $Call.ByID(1047249505, id, version);

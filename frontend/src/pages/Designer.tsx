@@ -75,6 +75,43 @@ export const nodeMeta: Record<
   subworkflow: { label: "Sub Workflow", icon: <WorkflowIcon className="h-4 w-4" />, color: "border-cyan-500/50 bg-cyan-500/10" },
 };
 
+// ---- mode 清单(后端派生) ----
+
+/**
+ * FALLBACK_MODES 是 mode 清单的**兜底**(加载中 / 加载失败时用)。
+ *
+ * 它**不是**清单的来源:清单的唯一来源是后端(model.AllModes,经
+ * api.modes() 拿到)—— 前端此前自己硬编码了一份清单,后端加了 mode
+ * 而前端没跟上,用户在下拉里**选不到**新 mode;前端留着后端已删的
+ * mode,用户选了必然被校验期判非法(约定 13)。
+ *
+ * 为什么还要留一份兜底:后端返回前(网络慢)或失败时,下拉不能空着 ——
+ * 空下拉框会让用户以为"这个节点不能设 mode",而节点配置面板此时
+ * 正在被使用。
+ *
+ * 它必须与后端清单**逐项一致**(后端新增/删除 mode 时这里要跟着改),
+ * 由 Go 侧的契约测试锁住(见 api/modes_test.go)。
+ */
+export const FALLBACK_MODES = [
+  "plan",
+  "execute",
+  "review",
+  "fix",
+  "test",
+  "submit",
+];
+
+/**
+ * resolveModeList 合并"后端返回的清单"与兜底清单。
+ *
+ * 后端返回空(异常返回 / 空数组)→ 用兜底,控件不留空。
+ * 导出以便单测锁定该行为(见 designer.test.ts)。
+ */
+export function resolveModeList(loaded: unknown): string[] {
+  const list = asArray<string>(loaded);
+  return list.length > 0 ? list : FALLBACK_MODES;
+}
+
 // ---- 自定义节点视图 ----
 
 export function WFNodeView({ data, selected }: { data: Record<string, unknown>; selected?: boolean }) {
@@ -204,6 +241,9 @@ function DesignerInner() {
   const [task, setTask] = useState("");
   const [runVars, setRunVars] = useState("{}");
   const [agents, setAgents] = useState<string[]>([]);
+  // mode 清单:后端派生(约定 13)。加载中/失败时用 FALLBACK_MODES 兜底,
+  // 控件不留空(空下拉框 = 用户以为"这个节点不能设 mode")。
+  const [modes, setModes] = useState<string[]>(FALLBACK_MODES);
   const [saving, setSaving] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const { fitView } = useReactFlow();
@@ -221,6 +261,18 @@ function DesignerInner() {
       .listAgents()
       .then((as) => setAgents(asArray<AgentInfo>(as).map((a) => a.id)))
       .catch((e: unknown) => reportError(e, "加载 Agent 列表"));
+  }, []);
+
+  useEffect(() => {
+    // mode 清单来自后端:后端加了 mode 而前端没跟上,用户就选不到它;
+    // 前端留着后端已删的 mode,用户选了必然被校验期判非法(约定 13)。
+    //
+    // 失败时保留兜底清单(下拉不留空)并提示 —— 不静默:用户至少知道
+    // 清单没拿到(否则会以为"只有这几个 mode")。
+    api
+      .modes()
+      .then((m) => setModes(resolveModeList(m)))
+      .catch((e: unknown) => reportError(e, "加载 mode 清单"));
   }, []);
 
   // Cmd/Ctrl+S 快捷保存
@@ -585,6 +637,7 @@ function DesignerInner() {
               key={selectedNode.id}
               node={selectedNode}
               agents={agents}
+              modes={modes}
               onChange={(patch) =>
                 setNodes((nds) =>
                   nds.map((n) =>
@@ -746,15 +799,18 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-function NodePropertyPanel({
+export function NodePropertyPanel({
   node,
   agents,
+  modes,
   onChange,
   onDelete,
   onDuplicate,
 }: {
   node: RFNode;
   agents: string[];
+  /** mode 下拉的选项(后端派生;见 FALLBACK_MODES)。 */
+  modes: string[];
   onChange: (patch: { data?: Record<string, unknown> }) => void;
   onDelete: () => void;
   onDuplicate: () => void;
@@ -828,7 +884,7 @@ function NodePropertyPanel({
             <Select value={String(cfg.mode ?? "")} onValueChange={(v) => setCfg("mode", v)}>
               <SelectTrigger><SelectValue placeholder="执行模式" /></SelectTrigger>
               <SelectContent>
-                {["plan", "execute", "review", "fix", "test", "submit"].map((m) => (
+                {modes.map((m) => (
                   <SelectItem key={m} value={m}>{m}</SelectItem>
                 ))}
               </SelectContent>

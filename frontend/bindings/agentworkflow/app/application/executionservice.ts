@@ -28,6 +28,14 @@ export function AllEvents(eventType: string, limit: number): $CancellablePromise
     return $Call.ByID(3591774373, eventType, limit);
 }
 
+/**
+ * Artifacts 返回某次执行的制品(内容已脱敏,约定 8)。
+ * 
+ * 制品此前**完全没有**脱敏:git diff 节点把 diff 原文落库,这里原样
+ * 返回 —— 而同一份内容在 /nodes 里是脱敏的,两个出口口径不一致。
+ * 脱敏按"值的形态"判定(agent.MaskCredentialValues):凭据形态的值被
+ * 替换,代码标识符原样保留(diff 的可读性与审计价值不退化)。
+ */
 export function Artifacts(id: string): $CancellablePromise<(model$0.Artifact | null)[] | null> {
     return $Call.ByID(1145309656, id);
 }

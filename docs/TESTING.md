@@ -1663,6 +1663,48 @@ go 指令 → 门禁**红**。
 vitest **268/268**、`./scripts/verify.sh` **9 步通过**(实测 **113s**)、
 `docs/check-numbering.sh` 通过(缺陷号区间 1..290 连续)。
 
+### 轮次 85:第二十一轮(迭代 22 收口)—— 跨文件动作落地(8 项)与一处"守卫能力边界"的登记
+
+> 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 85"小节(#297-#304 全部关闭,
+> 另登记有意边界 #305)。
+>
+> 本轮是**施工轮**:上一轮收口时列了 8 条"需主代理接手"的跨文件动作
+> (那些文件当时归别的代理所有,只能把精确改法写下来)。本轮把 8 条
+> **全部落地**,并记下一条施工中撞见的**硬约束**(#305:运行期状态脱敏
+> 守卫只能解析**字符串字面量**常量,挡住了"把 `contextx.StateKey*` 改成
+> `model.ContextSlot*` 的别名"这条最直观的收敛改法 —— 改用"字面量 +
+> 两道跨包守卫"达成同一目的)。
+>
+> 新增 Go 顶层用例 **+19 例**、**新增测试文件 5 个**(150 → **155**),
+> 顶层 `func Test*` 814 → **833**;前端 **+13 例**(272 → **285**)。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `contextx/mode_source_test.go`(**新,5 例**) | **contextx 不得自带 mode 清单**(#297):**源码级扫描**(AST 解析,注释不算代码)—— `contextx/context.go` 里不得出现任何 mode 名字面量(`plan`/`execute`/`review`/`fix`/`test`/`submit`/`skill`);**逐 mode 的槽位归属**由 `model.ModeSpecFor` 决定(声明"不进上下文链"的 mode 必须什么都不写);**`skill` 伪 mode** 的产出仍进 `last_output`;**槽位解析**完全由 model 决定(合法 mode → `ContextSlot`;伪 mode → `last_output`;不认识的 mode → 不写);**10 个键名与 `model.ContextSlot*` 逐项一致**(键名是写进 `state_json` 的持久化契约) |
+| `app/application/version_dsl_test.go`(**新,3 例**) | **版本页读原文**(#299):返回的是**当初存下的原文**(`max_iter: 3` 而不是重新编码出来的 `3.0` —— 整数在 JSON 快照往返后变成 float64);**老库兼容**:`dsl_text` 为空 → 回退到从 `snapshot_json` 重编码(不报错、不返回空);**版本不存在** → `NOT_FOUND` |
+| `app/application/backup_skill_test.go`(**新,7 例**) | **备份的 `version` 必须校验**(#301):缺失 → `BAD_REQUEST`(此前任何 JSON 都被当备份,用户看到"恢复成功"却什么也没恢复);不认识(如 99)→ `BAD_REQUEST`(fail closed);`version: 1` → 正常路径(**向后兼容**:现有备份恒为 1);**`skill_configs` 补齐**:导出含该段(禁用的技能 `enabled=false`);**恢复后禁用状态还原**且落库;**本机不存在的技能**跳过并如实计数(与未知 Agent 同一口径);**老备份(没有 `skill_configs` 段)仍能恢复**且不改动本机的技能状态 |
+| `api/modes_test.go`(**新,3 例**) | **mode 列表的三个出口必须同源**(#298):`GET /api/modes` 逐项等于 `model.AllModes()`(端点里另写一份字面量清单 → 这里立刻变红);**服务器模式与桌面模式同一份**(REST vs `WorkflowService.Modes()`,约定 10);**前端兜底清单**(`Designer.tsx` 的 `FALLBACK_MODES`,跨语言扫描源文件)必须与 `model.AllModes()` **逐项一致** —— 兜底清单也出现在用户面前,漂移同样是缺陷 |
+| `template/dead_const_test.go`(**新,1 例**) | **`template` 包的 6 个死常量不得复活**(#300):`VarTask`/`VarPlan`/`VarGitDiff`/`VarReview`/`VarTestResult`/`VarIteration` 零引用(它们只是上下文槽位键名的第三份抄写)—— 看着像清单会诱导后来者照着它加常量,多出一份会漂移的来源。删掉后编译器不会报错(导出常量没人引用是合法的),所以用源码扫描锁住 |
+| `frontend/src/pages/designer.modes.test.tsx`(**新,8 例**) | **mode 下拉必须后端派生**(#298):`resolveModeList` —— 后端返回的清单优先,返回空/`null`/异常对象时用兜底(控件不留空);**下拉渲染**:属性面板的 mode 下拉里出现后端给的 `brand-new-mode`,且**不出现**前端兜底里的 `submit`(后端没给);**页面级**:Designer 挂载时真的调 `api.modes()`,点画布节点 → 属性面板 → 打开下拉 → 断言选项来自后端(jsdom 需补 `PointerEvent`/`ResizeObserver`/指针捕获三件套,否则 Radix 下拉静默打不开) |
+| `frontend/src/lib/api.test.ts`(**改,+2 例**) | **`modes()` 的双分支**(约定 10):桌面走 `wf.Modes()` 绑定、浏览器走 `GET /api/modes`;**绑定导出清单守卫**同步更新(`workflowservice` 多 `Modes` —— 与真实生成物逐项一致) |
+| `frontend/src/pages/Settings.test.tsx`(**改,+3 例**) | **备份文案与实际导出一致**(#301):写明备份含"技能启用状态"/`skill_configs`、写明"恢复时按版本号校验格式(不认识的会被拒)"、写明"老备份仍能恢复(只是没有技能状态)" |
+
+**红 → 绿证据(修前实测)**:
+
+| # | 旧代码上的实测输出 | 现在 |
+| --- | --- | --- |
+| #297 | `contextx/mode_source_test.go`:"contextx/context.go 里出现 mode 的字面量 \"plan\"…"(6 条) | 0 命中;槽位归属由 `model.ModeSpecFor` 决定 |
+| #298 | `api/modes_test.go`:"GET /api/modes" 404;`Designer.tsx` 下拉写死六项 | 端点 200 且逐项一致;下拉渲染后端清单 |
+| #299 | `VersionDSL` 返回 `max_iter: 3.0`(原文 `3`) | 返回 `max_iter: 3` |
+| #300 | `template/dead_const_test.go`:6 个常量"仍在本包声明" | 0 命中 |
+| #301 | "缺少 version 的备份必须报错"→ **不报错**;"导出缺少 skill_configs 段";恢复后 `log` 技能"又是启用状态" | 三条全绿 |
+| #305 | 改成别名后:`workflow/runtime/state_mask_test.go` 报 **8 条"状态键写法无法解析" + 6 条"登记与实现漂移"** | 保持字面量 + 两道跨包守卫,守卫全绿 |
+
+**本轮验证**:`gofmt -l` 干净(改过的文件)、`go vet` 干净、
+`go test -race -count=1 ./...` **21 个包全绿**、前端 `npm run lint` +
+`npx tsc --noEmit` + `npx vitest run` **285/285**、
+`./scripts/verify.sh` **9 步通过**(实测 **113s**)。
+
 ### 轮次 84:第二十轮(迭代 21 收口)—— mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决
 
 > 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 84"小节(#291-#296 全部关闭)。
@@ -2355,6 +2397,7 @@ await new Promise((r) => setTimeout(r, 0));   // ×2
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 85 | **第二十一轮(迭代 22 收口)**:跨文件动作落地(8 项)/ 守卫能力边界登记 | ✅ 已落地(工作区,待提交) | **#297-#304 共 8 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 85):**#297**(P1)`contextx` 自带 mode → 槽位映射表(与 `workflow/model.ModeSpec` 各演各的 → model 认了而 contextx 没认的 mode **产物静默丢弃**)→ 分派改由 `model.ModeSpecFor(mode).ContextSlot` 决定,`skill` 伪 mode 单列,`submit` 什么都不写,**新增 fail-closed 默认分支**(槽位不认识 → 显式报错,不再静默丢弃);**#298**(P1)mode 取值域没有对外出口(前端硬编码一份 → 后端加了 mode 用户选不到)→ `GET /api/modes` + `WorkflowService.Modes()` + 前端 `modes()` 双分支 + Designer 下拉改后端派生(加载中用 `FALLBACK_MODES` 兜底,控件不留空)+ **跨语言守卫**(前端兜底清单必须与 `model.AllModes()` 逐项一致);**#299**(P2)版本页显示的是重新编码的 YAML(整数 `3` → `3.0`,**内容差异不是排版差异**)→ 改读 `Repo.GetWorkflowVersionDSL` 原文,老库 `dsl_text` 为空 → 回退重编码;**#300**(P3)`template` 的 6 个零引用死常量(看着像清单 → 诱导后来者多抄一份)→ 删除 + 源码级守卫;**#301**(P2)备份 `version` **只写不读**(任何 JSON 都被当备份,"恢复成功"却什么也没恢复)→ 缺失/不识别 → `BAD_REQUEST`;备份**缺 `skill_configs`**(禁用的技能换机器后又可用)→ 导出补齐 + 恢复写回(按本机已有 Skill 过滤)+ 前端文案;**#302**(P3)前端 `types.ts` 的 `"PAUSED"` → 删;**#303**(P3)Wails 绑定过期 → 重新生成(先隔离副本实测:结构性差异只有 `cancelled: number` 一行);**#304**(P3)`api.ts` 的 `stats()` 类型缺 `cancelled` → 补。**另登记有意边界 #305**:运行期状态脱敏守卫的常量表只收**字符串字面量**常量 → 把 `contextx.StateKey*` 改成 `model.ContextSlot*` 的**别名会打掉那道守卫**(实测 8 条"无法解析" + 6 条"登记与实现漂移")→ 改用"字面量 + 两道跨包守卫"达成同一目的。**红→绿证据**:① contextx 源码扫描 6 条 mode 字面量 → 0 ② `/api/modes` 404 → 200 且逐项一致 ③ `VersionDSL` 返回 `max_iter: 3.0` → `3` ④ template 6 个常量 → 0 ⑤ 缺 `version` 的备份**不报错** → `BAD_REQUEST` ⑥ 导出无 `skill_configs` → 有且恢复后禁用状态还原。新增测试文件 **5 个 Go**(`contextx/mode_source_test.go` 5 / `app/application/version_dsl_test.go` 3 / `app/application/backup_skill_test.go` 7 / `api/modes_test.go` 3 / `template/dead_const_test.go` 1)+ 改 2 个既有前端文件(`api.test.ts` +2 / `Settings.test.tsx` +3)+ 新增前端测试文件 1 个(`designer.modes.test.tsx` 8);Go 测试文件 150 → **155**、顶层 `func Test*` 814 → **833**;前端 22 → **23** 文件 / 272 → **285** 用例;门禁 9 步通过(实测 **113s**) |
 | 84 | **第二十轮(迭代 21 收口)**:mode 取值域单一来源 / 取消收尾 / PAUSED 移除 / 统计分列 / 死列裁决 | ✅ 已落地(工作区,待提交) | **#291-#296 共 6 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 84):**#291**(P1)`mode` 取值域有**三份**清单(校验期只查必填不查取值 / 运行期不校验 / `ModeRequiresWrite` 对未知 mode 返回 false → **写权限检查被跳过**)→ 取值域收敛到 `workflow/model`(`AllModes`/`ModeSpecFor`/`IsValidMode`),校验期报 `INVALID_NODE`、运行期 fail closed(排在写权限检查**之后**,两道门都不绕),`ModeRequiresWrite(未知)=true`(fail closed,**有意**改掉旧断言);**#292** `compiler.KeyTask` 与 `contextx.StateKeyTask` 两份字面量 → compiler 消费 contextx 的定义 + 守卫测试;**#293** 统计把 FAILED 与 CANCELLED 混在一列 → 分列 + 成功率分母排除 CANCELLED + "各列之和 == 总数";**#294** 取消 WAITING_USER 后节点永远停在"等待中" → 非终态节点落 SKIPPED + `execution_nodes` 同步;**#295** `PAUSED` **从来不可达** → 状态机/运行期/持久层/前端徽章/事件常量整条移除,老库的遗留行**读出口归一为 CANCELLED**(不写库改数据);**#296** 8 个"只写不读"的列 → 逐列裁决(5 删 + 2 加读点 + 1 本就有读点),老库兼容靠**按表实际拥有的列拼 INSERT**(`persistence.configUpsert`,老库的 NOT NULL 无默认值列照常补齐)。**红→绿证据**:隔离副本实测旧代码下 ① 非法 mode `valid=true` ② 未知 mode 的写权限检查被跳过(节点跑成 SUCCESS)③ `ModeRequiresWrite("unknown")=false` ④ `failed` 列把 CANCELLED 也算进去 ⑤ 取消后节点停在 WAITING ⑥ 遗留 PAUSED 行原样读出 ⑦ 新库仍建着 5 个死列 ⑧ Dashboard 成功率 60%(应为 75%)。新增测试文件 **9 个 Go**(`workflow/validator/mode_domain_test.go` 3 / `workflow/runtime/mode_domain_test.go` 3 / `workflow/runtime/mode_contract_test.go` 3 / `workflow/runtime/cancel_skip_test.go` 2 / `workflow/model/execution_state_test.go` 1 / `workflow/compiler/taskkey_contract_test.go` 2 / `persistence/stats_test.go` 2 / `persistence/legacy_state_test.go` 3 / `persistence/dead_columns_test.go` 5)+ 改 4 个既有文件(`agent/mode_test.go` / `workflow/model/model_test.go` / `persistence/exec_state_guard_test.go` / `persistence/repo_cas_test.go`);前端 `Dashboard.test.tsx` +3 例 / `state-badge.test.tsx` +1 例;Go 测试文件 141 → **150**、顶层 `func Test*` 790 → **814**;前端 22 文件 / 268 → **272** 用例;门禁 9 步通过(实测 **112s**) |
 | 83 | **第十九轮(迭代 20 收口)**:空上下文可见 / 门禁第 6 步的断言维度 | ✅ 已落地(工作区,待提交) | **#280 关闭**:"上游什么都没产出"曾是**静默空上下文**(`contextx.Build` 总是把链键写进数据表 → 模板引擎按"键存在 = 可解析"判缺失 → `{{plan}}` 永远不被报成缺失 → 下游拿到空串、节点照常 SUCCESS、**零告警**)→ 改**上下文层报"空槽位"**(`contextx.BuildWithSlots` 产出"键存在但值为空"的链槽位清单;运行期把**被提示词引用到的**空槽位报成 `node.warning` / `reason="empty_context_slots"`),**可见但不阻断**;`template` 包的"键存在 = 可解析"口径**不动**(渲染层口径 ≠ 上下文层事实)。**#289 关闭**:门禁第 6 步只看"**有代码跑过**"→ 一个**零断言**的用例(`{ _ = 1 }`)真的执行、真的 pass → **9 步门禁全绿**(隔离副本实测 exit 0)→ 第 6 步加**第二个判据**:包里必须**真的有断言**(静态扫描;实测 `go vet -tests` **检测不出**零断言测试,断言数不在框架事件里);扫描**只限 `*_test.go`**且**先剥注释**(注释里的 `t.Errorf` 不是断言 —— 实测不剥注释会让只提注释的零断言包溜过去);自检 +4 条(23 → **27**)。**#290 新登记**:断言判据"按包 + 文本级"的粒度与实现 —— **有意边界,不修**(细到"每个用例"必然误报)。新增顶层用例 **+7 例**(`contextx/context_test.go` 4 / `workflow/runtime/context_chain_test.go` 3),**未新增测试文件**(141 → **141**),顶层 `func Test*` 782 → **789**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **113s**),新判据在真实仓库上**误报 0** |
 | 82 | **第十八轮(迭代 20)**:设置读失败可观测 / 内置 Agent 注册失败上抛 / Set 白名单化 | ✅ 已进主干(`3e4a5b3`) | #281-#283 共 **3 条**,**全部关闭**:**#281** `Settings.Info()` 吞掉 `git_working_dir` 的**读错误** → 静默回落到内存态目录,界面显示的不是库里那个,**用户一保存就把损坏行覆盖成内存值**(损坏事实消失)→ 改**三态分开**(读到 / `NOT_FOUND` 正常初始态 / 其它读失败)+ 记 ERROR + 响应新增 `git_working_dir_read_failed` 标记(`omitempty`,正常响应形状不变);启动路径同样留痕;**#282** `reloadAgents` 里 4 处 `_ = a.Agents.Register(...)` → 内置 Agent 注册失败**一行日志都没有**(此前不可达,但"不可达"不等于"永远不可达")→ 改 **ERROR 日志 + 上抛**(`NewApp` 启动即失败,零误伤风险);**#283** `SettingsService.Set(key, value)` **任意键写入**经 Wails IPC 暴露(`main.go:310` 的 `wails.NewService(app.Settings)` + 生成绑定 `settingsservice.ts:48`)→ 可绕过 `permMu` 写 `agent_policies`(并发保护失效)、绕过 `git_working_dir` 存在性与 `log_level` 校验 → 改**白名单三键** + **复用 `Update` 的同一套校验** + **值类型校验**(此前 `value any` 可把字符串 `"true"` 写进 `allow_script_nodes`),`agent_policies` **刻意排除**;`Update` 自己也改为复用 `Set`(设置写入的**唯一实现**)。新增测试文件 **3 个 Go**(`app/application/settings_read_failure_test.go` 6 例 / `app/application/agent_registration_test.go` 2 例 / `app/application/settings_set_whitelist_test.go` 8 例);新增专节"轮次 82"一节;Go 测试文件 138 → **141**,顶层 `func Test*` 766 → **782**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **118s**) |

@@ -8,6 +8,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查与版本信息 |
+| GET | `/api/modes` | agent 节点的**合法 mode 列表**(JSON 字符串数组,顺序即展示顺序)。唯一来源是 `workflow/model.AllModes()`(约定 13:同一份语义只有一处定义)—— 前端的设计器下拉据此渲染,**不再自带硬编码清单**(后端加了 mode 而前端没跟上 → 用户在下拉里选不到它;前端留着后端已删的 mode → 用户选了必然被校验期判非法)。桌面模式走 Wails 绑定 `WorkflowService.Modes()`,与本端点同一份数据(约定 10) |
 
 ## Workflows
 
@@ -22,7 +23,7 @@
 | POST | `/api/workflows/validate` | 校验(返回结构化 errors/warnings)。**未知顶层字段同样 400**;节点配置里的**未知键只报警告**(`UNKNOWN_NODE_CONFIG`),不阻断保存 |
 | GET | `/api/workflows/{id}/export` | 导出 YAML |
 | GET | `/api/workflows/{id}/versions` | 版本号列表(降序) |
-| GET | `/api/workflows/{id}/versions/{version}` | 指定版本的 DSL 快照。版本号只接受十进制数字,越界返回 400 |
+| GET | `/api/workflows/{id}/versions/{version}` | 指定版本的 DSL 文本。版本号只接受十进制数字,越界返回 400。**读的是当初存下的原文**(`workflow_versions.dsl_text`),不是从模型快照重新编码的结果 —— 快照里的整数在 JSON 往返后变成 float64,重新编码会把 `max_iter: 3` 显示成 `3.0`(**内容差异,不是排版差异**)。老库没有这一列的值时回退到重编码(轮次 85) |
 | POST | `/api/workflows/import` | 从 YAML 导入(body 为 YAML 文本;ID 冲突自动换新 ID)。body 上限 1MB,超限返回 **413**。**顶层未知键 → 400 `DSL_UNKNOWN_KEY`**;`permissions` 放错层级 → 400 `DSL_MISPLACED_KEY`;其余被丢弃的键在响应顶层以 `ignored_keys` 数组回报(见"契约变化") |
 
 ## Executions
@@ -70,8 +71,8 @@
 | --- | --- | --- |
 | GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关。**读不出来时多一个 `git_working_dir_read_failed: true`**(仅在读失败时出现):此刻 `git_working_dir` 是**内存态**(Git 服务当前目录),**不是库里的值** —— 消费方必须把它标出来,不能当"库里那个"展示或回存(回存即覆盖,损坏行就此消失) |
 | POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改)。**`log_level` 只接受 `debug`/`info`/`warn`/`error`**(大小写不敏感,落库归一为小写),非法值返回 400 —— 不再静默回落 info(界面显示的级别与实际生效的级别会不一致)。**`git_working_dir` 的"缺省"与"空串"是两种语义**:请求体里**没有该字段** = 保持原值不变;**显式传空串** = **清除**(落库空串 + 回到启动默认目录)。**先全量校验、后统一落库** —— 任一项非法则一项都不改 |
-| GET | `/api/backup` | 导出备份(工作流 + Agent 配置)。**含明文,范围是三类**:`agent_configs` 整份原样(`env` / `behavior` / `extra_args`)+ **工作流定义本体**(含工作流 `variables`)。约定 8 允许备份导出含明文(它是唯一例外),但**请按"整个文件都是敏感的"对待**。响应头 `Cache-Control: no-store`,避免明文 API Key 留在浏览器/代理的磁盘缓存里 |
-| POST | `/api/backup/restore` | 恢复备份。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝;**本机不存在的 Agent 也计入 `agent_configs_invalid` 且不落库**(此前计入"已恢复"是假成功:配置永远不会被应用)。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` / **`agent_configs_unknown_ids`** |
+| GET | `/api/backup` | 导出备份(工作流 + Agent 配置 + **技能启用状态**)。**含明文,范围是三类**:`agent_configs` 整份原样(`env` / `behavior` / `extra_args`)+ **工作流定义本体**(含工作流 `variables`)。约定 8 允许备份导出含明文(它是唯一例外),但**请按"整个文件都是敏感的"对待**。响应头 `Cache-Control: no-store`,避免明文 API Key 留在浏览器/代理的磁盘缓存里。`skill_configs` 段(id → enabled)是轮次 85 补上的:此前备份里根本没有它 → 换机器恢复后,此前**禁用**的技能又全部可用了 |
+| POST | `/api/backup/restore` | 恢复备份。**先校验 `version`**(轮次 85):缺失或不认识 → **400 `BAD_REQUEST`**(此前 `version` 只写不读,任何 JSON 都被当备份照单全收,用户看到"恢复成功"却什么也没恢复);`version: 1` 是现有备份的版本号 → 正常路径(向后兼容)。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝;**本机不存在的 Agent 也计入 `agent_configs_invalid` 且不落库**(此前计入"已恢复"是假成功:配置永远不会被应用)。**技能启用状态**按 `skill_configs` 段恢复(只对本机确实存在的 Skill 写回,其余跳过并计入 `skill_configs_unknown_ids`);**老备份没有这一段 → 不恢复技能状态、不报错**。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` / **`agent_configs_unknown_ids`** / `agent_configs_apply_failed_ids` / **`skill_configs_restored`** / **`skill_configs_unknown_ids`** |
 | GET | `/api/events` | **SSE** 实时事件流(UIEvent;连接即达响应头,15s keepalive) |
 | GET | `/api/events/all?type=&limit=` | 跨执行审计事件(支持类型前缀过滤) |
 | GET | `/api/stats` | 每工作流执行统计。**`failed` 与 `cancelled` 分列**(轮次 84):`failed` 只算 `FAILED`,`cancelled` 只算 `CANCELLED`;各列之和 == `total`(列的划分穷尽所有执行状态)。消费方算成功率时**分母要排除 `cancelled`** —— 被用户叫停的执行不是"没做成" |
@@ -599,6 +600,50 @@ SUCCESS(约定 14:该失败却成功)。
 
 **验证**:`workflow/runtime/retry_policy_test.go`、
 `workflow/validator/retry_config_test.go`。
+
+### 16. 备份的 `version` 校验与 `skill_configs` 段(轮次 85 / 第二十一轮变更)
+
+```
+备份 := {
+  version?: number,          // 必填:缺失或不认识 → 400 BAD_REQUEST
+  exported_at?: string,
+  workflows?: [...],
+  agent_configs?: { [agentID]: AgentConfig },
+  skill_configs?: { [skillID]: boolean },   // 可选:skillID → 是否启用
+}
+```
+
+| 变化 | 修前 | 修后(轮次 85) |
+| --- | --- | --- |
+| `version` | **只写不读**(导出恒为 1,恢复时从不看)→ 任何 JSON 都被当备份照单全收,用户看到"恢复成功"却什么也没恢复 | **恢复端校验**:缺失 → `400 BAD_REQUEST`;不认识(如未来的 2)→ `400 BAD_REQUEST`(fail closed:当前版本读不了新格式,硬读会静默丢字段) |
+| `version: 1` | — | **正常路径**(向后兼容:现有备份的值恒为 1) |
+| `skill_configs` | **不存在**(技能禁用状态在备份里彻底消失 → 换机器恢复后此前禁用的技能又全部可用,而禁用的技能在运行期会被拒绝调用) | 导出时带上**本机全部技能**的启用状态;恢复时**只对本机确实存在的 Skill 写回**,其余跳过并计入 `skill_configs_unknown_ids` |
+| 老备份(无 `skill_configs`) | — | **视为"不恢复技能状态"**:不报错、**不改动本机的技能状态** |
+
+**恢复响应新增两个字段**:`skill_configs_restored`(已写回的技能数)与
+`skill_configs_unknown_ids`(本机不存在的技能 ID 列表)。老备份恢复时
+`skill_configs_restored` 为 `0`。
+
+> 导出格式**版本号不变**(仍是 1):新增的 `skill_configs` 段是**可选**的,
+> 老版本读到它会忽略 —— 双向兼容。
+
+**验证**:`app/application/backup_skill_test.go`(7 例)。
+
+### 17. `GET /api/modes`:mode 取值域的对外出口(轮次 85 / 第二十一轮新增)
+
+```
+GET /api/modes  →  ["plan", "execute", "review", "fix", "test", "submit"]
+```
+
+- 唯一来源是 `workflow/model.AllModes()`(约定 13)—— 端点里**不另写**
+  一份字面量清单(`api/modes_test.go` 的守卫会立刻变红)。
+- 桌面模式走 Wails 绑定 `WorkflowService.Modes()`,与本端点**同一份数据**
+  (约定 10;`api/modes_test.go` 的跨模式用例锁住)。
+- 前端的设计器下拉据此渲染;加载中/失败时用**兜底清单**兜底(控件不留
+  空),兜底清单同样必须与 `model.AllModes()` 逐项一致(跨语言守卫)。
+
+**验证**:`api/modes_test.go`(3 例)、`frontend/src/lib/api.test.ts`(+2 例)、
+`frontend/src/pages/designer.modes.test.tsx`(8 例)。
 
 ## SSE 实时事件流(GET /api/events)
 

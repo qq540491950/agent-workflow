@@ -71,10 +71,17 @@ export interface Workflow {
   warnings?: ValidationError[];
 }
 
+// 执行状态(与后端 model.ExecutionState 一致)。
+//
+// **没有 "PAUSED"**:PAUSED 曾是执行状态,但**从来不可达** —— 没有任何代码
+// 路径会把执行迁移到它(状态机里没有这条边)。后端已把它整条移除,老库里
+// 遗留的行在**读出口**归一为 CANCELLED(不改库里的数据)。
+//
+// 前端此前还留着 "PAUSED":用户永远看不到这个状态(后端不会返回它),
+// 留着只会让人以为"还有一种暂停中的执行",并写出永远走不到的分支。
 export type ExecutionState =
   | "CREATED"
   | "RUNNING"
-  | "PAUSED"
   | "WAITING_USER"
   | "COMPLETED"
   | "FAILED"

@@ -33,16 +33,6 @@ type Engine struct {
 // NewEngine 创建模板引擎。
 func NewEngine() *Engine { return &Engine{} }
 
-// 支持的标准变量。
-const (
-	VarTask       = "task"
-	VarPlan       = "plan"
-	VarGitDiff    = "git_diff"
-	VarReview     = "review"
-	VarTestResult = "test_result"
-	VarIteration  = "iteration"
-)
-
 // Render 将 data 中的变量替换进模板。
 // 支持 {{task}} {{plan}} {{git_diff}} {{review}} {{test_result}}
 // {{iteration}} 以及 {{variable.xxx}} 形式。

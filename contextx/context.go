@@ -23,6 +23,23 @@ import (
 // 这些键**不是**条件变量(条件变量的唯一定义见
 // workflow/compiler/conditionenv.go:decision / status / output /
 // iteration / variables)—— 写进会话状态不影响路由(约定 #13 的同源精神)。
+//
+// **与 workflow/model.ContextSlot\* 的关系**:model 侧是同一组键的**领域
+// 定义**,本包是**上下文层**的定义;两者必须逐项一致(键名是写进
+// state_json 的持久化契约,漂移会让存量会话状态读不出来)。
+// 一致性由两处守卫锁住:
+//   - workflow/runtime/mode_contract_test.go(TestModelSlotKeysMatchContextx):
+//     跨包的逐项比对;
+//   - contextx/mode_source_test.go:本包内的逐项比对。
+//
+// **为什么这里不直接写 `= model.ContextSlotPlan`(别名)**:运行期的
+// 状态脱敏守卫(workflow/runtime/state_mask_test.go 的
+// TestStateWritesAreClassified)会**源码扫描**所有状态写入点,把键名
+// 解析成字符串再逐个登记分类;它的常量表只收**字符串字面量**常量
+// (constStringValues 要求 *ast.BasicLit),别名(选择器表达式)解析
+// 不出来 —— 守卫会报"状态键写法无法解析"并连带判定"登记与实现漂移"。
+// 那份守卫在 workflow/** 下(本轮只读),因此本包的常量保持字面量,
+// 由上面的守卫保证与 model 逐项一致(值一致 = 契约一致)。
 const (
 	// StateKeyTask 任务文本(引擎种进初始状态)。
 	StateKeyTask = "task"
@@ -163,15 +180,24 @@ func (m *Manager) BuildWithSlots(mode string, ec *ExecutionContext, nodeID strin
 		"execution_id":     ec.ExecutionID,
 	}
 
-	switch mode {
-	case "review":
+	// mode 的**可见范围**:不同职责的节点拿到不同的槽位。
+	//
+	// mode 的取值域与语义只有一份(workflow/model.ModeSpec):这里用
+	// model.Mode* 常量做分派,不再自带一份 mode 字面量清单(约定 13)。
+	// 不认识的 mode(如 skill 伪 mode)拿基础表 —— 不多给,也不少给。
+	spec, known := model.ModeSpecFor(mode)
+	if !known {
+		spec = model.ModeSpec{Name: mode}
+	}
+	switch spec.Name {
+	case model.ModeReview:
 		// Review 只需要:任务、方案、diff、测试结果、上一次 Review、迭代数
 		data[StateKeyRelevantFiles] = state[StateKeyRelevantFiles]
-	case "execute", "fix":
+	case model.ModeExecute, model.ModeFix:
 		// 执行类节点:任务、方案、上一次 Review 的问题、人工补充指令
 		data[StateKeyIssues] = state[StateKeyIssues]
 		data[StateKeyUserInstruction] = state[StateKeyUserInstruction]
-	case "plan":
+	case model.ModePlan:
 		// Plan 只需要任务本身与变量
 		delete(data, StateKeyGitDiff)
 		delete(data, StateKeyReview)
@@ -222,17 +248,32 @@ func isEmptySlotValue(v any) bool {
 // 现在直接写 StateWriter(运行期传进来的就是 ADK 会话状态访问器)。
 // 写失败返回 error,调用方必须让节点失败:写不进 = 上下文链断了,下游会
 // 拿到空上下文照常执行(约定 #14:该失败却成功等同 P0)。
+//
+// **写进哪个槽位由 model.ModeSpec 决定**(约定 13:mode 的语义只有一份):
+// 本包不再自带 mode → 槽位的映射表 —— 此前是 switch 的四组 case,
+// 与 model 的 ModeSpec 各演各的:model 认了某个 mode 而本包没认,
+// 产物就被静默丢掉(用户看不出任何异常)。
 func (m *Manager) SaveNodeOutput(mode string, nodeID string, result map[string]any, w StateWriter) error {
 	if w == nil {
 		return nil
 	}
-	switch mode {
-	case "plan":
+	slot, ok := outputSlot(mode)
+	if !ok || slot == "" {
+		// 该 mode 的产出**不进**上下文链(如 submit:ModeSpec.ContextSlot
+		// 为空),或 mode 根本不认识(fail closed:宁可不写,也不写错槽位)。
+		return nil
+	}
+	// 分派按**槽位**走(槽位来自 model.ModeSpecFor):每个槽位一个分支,
+	// 键名用本包的常量(运行期状态脱敏守卫按源码扫描这些写入点,
+	// 见 StateKey* 的说明)。
+	switch slot {
+	case model.ContextSlotPlan:
 		// 方案正文优先取 output(完整产物),空则退回 summary(结论摘要)。
 		if err := w.Set(StateKeyPlan, pickText(result, "output", "summary")); err != nil {
 			return fmt.Errorf("写入会话状态 %q 失败: %w", StateKeyPlan, err)
 		}
-	case "review":
+	case model.ContextSlotReview:
+		// 评审结论:summary 优先(结论摘要),空则退回 output。
 		if err := w.Set(StateKeyReview, pickText(result, "summary", "output")); err != nil {
 			return fmt.Errorf("写入会话状态 %q 失败: %w", StateKeyReview, err)
 		}
@@ -242,17 +283,45 @@ func (m *Manager) SaveNodeOutput(mode string, nodeID string, result map[string]a
 				return fmt.Errorf("写入会话状态 %q 失败: %w", StateKeyIssues, err)
 			}
 		}
-	case "execute", "fix", "skill":
+	case model.ContextSlotLastOutput:
 		// 最近一次节点输出:执行类节点与技能节点的产物。
 		if err := w.Set(StateKeyLastOutput, pickText(result, "summary", "output")); err != nil {
 			return fmt.Errorf("写入会话状态 %q 失败: %w", StateKeyLastOutput, err)
 		}
-	case "test":
+	case model.ContextSlotTestResult:
 		if err := w.Set(StateKeyTestResult, pickText(result, "output", "summary")); err != nil {
 			return fmt.Errorf("写入会话状态 %q 失败: %w", StateKeyTestResult, err)
 		}
+	default:
+		// 未知槽位(fail closed):model 加了新槽位而本包还没认 → **显式失败**,
+		// 绝不静默丢弃产物(约定 14:该失败却成功等同 P0)。此前这里是
+		// "匹配不到就什么都不写",模型侧新增一个槽位就会让该 mode 的
+		// 产出**无声消失**,下游拿到空上下文照常执行。
+		return fmt.Errorf("未知的上下文槽位 %q(mode=%q):model.ContextSlot* 新增了槽位,contextx 需要同步处理",
+			slot, mode)
 	}
 	return nil
+}
+
+// outputSlot 返回该 mode 的产出应写进哪个上下文槽位。
+//
+// 唯一来源是 workflow/model.ModeSpec(约定 13:同一份 mode 语义):
+//   - 合法的 agent mode → spec.ContextSlot(空串 = 不进上下文链);
+//   - 伪 mode(skill 节点类型)→ last_output;
+//   - 不认识的 mode → 不写(fail closed)。
+//
+// 伪 mode 说明:skill 是**节点类型**(model.NodeTypeSkill)而不是 agent
+// 节点的 mode,不在 model.AllModes() 的取值域里 —— 但 skill 节点的产物
+// 仍要进上下文链(写进 last_output),所以这里单列,不能因为"不在取值域
+// 里"就把它的产物丢掉(第 19 轮修复过这个洞)。
+func outputSlot(mode string) (string, bool) {
+	if spec, ok := model.ModeSpecFor(mode); ok {
+		return spec.ContextSlot, true
+	}
+	if mode == string(model.NodeTypeSkill) {
+		return model.ContextSlotLastOutput, true
+	}
+	return "", false
 }
 
 // pickText 按给定顺序取第一个**非空**文本值。

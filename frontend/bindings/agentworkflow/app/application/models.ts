@@ -53,6 +53,22 @@ export interface SettingsInfo {
      * AllowScriptNodes 放行 script 节点(任意本地命令执行),默认 false。
      */
     "allow_script_nodes": boolean;
+
+    /**
+     * GitWorkingDirReadFailed 标记 git_working_dir 这一行**读不出来**
+     * (行内容损坏 / DB 读失败)。
+     * 
+     * 为 true 时,上面的 GitWorkingDir 是**内存态**(Git 服务当前目录),
+     * 不是库里的值 —— 消费方必须把它标出来,不能当"库里那个"展示或回存。
+     * 
+     * 为什么必须有这个标记:此前读错误被 `_ =` 吞掉,静默回落到内存态
+     * → 界面显示的不是库里那个 → 用户一保存就把损坏行覆盖成内存值,
+     * 损坏事实就此消失(约定 14:该失败却成功)。
+     * 
+     * 用 omitempty:正常情况(false)下响应体形状与此前完全一致,
+     * 不影响既有消费方。
+     */
+    "git_working_dir_read_failed"?: boolean;
 }
 
 /**

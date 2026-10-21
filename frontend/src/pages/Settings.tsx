@@ -248,10 +248,16 @@ export default function Settings() {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              备份含全部工作流与 Agent 配置。<b className="text-foreground">
+              备份含三段:全部工作流、Agent 配置、<b className="text-foreground">
+                技能启用状态</b>
+              (skill_configs —— 此前禁用的技能在换机器后会又变回可用)。<b className="text-foreground">
                 明文范围有三类</b>
               :agent_configs 整份原样(env / behavior / extra_args)+
               工作流定义本体(含工作流 variables)。请按"整个文件都是敏感的"对待,妥善保管。
+            </p>
+            <p className="text-xs text-muted-foreground">
+              恢复时按备份里的版本号校验格式:缺版本号或版本不认识的会被拒绝(不会"假装恢复成功")。
+              早于该版本的备份仍能恢复 —— 只是里面没有技能启用状态,恢复后技能开关保持本机现状。
             </p>
             <div className="flex gap-2">
               <Button variant="outline" onClick={exportBackup} disabled={backupBusy}>

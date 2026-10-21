@@ -15,10 +15,14 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
- * Update 更新设置:git_working_dir / log_level(日志级别即时生效)/
- * allow_script_nodes(script 节点放行开关,默认关闭)。
- * allowScriptNodes 为 nil 表示不修改,保持既有值。
  * ExportBackup 导出全部工作流与 Agent 配置(备份用;含明文敏感环境变量,请妥善保管)。
+ * 
+ * 备份含三段:workflows(工作流定义)、agent_configs(Agent 配置)、
+ * skill_configs(技能启用状态)。
+ * 
+ * skill_configs 是本轮补上的:此前备份里**根本没有**这一段 ——
+ * 技能的启用/禁用状态在换机器恢复后彻底消失,此前禁用的技能又全部
+ * 可用了(禁用的技能在运行期会被拒绝调用)。
  */
 export function ExportBackup(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(972086262);
@@ -30,6 +34,12 @@ export function Get(key: string, out: any): $CancellablePromise<void> {
 
 /**
  * Info 返回当前设置。
+ * 
+ * git_working_dir 的读失败必须与"从未设置过"分开处理:
+ *   - 从未设置过(NOT_FOUND):正常初始状态 → 显示当前生效目录;
+ *   - 读失败(行损坏 / DB 故障):**不能**拿内存态冒充库值 → 明确标注
+ *     (GitWorkingDirReadFailed)并记 ERROR,否则用户一保存就把损坏行
+ *     覆盖成内存值,损坏事实消失(约定 14)。
  */
 export function Info(): $CancellablePromise<$models.SettingsInfo | null> {
     return $Call.ByID(3803811458);
@@ -37,14 +47,33 @@ export function Info(): $CancellablePromise<$models.SettingsInfo | null> {
 
 /**
  * RestoreBackup 恢复备份:已存在同 ID 工作流跳过(避免覆盖用户修改),
- * Agent 配置覆盖写入。
+ * Agent 配置覆盖写入,技能启用状态写回。
  * 输入统一经 JSON 归一:API/前端路径是 []any + map[string]any,
  * 进程内路径(ExportBackup 直出)是 []model.Workflow + map[string]json.RawMessage。
+ * 
+ * **version 必须校验**(此前只写不读):缺失/不认识 → 显式报错。
+ * 老备份的 version 恒为 1 → 识别为 v1 走正常路径(向后兼容)。
  */
 export function RestoreBackup(backup: { [_ in string]?: any } | null): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(283548462, backup);
 }
 
+/**
+ * Set 写入设置。
+ * 
+ * **本方法经 main.go 的 wails.NewService(app.Settings) 暴露在 Wails IPC 上**
+ * (前端绑定 frontend/bindings/agentworkflow/app/application/settingsservice.ts
+ * 里的 Set(key, value) 就是它)—— 它是对外入口,不能成为绕过校验的后门。
+ * 
+ * 此前是"任意键写入设置表",于是:
+ *   - 直写 agent_policies → 绕过 AgentService.permMu 的串行化,并发授权
+ *     丢更新(并发保护失效);
+ *   - 直写 git_working_dir / log_level → 绕过 Update 里的存在性校验与
+ *     日志级别校验(迭代 20 刚加的校验被绕开)。
+ * 
+ * 现在:只接受**白名单键**,并复用 Update 的同一套校验;写入后**立即生效**
+ * (内存态与库值一致,不会出现"提示已保存、实际没生效")。
+ */
 export function Set(key: string, value: any): $CancellablePromise<void> {
     return $Call.ByID(833733018, key, value);
 }

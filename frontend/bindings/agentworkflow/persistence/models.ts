@@ -3,6 +3,12 @@
 
 /**
  * WorkflowStats 是某工作流的执行统计。
+ * 
+ * failed 与 cancelled **分列**:此前 failed 用
+ * `state IN ('FAILED','CANCELLED')` —— "跑失败"与"被用户取消"混在一列,
+ * 于是成功率(completed/total)把用户主动取消的执行算成"没成功",
+ * 点一次取消就掉一截成功率;"这次到底是失败还是被取消"在统计页上
+ * 也无法回答。
  */
 export interface WorkflowStats {
     "workflow_id": string;
@@ -10,6 +16,11 @@ export interface WorkflowStats {
     "total": number;
     "completed": number;
     "failed": number;
+
+    /**
+     * Cancelled 被取消的执行数(用户主动取消)。
+     */
+    "cancelled": number;
     "waiting": number;
     "running": number;
 }

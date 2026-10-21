@@ -25,6 +25,7 @@ const wfVersions = vi.fn();
 const wfVersionDSL = vi.fn();
 const wfExportYAML = vi.fn();
 const wfValidate = vi.fn();
+const wfModes = vi.fn();
 const exAllEvents = vi.fn();
 const exRun = vi.fn();
 const exList = vi.fn();
@@ -62,6 +63,7 @@ vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () =>
       "Get",
       "ImportYAML",
       "List",
+      "Modes",
       "Save",
       "SavePayload",
       "SetEnabled",
@@ -81,6 +83,7 @@ vi.mock("@bindings/agentworkflow/app/application/workflowservice.js", () =>
       VersionDSL: (...a: unknown[]) => wfVersionDSL(...a),
       ExportYAML: (...a: unknown[]) => wfExportYAML(...a),
       Validate: (...a: unknown[]) => wfValidate(...a),
+      Modes: (...a: unknown[]) => wfModes(...a),
     },
   ),
 );
@@ -225,6 +228,7 @@ beforeEach(() => {
   wfVersionDSL.mockReset();
   wfExportYAML.mockReset();
   wfValidate.mockReset();
+  wfModes.mockReset();
   exAllEvents.mockReset();
   exRun.mockReset();
   exList.mockReset();
@@ -315,6 +319,22 @@ describe("web 模式 HTTP 调用", () => {
     );
     const { api } = await freshApi();
     await expect(api.getWorkflow("x")).rejects.toThrow("NOT_FOUND");
+  });
+
+  // 服务器模式的 mode 清单:GET /api/modes(与桌面分支同一份数据,约定 10)。
+  it("mode 清单:web 分支走 /api/modes", async () => {
+    callByID.mockRejectedValue(new Error("no ipc"));
+    const data = ["plan", "execute", "review", "fix", "test", "submit"];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => JSON.stringify(data),
+      }),
+    );
+    const { api } = await freshApi();
+    await expect(api.modes()).resolves.toEqual(data);
+    expect(fetch).toHaveBeenCalledWith("/api/modes", expect.anything());
   });
 
   it("非 JSON 响应(如 SPA fallback HTML)回退 HTTP 状态码消息", async () => {
@@ -431,6 +451,19 @@ describe("desktop 模式读接口契约(迭代 14B)", () => {
     const wf = { id: "wf-1", name: "n" } as unknown as Workflow;
     await api.validateWorkflow(wf);
     expect(wfValidate).toHaveBeenCalledWith(wf);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // mode 清单必须**后端派生**(约定 13):前端自己硬编码一份清单时,
+  // 后端加了 mode 而前端没跟上 → 用户在下拉里选不到新 mode;
+  // 前端留着后端已删的 mode → 用户选了必然被校验期判非法。
+  //
+  // 桌面分支走 Wails 绑定,服务器分支走 REST —— 两条都要有(约定 10)。
+  it("mode 清单:桌面分支走 wf.Modes()", async () => {
+    wfModes.mockResolvedValue(["plan", "execute", "review"]);
+    const { api, fetchMock } = await desktopApi();
+    await expect(api.modes()).resolves.toEqual(["plan", "execute", "review"]);
+    expect(wfModes).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -1316,6 +1349,7 @@ describe("绑定形状守卫", () => {
         "Get",
         "ImportYAML",
         "List",
+        "Modes",
         "Save",
         "SavePayload",
         "SetEnabled",

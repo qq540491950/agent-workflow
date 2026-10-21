@@ -1004,8 +1004,26 @@ func (s *WorkflowService) Validate(wf *model.Workflow) *validator.Result {
 	return s.validateWorkflow(wf)
 }
 
-// VersionDSL 返回指定版本的 DSL 文本(从版本快照导出)。
+// VersionDSL 返回指定版本的 DSL 文本。
+//
+// 读的是版本快照里存下的**原文**(workflow_versions.dsl_text),
+// 不是拿模型快照重新编码一遍 —— 两者**不等价**:快照存的是模型
+// (JSON),模型里的数字在 JSON 往返后变成 float64,再编码成 YAML 就成了
+// `3.0`。用户看到的是"我的变量 max_iter 从 3 变成了 3.0",而工作流
+// 一个字节都没改 —— 这不是排版差异,是内容差异(约定 14:显示与事实
+// 不一致等同"该失败却成功")。
+//
+// **向后兼容**:老库(本轮之前建的)可能没有这一列的值(为空)→ 回退到
+// 从 snapshot_json 重新编码,保证老版本仍能打开(只是回到旧的显示口径)。
 func (s *WorkflowService) VersionDSL(id string, version int) (string, error) {
+	text, err := s.app.Repo.GetWorkflowVersionDSL(id, version)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(text) != "" {
+		return text, nil
+	}
+	// 回退:老库没有原文 → 从模型快照重编码(旧口径)。
 	wf, err := s.app.Repo.GetWorkflowVersion(id, version)
 	if err != nil {
 		return "", err
@@ -1015,6 +1033,19 @@ func (s *WorkflowService) VersionDSL(id string, version int) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// Modes 返回 agent 节点的合法 mode 列表(前端下拉的唯一来源)。
+//
+// 唯一来源是 workflow/model.AllModes(约定 13:同一份语义只有一处定义):
+// 前端此前自己硬编码了一份 mode 清单 —— 后端加了 mode 而前端没跟上,
+// 用户在下拉里**选不到**新 mode(运行期却认);反过来前端还留着后端已删的
+// mode,用户选了必然失败(校验期直接判非法)。
+//
+// 桌面模式经 Wails 绑定暴露(WorkflowService 已注册),服务器模式经
+// GET /api/modes —— 两种模式同一份数据(约定 10)。
+func (s *WorkflowService) Modes() []string {
+	return model.AllModes()
 }
 
 // ExportYAML 导出 DSL。
@@ -1831,7 +1862,24 @@ func (s *SettingsService) Info() *SettingsInfo {
 // Update 更新设置:git_working_dir / log_level(日志级别即时生效)/
 // allow_script_nodes(script 节点放行开关,默认关闭)。
 // allowScriptNodes 为 nil 表示不修改,保持既有值。
+// backupVersion 是当前备份格式的版本号。
+//
+// 恢复端据此判断"这份备份是不是我能读的格式"(fail closed):缺失或
+// 不认识 → 显式报错,而不是硬读成老格式 —— 那会静默丢掉新格式里的
+// 数据,用户却看到"恢复成功"(约定 14:该失败却成功等同 P0)。
+//
+// 历史上这个字段**只写不读**(导出时写了,恢复时从头到尾没看过):
+// 所以现有备份里的值恒为 1 —— 识别为 v1 走正常路径即可(向后兼容)。
+const backupVersion = 1
+
 // ExportBackup 导出全部工作流与 Agent 配置(备份用;含明文敏感环境变量,请妥善保管)。
+//
+// 备份含三段:workflows(工作流定义)、agent_configs(Agent 配置)、
+// skill_configs(技能启用状态)。
+//
+// skill_configs 是本轮补上的:此前备份里**根本没有**这一段 ——
+// 技能的启用/禁用状态在换机器恢复后彻底消失,此前禁用的技能又全部
+// 可用了(禁用的技能在运行期会被拒绝调用)。
 func (s *SettingsService) ExportBackup() (map[string]any, error) {
 	wfs, err := s.app.Repo.ListWorkflows()
 	if err != nil {
@@ -1846,29 +1894,84 @@ func (s *SettingsService) ExportBackup() (map[string]any, error) {
 		// 环境变量保留明文(备份用途),其余数据同样原样导出
 		cfgMap[id] = raw
 	}
+	skillCfgs, err := s.skillConfigs()
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"exported_at":   time.Now().Format(time.RFC3339),
-		"version":       1,
+		"version":       backupVersion,
 		"workflows":     wfs,
 		"agent_configs": cfgMap,
+		"skill_configs": skillCfgs,
 	}, nil
 }
 
+// skillConfigs 返回本机全部技能的启用状态(id → enabled)。
+//
+// 数据来源:库里的禁用集合(ListDisabledSkills)+ 本机注册的技能
+// (skill.Registry)。库里的行只覆盖"显式设置过"的技能,没设置过的
+// 默认启用 —— 所以"注册表 - 禁用集合"才是完整状态(否则导出会漏掉
+// 那些从来没动过的技能,恢复端也就无从知道它们是启用的)。
+func (s *SettingsService) skillConfigs() (map[string]bool, error) {
+	disabled, err := s.app.Repo.ListDisabledSkills()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, sk := range s.app.Skills.List() {
+		out[sk.ID()] = !disabled[sk.ID()]
+	}
+	return out, nil
+}
+
+// checkBackupVersion 校验备份的格式版本(fail closed)。
+//
+// 缺失 → 报错:一份没有版本号的 JSON 无法确认是不是备份(此前任何 JSON
+// 都被当备份处理,用户看到"恢复成功"却什么也没恢复)。
+//
+// 不认识(如未来的 2)→ 报错:当前版本读不了新格式,硬读会静默丢字段。
+func checkBackupVersion(raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			"备份缺少 version 字段:无法确认格式版本(请用当前版本导出的备份)")
+	}
+	var v float64
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("备份的 version 字段非法(应为数字 %d): %s", backupVersion, string(raw)))
+	}
+	if v != backupVersion {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("备份版本 %v 不受支持(当前支持 %d)", v, backupVersion))
+	}
+	return nil
+}
+
 // RestoreBackup 恢复备份:已存在同 ID 工作流跳过(避免覆盖用户修改),
-// Agent 配置覆盖写入。
+// Agent 配置覆盖写入,技能启用状态写回。
 // 输入统一经 JSON 归一:API/前端路径是 []any + map[string]any,
 // 进程内路径(ExportBackup 直出)是 []model.Workflow + map[string]json.RawMessage。
+//
+// **version 必须校验**(此前只写不读):缺失/不认识 → 显式报错。
+// 老备份的 version 恒为 1 → 识别为 v1 走正常路径(向后兼容)。
 func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, error) {
 	b, err := json.Marshal(backup)
 	if err != nil {
 		return nil, fmt.Errorf("备份格式无效: %w", err)
 	}
 	var norm struct {
+		Version      json.RawMessage            `json:"version"`
 		Workflows    []json.RawMessage          `json:"workflows"`
 		AgentConfigs map[string]json.RawMessage `json:"agent_configs"`
+		SkillConfigs map[string]bool            `json:"skill_configs"`
 	}
 	if err := json.Unmarshal(b, &norm); err != nil {
 		return nil, fmt.Errorf("备份格式无效: %w", err)
+	}
+	// 版本校验放在最前面:格式都不认识时,后面的"恢复 N 个"全是假成功。
+	if err := checkBackupVersion(norm.Version); err != nil {
+		return nil, err
 	}
 
 	restoredWf, skipped, invalid := 0, 0, 0
@@ -1938,6 +2041,28 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 		}
 		restoredCfg++
 	}
+	// 技能启用状态:备份里没有这一段时(老备份)整段跳过 —— 不报错,
+	// 也不改动本机的技能状态(向后兼容:老备份不该改变任何东西)。
+	restoredSkills := 0
+	unknownSkillIDs := []string{}
+	skillIDs := make([]string, 0, len(norm.SkillConfigs))
+	for id := range norm.SkillConfigs {
+		skillIDs = append(skillIDs, id)
+	}
+	sort.Strings(skillIDs) // 顺序稳定 → 报错/计数可复现
+	for _, id := range skillIDs {
+		enabled := norm.SkillConfigs[id]
+		// 本机没有这个技能:状态无处可落(也不该落一行永远不会被读的数据)
+		// → 跳过并如实计数(与未知 Agent 同一口径)。
+		if _, err := s.app.Skills.Get(id); err != nil {
+			unknownSkillIDs = append(unknownSkillIDs, id)
+			continue
+		}
+		if err := s.app.SkillSvc.SetEnabled(id, enabled); err != nil {
+			return nil, err
+		}
+		restoredSkills++
+	}
 	return map[string]any{
 		"workflows_restored":     restoredWf,
 		"workflows_skipped":      skipped,
@@ -1949,6 +2074,10 @@ func (s *SettingsService) RestoreBackup(backup map[string]any) (map[string]any, 
 		"agent_configs_unknown_ids": unknownCfgIDs,
 		// 已落库但运行时应用失败(不算已恢复;下次启动会重试应用)
 		"agent_configs_apply_failed_ids": applyFailedIDs,
+		// 技能启用状态(老备份没有这一段 → 计数为 0,状态不变)
+		"skill_configs_restored": restoredSkills,
+		// 本机不存在的技能(状态无处可落,未写入)
+		"skill_configs_unknown_ids": unknownSkillIDs,
 	}, nil
 }
 

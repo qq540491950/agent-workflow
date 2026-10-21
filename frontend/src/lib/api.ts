@@ -716,12 +716,37 @@ export const api = {
   },
 
   async stats(): Promise<
-    { workflow_id: string; name: string; total: number; completed: number; failed: number; waiting: number; running: number }[]
+    {
+      workflow_id: string;
+      name: string;
+      total: number;
+      completed: number;
+      failed: number;
+      /** 被用户取消的执行数(与 failed 分列,第二十轮拆分) */
+      cancelled: number;
+      waiting: number;
+      running: number;
+    }[]
   > {
     if ((await detectMode()) === "desktop") {
       return nn(await (await wailsBindings()).ex.Stats());
     }
     return http("/api/stats");
+  },
+  /**
+   * agent 节点的合法 mode 列表(设计器的 mode 下拉用)。
+   *
+   * 唯一来源是后端(model.AllModes):前端此前自己硬编码了一份清单 ——
+   * 后端加了 mode 而前端没跟上,用户在下拉里**选不到**新 mode;前端留着
+   * 后端已删的 mode,用户选了必然被校验期判非法(约定 13)。
+   *
+   * 两种模式同源(约定 10):桌面走 Wails 绑定,浏览器走 HTTP。
+   */
+  async modes(): Promise<string[]> {
+    if ((await detectMode()) === "desktop") {
+      return nn(await (await wailsBindings()).wf.Modes());
+    }
+    return http("/api/modes");
   },
   async copyYAML(id: string): Promise<string> {
     return this.exportYAML(id);

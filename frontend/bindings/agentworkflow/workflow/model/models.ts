@@ -79,11 +79,24 @@ export enum ExecutionState {
 
     ExecutionCreated = "CREATED",
     ExecutionRunning = "RUNNING",
-    ExecutionPaused = "PAUSED",
     ExecutionWaitingUser = "WAITING_USER",
     ExecutionCompleted = "COMPLETED",
     ExecutionFailed = "FAILED",
     ExecutionCancelled = "CANCELLED",
+
+    /**
+     * legacyPausedState 是**历史遗留**的执行状态字面量。
+     * 
+     * PAUSED 曾是执行状态(状态机里有分支、运行期 Resume/Cancel 接受它、
+     * 崩溃恢复把它当"可恢复"、前端有专属徽章),但**从来不可达**:没有任何
+     * 代码路径会把执行迁移到它。它已从状态机里移除,老库里仍可能留有
+     * state='PAUSED' 的行 —— 读出口归一为 CANCELLED
+     * (见 persistence.NormalizeExecutionState)。
+     * 
+     * 这里保留字面量(而不是常量):它只用于**识别**历史数据,不是可用的
+     * 状态 —— 任何"迁移到 PAUSED"的代码都该被评审挡下。
+     */
+    legacyPausedState = "PAUSED",
 };
 
 /**

@@ -37,13 +37,26 @@ export interface AgentConfig {
     "env": { [_ in string]?: string } | null;
 
     /**
-     * DefaultWorkingDir 默认工作目录(节点未指定时使用)。
+     * DefaultWorkingDir 是**死设置**:运行期从不读取它。
+     * 
+     * claude.Config / pi.Config 都没有该字段,应用层也不传 —— 节点级
+     * config.working_dir 为空时回退到全局 Git 工作目录
+     * (workflow/runtime/executor.go 的回退链)。
+     * 
+     * 保留字段只为兼容存量配置与 API 契约(删掉会让存量 Agent 配置
+     * 解析失败);新值一律被拒绝(app/application:AgentService.UpdateConfig),
+     * 避免"存下了、提示已保存、实际没生效"(约定 14)。
      */
     "default_working_dir": string;
 
     /**
      * Behavior 仅用于 Mock Agent 的演示脚本:
      * {"review": {"decisions": ["REJECTED","APPROVED"], "summary_template": "..."}}
+     * 
+     * 注意:它是**自由结构**(map[string]any,没有固定 schema),前端给的是
+     * 一个自由 JSON 输入框(frontend/src/pages/Agents.tsx),用户可以往里
+     * 放任何东西 —— 包括 api_key / token 这类凭据。所以它必须纳入掩码
+     * 面(见 Masked)。
      */
     "behavior"?: { [_ in string]?: any } | null;
 }
