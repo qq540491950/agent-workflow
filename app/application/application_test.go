@@ -540,8 +540,14 @@ edges: []
 // 现必须上抛,且不改动内存态。
 func TestSettingsUpdatePropagatesPersistError(t *testing.T) {
 	a := newTestApp(t)
-	// 先造一个可观测的旧值
-	if err := a.Settings.Set("git_working_dir", "/tmp/before"); err != nil {
+	// 先造一个可观测的旧值。
+	//
+	// 迭代 19 起,Set 与 Update 共用同一套校验:git_working_dir 必须**存在**
+	// 且是目录(此前 Set 是绕过校验的后门)。因此这里用真实存在的目录,
+	// 而不是 "/tmp/before"(该路径不存在,会被校验挡下,用例就永远走不到
+	// "落库失败"这一步 —— 断言一字未改,只是让夹具符合新契约)。
+	beforeDir := t.TempDir()
+	if err := a.Settings.Set("git_working_dir", beforeDir); err != nil {
 		t.Fatal(err)
 	}
 	before := a.GitSvc.WorkingDir()
@@ -549,7 +555,9 @@ func TestSettingsUpdatePropagatesPersistError(t *testing.T) {
 	levelBefore := a.LogLevelValue()
 	_ = a.Repo.Close() // 之后所有写入都会失败
 
-	if _, err := a.Settings.Update("/tmp/after", "", nil); err == nil {
+	// 目标目录必须真实存在,才能走到"落库失败"这一步(校验先于落库)。
+	afterDir := t.TempDir()
+	if _, err := a.Settings.Update(afterDir, "", nil); err == nil {
 		t.Error("git_working_dir 持久化失败应上抛")
 	}
 	if a.GitSvc.WorkingDir() != before {

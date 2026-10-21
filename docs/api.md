@@ -48,9 +48,9 @@
 | GET | `/api/agents` | Agent 注册表(含权限策略与已配置模型) |
 | POST | `/api/agents/{id}/test` | 可用性测试(CLI 探测) |
 | GET | `/api/agents/{id}/config` | 读取运行配置(env 值以 `***` 掩码;**`extra_args` 里的值同样被掩码**;**`behavior` 字段也已纳入掩码**,走键名 + 值形态规则,#255 已关闭) |
-| PUT | `/api/agents/{id}/config` | 保存配置并热重建适配器(env `***`=保留,空=删除) |
+| PUT | `/api/agents/{id}/config` | 保存配置并热重建适配器。**env 的第四态契约**:**缺省(字段不存在)= 不修改**(保留库里已存的环境变量)/ **`{}` = 显式清空全部** / **`{k:v}` = 整表替换**(逐键按约定 5 合并:`***`=保留原值、空串=删除该键、库里没有的 `***` 丢弃;**表里没有的键会被删除**)。env **内部**仍是约定 5 的三态 |
 | POST | `/api/agents/{id}/reset` | 清空运行配置,恢复适配器内置默认 |
-| POST | `/api/agents/{id}/permission` | 更新权限策略。整表读-改-写已加锁串行化,并发授权**不会互相覆盖** |
+| POST | `/api/agents/{id}/permission` | 更新权限策略 —— **局部更新**:只改载荷里**显式给出**的能力位,**缺省的保持原值**(基线 = 当前**生效**的策略)。**非布尔值返回 400**(静默当作 false 等于吊销该能力)。**未知键忽略**(载荷可能来自比本端点更宽的客户端契约)。整表读-改-写已加锁串行化,并发授权**不会互相覆盖** |
 | GET | `/api/skills` | Skill 注册表(含启用状态) |
 | POST | `/api/skills/{id}/enable` | 启用/禁用 `{enabled}`(缺该字段返回 400) |
 | POST | `/api/skills/{id}/test` | 测试执行 |
@@ -68,7 +68,7 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关 |
+| GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关。**读不出来时多一个 `git_working_dir_read_failed: true`**(仅在读失败时出现):此刻 `git_working_dir` 是**内存态**(Git 服务当前目录),**不是库里的值** —— 消费方必须把它标出来,不能当"库里那个"展示或回存(回存即覆盖,损坏行就此消失) |
 | POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改)。**`log_level` 只接受 `debug`/`info`/`warn`/`error`**(大小写不敏感,落库归一为小写),非法值返回 400 —— 不再静默回落 info(界面显示的级别与实际生效的级别会不一致)。**`git_working_dir` 的"缺省"与"空串"是两种语义**:请求体里**没有该字段** = 保持原值不变;**显式传空串** = **清除**(落库空串 + 回到启动默认目录)。**先全量校验、后统一落库** —— 任一项非法则一项都不改 |
 | GET | `/api/backup` | 导出备份(工作流 + Agent 配置)。**含明文,范围是三类**:`agent_configs` 整份原样(`env` / `behavior` / `extra_args`)+ **工作流定义本体**(含工作流 `variables`)。约定 8 允许备份导出含明文(它是唯一例外),但**请按"整个文件都是敏感的"对待**。响应头 `Cache-Control: no-store`,避免明文 API Key 留在浏览器/代理的磁盘缓存里 |
 | POST | `/api/backup/restore` | 恢复备份。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝;**本机不存在的 Agent 也计入 `agent_configs_invalid` 且不落库**(此前计入"已恢复"是假成功:配置永远不会被应用)。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` / **`agent_configs_unknown_ids`** |
@@ -150,6 +150,7 @@ HTTP 状态码语义:
 | `INVALID_LOOP_LIMIT` | 校验错误 | `settings.on_loop_limit` 的取值不在白名单(`fail` / `wait_user`)。校验期就报出,不再静默落回 `wait_user`(那会让"循环超限"变成"暂停等人",用户以为程序卡住了) |
 | `PERMISSION_OVERRIDE_LOOSENS` | 校验错误 / 运行错误 | `permissions:` 段试图**放宽**全局已禁用的能力。**有效权限 = 全局实时策略 ∧ permissions 段(只收紧)** —— 放宽尝试在**校验期**就报出;运行期遇到历史工作流里的放宽写法同样报出并按拒绝处理 |
 | `INVALID_PERMISSION_OVERRIDE` | 校验错误 | `permissions:` 段的**结构**非法(如未知字段、类型不对)。与 `PERMISSION_OVERRIDE_LOOSENS` 区分:前者是"写错了",后者是"想放开" |
+| `BAD_REQUEST` | 400(更新 Agent 权限) | 权限载荷里的能力位**不是布尔值**(错误信息点名是哪个字段、实际类型是什么)。**静默当作 false 等于吊销该能力**,而客户端以为自己改的是别的能力(约定 14)。注意:此路径**没有**专属错误码,与其它 `BAD_REQUEST` 共用 |
 | `INVALID_TRANSITION` | 400(取消执行) | **状态迁移非法**。取消一个**已终态**(`COMPLETED` / `FAILED` / `CANCELLED`)的执行时返回 —— 取消一个已经结束的运行是"取消失败",不是幂等删除。**约定 6 的"幂等返回 200"只适用于删除资源**,不适用于状态迁移。详见"第 12 节" |
 
 > **第十轮新增的三个码**(`UNSUPPORTED_AGENT_SETTING` / `INVALID_LOOP_LIMIT` /
@@ -164,7 +165,7 @@ HTTP 状态码语义:
 > `POST /api/workflows/validate` 响应的 `errors[].code` / `warnings[].code`
 > 数组里;HTTP 错误体的 `code` 在响应体顶层。同一个字符串在两处都可能出现。
 
-## 契约变化(第四/五/七/十/十二/十三/十五轮)
+## 契约变化(第四/五/七/十/十二/十三/十五/二十一轮)
 
 ### 1. 导入响应带 `ignored_keys`
 
@@ -215,9 +216,15 @@ HTTP 状态码语义:
 | `agent_configs_restored` | 已落库的 Agent 配置数 |
 | `agent_configs_invalid` | 未落库的 Agent 配置数(**结构非法或本机无此 Agent**) |
 | `agent_configs_unknown_ids` | **本机不存在**的 Agent ID 清单(配置永远不会被应用) |
+| `agent_configs_apply_failed_ids` | **已落库但运行时应用失败**的 Agent ID 清单(第二十一轮变更)。落库 ≠ 生效:配置写进库了,但套用时失败(CLI 不存在 / 参数非法等)→ 用户只看到"已恢复 N 个",不知道哪几个**没有生效**。前端必须读这个字段并展示 |
 
 `agent_configs_invalid` 的语义已扩大:此前"本机不存在的 Agent"也被计入
 "已恢复" —— 那是**假成功**(落库只是留一行死数据,配置永远不生效)。
+
+**`agent_configs_apply_failed_ids` 与 `agent_configs_invalid` 的区别**:前者
+是"**落库了但没生效**"(套用运行时失败),后者是"**根本没落库**"。两者都必须
+上报 —— 只报前者会让用户以为配置生效了,只报后者会让用户以为库里的配置
+也一并没了。
 
 ### 4. 节点 `output` 与会话状态 `state_json` 的脱敏
 
@@ -348,17 +355,22 @@ HTTP 状态码语义:
 下发 CLI 前会**剔除字面量 `***`**(防旧脏数据)—— **所有会被掩码的值位**
 (不只凭据名)都剔。
 
-### 8. 设置与权限的语义(第十轮变更)
+### 8. 设置与权限的语义(第十轮变更;第十九轮补"读失败标注"与"Set 白名单")
 
 | 项 | 语义 |
 | --- | --- |
 | `git_working_dir` **空串** | = **清除**(落库空串 + 回到启动默认目录)。与"**没传该字段**"严格区分 —— 后者保持原值不变 |
+| `git_working_dir` **读失败** | 库里那一行损坏或 DB 读失败时,`GET /api/settings` 额外返回 **`git_working_dir_read_failed: true`**,且 `git_working_dir` 是**内存态**而不是库值(此前读错误被吞掉,界面显示的不是库里那个,用户一保存就把损坏行覆盖了)。**"从未设置过"不算失败**:库里没有这一行是正常初始状态,响应形状与此前完全一致 |
 | `Settings.Update` | **先全量校验、后统一落库** —— 任一项非法(如 `log_level`)则**一项都不改**(此前先落库后校验,返回 400 但目录已经改了) |
+| `Settings.Set`(仅 Wails IPC) | **白名单键**:`git_working_dir` / `log_level` / `allow_script_nodes`;其余键**一律拒绝**(400 `BAD_REQUEST`)。**复用 `Update` 的同一套校验**(目录存在性、级别合法性),并做**值类型校验** —— 不能成为绕过校验的后门。`agent_policies` **刻意不在白名单里**:它由 `AgentService` 在 `permMu` 下"读整表→改一项→写整表",绕过去直写会丢并发更新 |
 | `default_working_dir` | **死设置**,运行期从不读取 → 后端**拒绝新值**(`UNSUPPORTED_AGENT_SETTING`);**已存的老值仍可原样回存** |
 | `on_loop_limit` | 白名单 `fail` / `wait_user`,非法值在校验期报 `INVALID_LOOP_LIMIT` |
 | `--git-dir` 启动参数 | **持久化语义**:写入设置并在设置页可见;持久化失败则**明确回退并说明原因**(此前错误被丢弃,静默回落到默认目录);**空串是无操作**(不是"清空") |
 | **有效权限** | = **全局实时策略** ∧ 工作流 `permissions` 段(**只收紧**,求交)。① 全局策略**实时**读取 → 收紧立即对在跑的执行生效;② `permissions` 段**永远无法放宽**全局禁用 → 放宽尝试在校验期报 `PERMISSION_OVERRIDE_LOOSENS` |
 | `permissions:` 段错层级 | 顶层 `permissions:` 是正式写法;错层级(如写在 `workflow:` 段下)报 `DSL_MISPLACED_KEY` |
+| `git_working_dir` **存在性校验**(第二十一轮变更) | 落库前校验**目录必须存在且是目录**;不合法 → **400**,**一项都不改**。此前存一个不存在的目录也"保存成功",之后每个 git / script / agent 节点都因 `cmd.Dir` 不存在而失败,报错与设置页毫无关联。**空串 = 清除**,不需要存在性校验。`Settings.Set` 复用**同一套**校验 |
+| `POST /api/agents/{id}/permission` 的**三态**(第二十一轮变更) | **局部更新**:载荷里**显式给出**的能力位被改写,**缺省的保持原值**。此前按"整表覆盖"解释(缺键 → false):客户端只发 `{"filesystem_read":true}` 会把其余能力**静默置 false** —— 能力被吊销而用户什么都没收到。**非布尔值 400**;**未知键忽略** |
+| Agent 配置 `env` 的**第四态**(第二十一轮变更) | **缺省 = 不修改** / **`{}` = 显式清空全部** / **`{k:v}` = 整表替换**。此前"没给"被当成"清空全部":一个只想改模型的请求会顺手删掉全部凭据,而用户只看到"已保存"。env **表内部**仍是约定 5 的三态(`***`=保留 / 空串=删除 / 无原值的 `***`=丢弃) |
 
 ### 9. 校验警告与被忽略的键(两种模式的同源契约)
 

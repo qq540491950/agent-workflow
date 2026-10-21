@@ -131,7 +131,13 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	}
 
 	// 注册默认 Agent(配置来自 settings/agent_configs)
-	app.reloadAgents()
+	//
+	// 内置 Agent 注册失败必须让启动失败:少一个内置 Agent,引用它的节点
+	// 在运行期才报"Agent 不存在",而用户看到的是"工作流跑不起来"。
+	// 详见 reloadAgents 的说明。
+	if err := app.reloadAgents(); err != nil {
+		return nil, err
+	}
 
 	// 服务层
 	app.Workflows = &WorkflowService{app: app}
@@ -142,13 +148,27 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	app.Settings = &SettingsService{app: app}
 
 	// 工作目录设置
+	//
+	// 读失败必须留痕:此前 `err == nil && wd != ""` 把读错误吞得干干净净
+	// —— 行损坏(存的不是字符串)或 DB 故障时,进程静默用默认目录,
+	// 界面显示的目录不是用户设置的那个,而全程零日志(约定 14:
+	// 该失败却成功)。"从未设置过"是正常初始状态,不算失败。
 	var wd string
-	if err := repo.GetSetting("git_working_dir", &wd); err == nil && wd != "" {
+	if err := repo.GetSetting("git_working_dir", &wd); err != nil {
+		if !isSettingNotFound(err) {
+			logx.Error("读取 git_working_dir 设置失败,已回落到默认目录", "error", err.Error())
+		}
+	} else if wd != "" {
 		gitSvc.SetWorkingDir(wd)
 	}
-	// 日志级别持久化
+	// 日志级别持久化(读失败同样要留痕:静默回落到 info 会让用户以为
+	// 自己的 debug 级别还在,实际早就不是了)
 	var lv string
-	if err := repo.GetSetting("log_level", &lv); err == nil && lv != "" {
+	if err := repo.GetSetting("log_level", &lv); err != nil {
+		if !isSettingNotFound(err) {
+			logx.Error("读取 log_level 设置失败,已回落到 info", "error", err.Error())
+		}
+	} else if lv != "" {
 		logx.SetLevel(lv)
 	}
 	app.logLevel = lv
@@ -163,8 +183,15 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 	}
 	// script 节点放行开关(默认关闭:该节点可执行任意本地命令;
 	// 设置项缺失时保持关闭)
+	//
+	// 读失败按"关闭"处理(fail closed,见 AGENTS.md 约定 11),但仍要留痕:
+	// 行坏了却看起来像"用户没开",排查时看不出是哪一步坏的。
 	var allowScript bool
-	if err := repo.GetSetting("allow_script_nodes", &allowScript); err == nil {
+	if err := repo.GetSetting("allow_script_nodes", &allowScript); err != nil {
+		if !isSettingNotFound(err) {
+			logx.Warn("读取 allow_script_nodes 设置失败,已按关闭处理", "error", err.Error())
+		}
+	} else {
 		app.scriptNodes.Store(allowScript)
 	}
 
@@ -427,20 +454,40 @@ func isCredentialBehaviorKey(key string) bool {
 
 // reloadAgents 根据持久化配置注册 Agent 适配器。
 // 注意:必须复用传入 Engine 的同一个 permission.Manager 实例。
-func (a *App) reloadAgents() {
+//
+// 内置 Agent 注册失败**必须上抛**(调用方 = NewApp → 启动即失败):
+// 内置 Agent 是整个系统的基础 —— 少一个,它就不在注册表里(Agents 页
+// 不列出它,引用它的节点在运行期报"Agent 不存在"),而此前
+// `_ = a.Agents.Register(...)` 把失败吞得干干净净,**一行日志都没有**:
+// "内置 Agent 缺失"这件事完全不可见(约定 14:该失败却成功)。
+//
+// 可达性:注册表在 NewApp 里是**新建的空表**,4 个内置 Agent 的 ID 互不
+// 重复(claude-code / pi-agent / mock-claude / mock-pi)→ 当前代码路径下
+// 注册失败**不可达**。正因不可达,上抛不会误伤正常启动;而"不可达"不等于
+// "永远不可达" —— 将来 reloadAgents 变成可重复调用(重建适配器)时,
+// 失败就会重新变成静默故障。
+func (a *App) reloadAgents() error {
 	// Claude Code 适配器
 	// 注意:不传 Permission Manager —— claude 适配器不读它(CLI 层已硬禁写工具),
 	// 权限判定在运行期节点检查处(查有效策略)。见 agent/claude 的包说明。
 	claudeAgt := claude.New(claude.Config{})
-	_ = a.Agents.Register(claudeAgt)
+	if err := a.Agents.Register(claudeAgt); err != nil {
+		return a.builtinAgentRegisterFailed(claudeAgt.ID(), err)
+	}
 
 	// Pi Agent 适配器
 	piAgt := pi.New(pi.Config{Perms: a.Perms})
-	_ = a.Agents.Register(piAgt)
+	if err := a.Agents.Register(piAgt); err != nil {
+		return a.builtinAgentRegisterFailed(piAgt.ID(), err)
+	}
 
 	// Mock Agents(演示与测试:不依赖外部 CLI,内置默认演示脚本)
-	_ = a.Agents.Register(buildMock("mock-claude", nil))
-	_ = a.Agents.Register(buildMock("mock-pi", nil))
+	if err := a.Agents.Register(buildMock("mock-claude", nil)); err != nil {
+		return a.builtinAgentRegisterFailed("mock-claude", err)
+	}
+	if err := a.Agents.Register(buildMock("mock-pi", nil)); err != nil {
+		return a.builtinAgentRegisterFailed("mock-pi", err)
+	}
 	// Mock Agent 权限:模拟真实角色的只读/读写能力
 	a.Perms.Set("mock-claude", permission.Policy{FilesystemRead: true, GitRead: true})
 	a.Perms.Set("mock-pi", permission.Policy{
@@ -479,6 +526,18 @@ func (a *App) reloadAgents() {
 	} else {
 		logx.Warn("读取 Agent 配置失败", "error", err.Error())
 	}
+	return nil
+}
+
+// builtinAgentRegisterFailed 记录内置 Agent 注册失败,并返回上抛用的错误。
+//
+// 失败必须同时留下**日志**与**错误**:日志让"内置 Agent 缺失"有痕迹
+// (此前一行都没有),错误让启动直接失败 —— 一个缺了内置 Agent 的应用
+// 跑起来,只会在用户跑工作流时才炸,而错误信息与根因(注册表里少了
+// 一个内置 Agent)毫无关联。
+func (a *App) builtinAgentRegisterFailed(id string, err error) error {
+	logx.Error("内置 Agent 注册失败", "agent", id, "error", err.Error())
+	return fmt.Errorf("内置 Agent %q 注册失败: %w", id, err)
 }
 
 func boolOf(v any) bool {
@@ -1569,8 +1628,135 @@ func (s *SettingsService) Get(key string, out any) error {
 	return s.app.Repo.GetSetting(key, out)
 }
 
+// writableSettingKeys 返回 Set 白名单里的键(副本)。
+//
+// 白名单只含"设置页语义明确、有校验、不涉及并发读改写"的三个键。
+// 刻意**不含** agent_policies:它由 AgentService 在 permMu 下"读整表→
+// 改一项→写整表",绕过去直写会丢并发更新(并发保护失效)。
+//
+// 返回副本而不是包级变量:白名单是只读语义,不该是可被改写的全局状态
+// (约定 15:共享可变状态一律加锁 —— 更好的做法是压根不给它可变的余地)。
+func writableSettingKeys() []string {
+	return []string{"git_working_dir", "log_level", "allow_script_nodes"}
+}
+
+// isWritableSettingKey 判断 key 是否在 Set 白名单里。
+func isWritableSettingKey(key string) bool {
+	for _, k := range writableSettingKeys() {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// Set 写入设置。
+//
+// **本方法经 main.go 的 wails.NewService(app.Settings) 暴露在 Wails IPC 上**
+// (前端绑定 frontend/bindings/agentworkflow/app/application/settingsservice.ts
+// 里的 Set(key, value) 就是它)—— 它是对外入口,不能成为绕过校验的后门。
+//
+// 此前是"任意键写入设置表",于是:
+//   - 直写 agent_policies → 绕过 AgentService.permMu 的串行化,并发授权
+//     丢更新(并发保护失效);
+//   - 直写 git_working_dir / log_level → 绕过 Update 里的存在性校验与
+//     日志级别校验(迭代 20 刚加的校验被绕开)。
+//
+// 现在:只接受**白名单键**,并复用 Update 的同一套校验;写入后**立即生效**
+// (内存态与库值一致,不会出现"提示已保存、实际没生效")。
 func (s *SettingsService) Set(key string, value any) error {
-	return s.app.Repo.SaveSetting(key, value)
+	if !isWritableSettingKey(key) {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("设置键 %q 不允许通过 Set 写入(允许: %s);"+
+				"其他设置请走各自的专用接口", key, strings.Join(writableSettingKeys(), " / ")))
+	}
+	switch key {
+	case "git_working_dir":
+		return s.setGitWorkingDir(value)
+	case "log_level":
+		return s.setLogLevelValue(value)
+	case "allow_script_nodes":
+		return s.setAllowScriptNodes(value)
+	default:
+		// 白名单里有键却没有处理逻辑 → 必须显式报错,不能"静默成功"。
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("设置键 %q 暂不支持通过 Set 写入", key))
+	}
+}
+
+// setGitWorkingDir 写入并应用 Git 工作目录。
+//
+// 复用 Update 的同一套校验(validateGitWorkingDir):目录必须存在且是目录 ——
+// 否则"保存成功"之后,每个 git / script / agent 节点都因 cmd.Dir 不存在而
+// 失败,报错与设置页毫无关联(约定 14)。
+//
+// 空串 = 清除(落库空串 + 回到启动默认目录),不需要存在性校验。
+//
+// 先落库再改内存:落库失败时内存态不动,不会出现"界面提示已保存、重启即失效"。
+func (s *SettingsService) setGitWorkingDir(value any) error {
+	dir, ok := value.(string)
+	if !ok {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("设置键 git_working_dir 的值必须是字符串(实际是 %T)", value))
+	}
+	if dir != "" {
+		if err := validateGitWorkingDir(dir); err != nil {
+			return err
+		}
+	}
+	if err := s.app.Repo.SaveSetting("git_working_dir", dir); err != nil {
+		return err
+	}
+	if dir != "" {
+		s.app.GitSvc.SetWorkingDir(dir)
+	} else {
+		s.app.GitSvc.SetWorkingDir(s.app.defaultGitDir)
+	}
+	return nil
+}
+
+// setLogLevelValue 写入并应用日志级别。
+//
+// 级别语义的唯一来源是 logx:校验用 logx.ValidateLevel(不改变当前级别),
+// 应用用 logx.SetLevelChecked(唯一入口)。落库归一为小写。
+func (s *SettingsService) setLogLevelValue(value any) error {
+	lvl, ok := value.(string)
+	if !ok {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("设置键 log_level 的值必须是字符串(实际是 %T)", value))
+	}
+	if err := logx.ValidateLevel(lvl); err != nil {
+		return model.NewError(model.KindValidationError, "INVALID_LOG_LEVEL", err.Error())
+	}
+	lvl = strings.ToLower(strings.TrimSpace(lvl))
+	if err := s.app.Repo.SaveSetting("log_level", lvl); err != nil {
+		return err
+	}
+	s.app.setLogLevel(lvl)
+	// SetLevelChecked 是"应用级别"的唯一入口:非法时保持当前级别并报错,
+	// 错误真正回报给调用方(接口层 400),不再只是 WARN。
+	if err := logx.SetLevelChecked(lvl); err != nil {
+		return model.NewError(model.KindValidationError, "INVALID_LOG_LEVEL", err.Error())
+	}
+	return nil
+}
+
+// setAllowScriptNodes 写入并应用 script 节点放行开关。
+//
+// 值必须是布尔:此前 value 是 any,写进一个字符串 "true" 就会在库里留下
+// 一行"读不出来"的值(解不进 bool)—— 自己写坏的设置行。
+func (s *SettingsService) setAllowScriptNodes(value any) error {
+	allow, ok := value.(bool)
+	if !ok {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("设置键 allow_script_nodes 的值必须是布尔值(实际是 %T)", value))
+	}
+	if err := s.app.Repo.SaveSetting("allow_script_nodes", allow); err != nil {
+		return err
+	}
+	s.app.scriptNodes.Store(allow)
+	logx.Warn("script 节点放行开关已变更", "allow_script_nodes", allow)
+	return nil
 }
 
 // SettingsInfo 是设置页展示的只读信息 + 可修改项。
@@ -1580,21 +1766,66 @@ type SettingsInfo struct {
 	LogLevel      string `json:"log_level"`
 	// AllowScriptNodes 放行 script 节点(任意本地命令执行),默认 false。
 	AllowScriptNodes bool `json:"allow_script_nodes"`
+	// GitWorkingDirReadFailed 标记 git_working_dir 这一行**读不出来**
+	// (行内容损坏 / DB 读失败)。
+	//
+	// 为 true 时,上面的 GitWorkingDir 是**内存态**(Git 服务当前目录),
+	// 不是库里的值 —— 消费方必须把它标出来,不能当"库里那个"展示或回存。
+	//
+	// 为什么必须有这个标记:此前读错误被 `_ =` 吞掉,静默回落到内存态
+	// → 界面显示的不是库里那个 → 用户一保存就把损坏行覆盖成内存值,
+	// 损坏事实就此消失(约定 14:该失败却成功)。
+	//
+	// 用 omitempty:正常情况(false)下响应体形状与此前完全一致,
+	// 不影响既有消费方。
+	GitWorkingDirReadFailed bool `json:"git_working_dir_read_failed,omitempty"`
+}
+
+// isSettingNotFound 判断 err 是否表示"这个设置项从未设置过"。
+//
+// 设置项不存在是**正常初始状态**(全新安装),必须与"读失败"区分开:
+// 前者不该报错、不该被标注成失败;后者必须报错并标注
+// (见 SettingsService.Info 与 NewApp 里的启动读取)。
+//
+// 口径与 AgentService.SetPermission 里对 NOT_FOUND 的判断一致。
+func isSettingNotFound(err error) bool {
+	var se *model.Error
+	return errors.As(err, &se) && se.Code == "NOT_FOUND"
 }
 
 // Info 返回当前设置。
+//
+// git_working_dir 的读失败必须与"从未设置过"分开处理:
+//   - 从未设置过(NOT_FOUND):正常初始状态 → 显示当前生效目录;
+//   - 读失败(行损坏 / DB 故障):**不能**拿内存态冒充库值 → 明确标注
+//     (GitWorkingDirReadFailed)并记 ERROR,否则用户一保存就把损坏行
+//     覆盖成内存值,损坏事实消失(约定 14)。
 func (s *SettingsService) Info() *SettingsInfo {
-	var wd string
-	_ = s.app.Repo.GetSetting("git_working_dir", &wd)
-	if wd == "" {
-		wd = s.app.GitSvc.WorkingDir()
-	}
-	return &SettingsInfo{
+	info := &SettingsInfo{
 		DataDir:          s.app.DataDir,
-		GitWorkingDir:    wd,
 		LogLevel:         s.app.LogLevelValue(),
 		AllowScriptNodes: s.app.ScriptNodesAllowed(),
 	}
+	var wd string
+	switch err := s.app.Repo.GetSetting("git_working_dir", &wd); {
+	case err == nil:
+		info.GitWorkingDir = wd
+		if wd == "" {
+			// 空串 = 清除(回到启动默认目录)
+			info.GitWorkingDir = s.app.GitSvc.WorkingDir()
+		}
+	case isSettingNotFound(err):
+		// 从未设置过:正常初始状态,显示当前生效目录。
+		info.GitWorkingDir = s.app.GitSvc.WorkingDir()
+	default:
+		// 读失败:内存态目录**不是**库里的值 —— 标注出来并留痕,
+		// 绝不让它冒充库值(否则界面显示的不是库里那个,而用户无从察觉)。
+		info.GitWorkingDir = s.app.GitSvc.WorkingDir()
+		info.GitWorkingDirReadFailed = true
+		logx.Error("读取 git_working_dir 设置失败:显示的是内存态目录,不是库里的值",
+			"error", err.Error())
+	}
+	return info
 }
 
 // Update 更新设置:git_working_dir / log_level(日志级别即时生效)/
@@ -1767,31 +1998,22 @@ func (s *SettingsService) Update(gitWorkingDir, logLevel string, allowScriptNode
 	// 但界面提示"已保存" —— 显示与实际不一致(约定 14 的同类问题)。
 	// 前端每次保存都回传当前值(Settings.tsx 的 save),所以 "" 只在用户
 	// 主动清空时出现。
+	//
+	// 落库与生效统一交给 Set(Set 内部会再校验一次,幂等):"从设置页改"
+	// 与"经 Wails IPC 直接 Set"必须是同一条语义路径,否则两套实现必然
+	// 分叉出不同行为(Set 曾是绕过校验的后门,见 Set 的说明)。
 	if err := s.Set("git_working_dir", gitWorkingDir); err != nil {
 		return nil, err
-	}
-	if gitWorkingDir != "" {
-		s.app.GitSvc.SetWorkingDir(gitWorkingDir)
-	} else {
-		s.app.GitSvc.SetWorkingDir(s.app.defaultGitDir)
 	}
 	if level != "" {
 		if err := s.Set("log_level", level); err != nil {
 			return nil, err
-		}
-		s.app.setLogLevel(level)
-		// SetLevelChecked 是"应用级别"的唯一入口:非法时保持当前级别并报错,
-		// 错误真正回报给调用方(接口层 400),不再只是 WARN。
-		if err := logx.SetLevelChecked(level); err != nil {
-			return nil, model.NewError(model.KindValidationError, "INVALID_LOG_LEVEL", err.Error())
 		}
 	}
 	if allowScriptNodes != nil {
 		if err := s.Set("allow_script_nodes", *allowScriptNodes); err != nil {
 			return nil, err
 		}
-		s.app.scriptNodes.Store(*allowScriptNodes)
-		logx.Warn("script 节点放行开关已变更", "allow_script_nodes", *allowScriptNodes)
 	}
 	return s.Info(), nil
 }
