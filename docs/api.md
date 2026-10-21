@@ -618,6 +618,19 @@ SUCCESS(约定 14:该失败却成功)。
 `runtime.escalate`(ADK Escalate 的分级:`kind=expected` 是预期内的循环出口
 或 HITL 暂停,`kind=unexpected` 是节点失败 / 循环上限 / 循环停滞)
 
+**`node.warning` 的两种 `data.reason`**(第十九轮新增第二种):
+
+| `data.reason` | 含义 | `data` 字段 |
+| --- | --- | --- |
+| `missing_template_vars` | **键不存在**:提示词里引用的变量**在数据表里根本没有**(例:拼错的 `{{revwie}}`) | `missing`(变量名列表)/ `message` |
+| `empty_context_slots` | **键存在但值为空**:上下文链的槽位**存在**,但**上游没产出内容**(例:`{{plan}}` 的上游节点成功却没有产出)→ 渲染成空串,下游拿到的是**空上下文** | `slots`(槽位名列表)/ `message` |
+
+两者**都不让节点失败**(空上下文下 Agent 仍可能凭自身知识给出有效结论,
+硬失败会把"可选引用"变成硬约束),但**都必须可见** —— 用户要能分清
+"**我拼错了变量名**"与"**上游没给我东西**"。第十九轮之前只有第一种:
+第二种(上游没产出)是**静默**的,用户以为"方案传给下游了"。
+判据的来源与边界见 `docs/OPTIMIZATION.md` #280。
+
 所有事件的 `data` 在分发点统一脱敏(键名为 token/api_key/password 等
 时整值替换为 `***`,值含 `key=value` 形态时就地替换),落库 / SSE /
 Wails IPC 三条出口一致。

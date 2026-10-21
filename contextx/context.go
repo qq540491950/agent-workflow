@@ -5,6 +5,8 @@ package contextx
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -43,6 +45,33 @@ const (
 	// StateKeyUserInstruction 人工补充指令。
 	StateKeyUserInstruction = "user_instruction"
 )
+
+// chainSlotKeys 是"**上游节点产出的事实**"类槽位(上下文链的键)。
+//
+// 为什么单独列一份:空槽位告警(#280)只针对这一类 ——
+//   - plan / review / issues / test_result / last_output:上游节点的产物
+//     (由 SaveNodeOutput 写进会话状态);
+//   - git_diff:git 节点的产物;
+//   - relevant_files / user_instruction:上下文链里的另外两个槽位。
+//
+// 刻意**不含**的两个:
+//   - task:引擎种进初始状态,永远有值 —— 没有"上游没产出"这回事;
+//   - iteration:编译器维护的循环计数,**不是**"上游产出";而且**非循环
+//     工作流里它恒为空** —— 把它算进来,每个引用 {{iteration}} 的 prompt
+//     都会刷一条告警(纯噪音),而"上游没产出"这条事实与它无关。
+//
+// 这份清单是"哪些槽位算上下文链"的**唯一定义处**:Build 产出它,
+// runtime 只负责把"被提示词引用到的空槽位"报成事件。
+var chainSlotKeys = map[string]bool{
+	StateKeyPlan:            true,
+	StateKeyReview:          true,
+	StateKeyIssues:          true,
+	StateKeyTestResult:      true,
+	StateKeyLastOutput:      true,
+	StateKeyGitDiff:         true,
+	StateKeyRelevantFiles:   true,
+	StateKeyUserInstruction: true,
+}
 
 // StateWriter 是 SaveNodeOutput 写回会话状态所需的**最小**能力。
 //
@@ -95,7 +124,27 @@ func (m *Manager) SetMaxDiffChars(n int) {
 
 // Build 为指定节点模式构造模板渲染变量。state 是 ADK session state 的
 // 领域视图(由 runtime 维护)。
+//
+// 只返回数据表;需要"哪些链槽位是空的"请用 BuildWithSlots。
 func (m *Manager) Build(mode string, ec *ExecutionContext, nodeID string) map[string]any {
+	data, _ := m.BuildWithSlots(mode, ec, nodeID)
+	return data
+}
+
+// BuildWithSlots 与 Build 相同,但**额外**返回"键存在但值为空"的链槽位
+// 清单(按槽位名排序)。
+//
+// 这就是 #280 的修法。模板引擎的口径是"**键存在 = 可解析**"(值为 nil
+// 渲染成空串、不进 missing 列表)—— 那是**渲染层**的口径,决定"渲染成
+// 什么";而"上游到底有没有产出"是**上下文层**的事实,决定"要不要告警"。
+// 两个口径**正交**,所以不必(也不该)改 template 包的通用口径:
+//   - 键**不存在**({{revwie}} 拼错)→ template 层报 missing → 既有告警;
+//   - 键**存在但值为空**({{plan}} 上游没产出)→ 本函数报"空槽位"。
+//
+// 空槽位的判定口径是"**渲染出去是空的**"(事实对下游不可见):
+// nil 与空串/纯空白算空;数字、布尔、列表、map 都不算 —— 它们渲染出来
+// 是有内容的(0 / false / [] / {})。
+func (m *Manager) BuildWithSlots(mode string, ec *ExecutionContext, nodeID string) (map[string]any, []string) {
 	state := ec.State
 	if state == nil {
 		state = map[string]any{}
@@ -127,7 +176,36 @@ func (m *Manager) Build(mode string, ec *ExecutionContext, nodeID string) map[st
 		delete(data, StateKeyGitDiff)
 		delete(data, StateKeyReview)
 	}
-	return data
+
+	// 空槽位清单:只看**这次真的进了数据表**的链槽位(mode 会剔掉几个),
+	// 避免报出"这个 mode 根本拿不到"的槽位。
+	var empty []string
+	for key, val := range data {
+		if !chainSlotKeys[key] {
+			continue
+		}
+		if isEmptySlotValue(val) {
+			empty = append(empty, key)
+		}
+	}
+	sort.Strings(empty)
+	return data, empty
+}
+
+// isEmptySlotValue 判定"键存在但值为空"(渲染出去是空的 → 事实不可见)。
+//
+// 口径:只有 nil 与空串/纯空白算空;数字、布尔、列表、map **都不算** ——
+// 它们渲染出来是有内容的(0 / false / [] / {})。例如 review 节点返回
+// issues: [] 时,"没有发现问题"这个事实是**可见的**("[]"),不该报成
+// "上游没产出"。
+func isEmptySlotValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(t) == ""
+	}
+	return false
 }
 
 // SaveNodeOutput 把节点输出写进**活的**会话状态,供后续节点按需引用。

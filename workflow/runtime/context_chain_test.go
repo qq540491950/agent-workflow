@@ -638,3 +638,192 @@ func TestContextChainKeysDoNotAffectConditionEvaluation(t *testing.T) {
 		}
 	}
 }
+
+// ---- #280:上游没产出时,下游的空上下文必须可见 -------------------------
+
+// warningEvents 返回本次执行**持久化**的 node.warning 事件(按 reason 归类)。
+//
+// 为什么查库而不是查内存总线:落库的那份才是用户事后能看到的那份
+// (审计流 / 事件列表)—— "可见"必须是持久的可见,不是"当时闪了一下"。
+func warningEvents(t *testing.T, repo *persistence.DB, execID string) map[string][]map[string]any {
+	t.Helper()
+	evs, err := repo.ListEvents(execID, 0)
+	if err != nil {
+		t.Fatalf("读事件: %v", err)
+	}
+	out := map[string][]map[string]any{}
+	for _, ev := range evs {
+		if ev["type"] != "node.warning" {
+			continue
+		}
+		data, _ := ev["data"].(map[string]any)
+		reason, _ := data["reason"].(string)
+		out[reason] = append(out[reason], data)
+	}
+	return out
+}
+
+// slotsOf 取出告警事件里的槽位名列表。
+func slotsOf(data map[string]any) []string {
+	raw, _ := data["slots"].([]any)
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		if str, ok := s.(string); ok {
+			out = append(out, str)
+		}
+	}
+	return out
+}
+
+// TestEmptyUpstreamSlotIsVisible 上游节点**成功但什么都没产出** → 下游
+// {{plan}} 渲染成空串 → 必须有**可见信号**。
+//
+// 修前(实测):state_data.plan="" → 下游提示词里 "方案:" → node.warning
+// 事件数 = 0 → 执行落 COMPLETED,**零告警** —— 用户以为"方案传给下游了"。
+//
+// 语义:**可见但不阻断** —— 事件 + 日志,节点照常成功。理由见
+// executor.reportEmptySlots 的注释与 docs/OPTIMIZATION.md #280。
+func TestEmptyUpstreamSlotIsVisible(t *testing.T) {
+	agt := &chainAgent{id: "chain", respond: func(mode string, call int) coreagent.AgentResponse {
+		switch mode {
+		case "plan":
+			// 上游"成功"但没有任何产出:summary 与 output 都是空串。
+			return coreagent.AgentResponse{Summary: "", Output: ""}
+		}
+		return coreagent.AgentResponse{Summary: "ok"}
+	}}
+	eng, repo := newChainEngine(t, agt)
+
+	yml := `
+version: "1"
+workflow:
+  id: ctx-empty-slot
+  name: Empty Slot
+nodes:
+  - id: plan
+    type: agent
+    agent: chain
+    mode: plan
+    prompt: "任务:{{task}}"
+  - id: review
+    type: agent
+    agent: chain
+    mode: review
+    prompt: "方案:{{plan}}"
+edges:
+  - from: plan
+    to: review
+`
+	exec := runChainWorkflow(t, eng, yml)
+	if exec.State != model.ExecutionCompleted {
+		t.Fatalf("上游没产出不应让节点失败(可见但不阻断),实际 %s (%s)", exec.State, exec.Error)
+	}
+
+	warns := warningEvents(t, repo, exec.ID)
+	empties := warns["empty_context_slots"]
+	if len(empties) == 0 {
+		t.Fatalf("上游没产出时下游必须有可见告警(empty_context_slots),实际告警: %v", warns)
+	}
+	var hit bool
+	for _, data := range empties {
+		for _, s := range slotsOf(data) {
+			if s == "plan" {
+				hit = true
+			}
+		}
+	}
+	if !hit {
+		t.Errorf("告警必须点名空槽位 plan,实际 %v", empties)
+	}
+	// 告警必须挂在**下游**节点上(是下游拿到空上下文,不是上游有问题)。
+	if node, _ := empties[0]["node"].(string); node != "review" {
+		t.Errorf("告警应挂在下游节点 review 上,实际 %q", node)
+	}
+}
+
+// TestEmptySlotWarningAbsentWhenUpstreamProduced 上游**有产出**时不得
+// 出现空槽位告警(否则就是噪音,和"缺失必须可见"一样有害)。
+func TestEmptySlotWarningAbsentWhenUpstreamProduced(t *testing.T) {
+	agt := &chainAgent{id: "chain", respond: func(mode string, call int) coreagent.AgentResponse {
+		switch mode {
+		case "plan":
+			return coreagent.AgentResponse{Summary: "计划摘要", Output: "PLAN-FULL-TEXT"}
+		}
+		return coreagent.AgentResponse{Summary: "ok"}
+	}}
+	eng, repo := newChainEngine(t, agt)
+
+	yml := `
+version: "1"
+workflow:
+  id: ctx-slot-filled
+  name: Slot Filled
+nodes:
+  - id: plan
+    type: agent
+    agent: chain
+    mode: plan
+    prompt: "任务:{{task}}"
+  - id: review
+    type: agent
+    agent: chain
+    mode: review
+    prompt: "方案:{{plan}}"
+edges:
+  - from: plan
+    to: review
+`
+	exec := runChainWorkflow(t, eng, yml)
+	if warns := warningEvents(t, repo, exec.ID); len(warns["empty_context_slots"]) != 0 {
+		t.Errorf("上游有产出时不得报空槽位告警,实际 %v", warns["empty_context_slots"])
+	}
+}
+
+// TestEmptySlotAndMissingVarAreDistinguishable "上游没产出"(键存在但值为
+// 空)与"变量名拼错"(键不存在)必须能被区分开 —— 否则用户无从下手
+// (reportMissingVars 的注释里写的就是这个诉求)。
+func TestEmptySlotAndMissingVarAreDistinguishable(t *testing.T) {
+	agt := &chainAgent{id: "chain", respond: func(mode string, call int) coreagent.AgentResponse {
+		switch mode {
+		case "plan":
+			return coreagent.AgentResponse{Summary: "", Output: ""}
+		}
+		return coreagent.AgentResponse{Summary: "ok"}
+	}}
+	eng, repo := newChainEngine(t, agt)
+
+	yml := `
+version: "1"
+workflow:
+  id: ctx-slot-vs-typo
+  name: Slot Versus Typo
+nodes:
+  - id: plan
+    type: agent
+    agent: chain
+    mode: plan
+    prompt: "任务:{{task}}"
+  - id: review
+    type: agent
+    agent: chain
+    mode: review
+    prompt: "方案:{{plan}} 拼错了:{{revwie}}"
+edges:
+  - from: plan
+    to: review
+`
+	exec := runChainWorkflow(t, eng, yml)
+	warns := warningEvents(t, repo, exec.ID)
+
+	if len(warns["missing_template_vars"]) == 0 {
+		t.Errorf("拼错的变量名必须照旧报 missing_template_vars,实际告警: %v", warns)
+	}
+	if len(warns["empty_context_slots"]) == 0 {
+		t.Errorf("空槽位必须报 empty_context_slots,实际告警: %v", warns)
+	}
+	// 两条路径的 reason 必须不同(否则用户分不清"拼错了"与"上游没产出")。
+	if len(warns["missing_template_vars"]) > 0 && len(warns["empty_context_slots"]) > 0 {
+		return
+	}
+	t.Errorf("两类告警必须同时存在且 reason 不同,实际 %v", warns)
+}

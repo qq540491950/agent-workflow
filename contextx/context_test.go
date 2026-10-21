@@ -61,6 +61,91 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+// ---- #280:空槽位必须可见(键存在但值为空)------------------------------
+
+// TestBuildWithSlotsReportsEmptyChainSlots 上游**没产出**时(键存在但值为
+// 空串 / 键不存在),链槽位必须被报出来 —— 这是"缺失事实不可见"的修法。
+//
+// 修前:contextx 只返回数据表,下游 {{plan}} 渲染成空串,**零告警**。
+func TestBuildWithSlotsReportsEmptyChainSlots(t *testing.T) {
+	m := NewManager()
+	ec := &ExecutionContext{
+		WorkflowID:  "wf-1",
+		ExecutionID: "exec-1",
+		State: map[string]any{
+			"task": "任务",
+			// plan:键存在但值为空串(上游成功但没产出)
+			"plan": "",
+			// review:键根本不存在(上游没跑到)
+		},
+	}
+	data, empty := m.BuildWithSlots("review", ec, "review")
+
+	// 数据表本身**不变**:键仍在、值仍是空串 —— 渲染口径不动
+	// ("键存在=可解析"是 template 包的口径,不在这里改)。
+	if v, ok := data["plan"]; !ok || v != "" {
+		t.Errorf("数据表里的 plan 键应保持原样(空串),实际 %v(存在=%v)", v, ok)
+	}
+	// 空串的 plan 与不存在的 review 都要被报出来。
+	got := map[string]bool{}
+	for _, s := range empty {
+		got[s] = true
+	}
+	for _, want := range []string{StateKeyPlan, StateKeyReview} {
+		if !got[want] {
+			t.Errorf("空槽位清单里必须有 %q,实际 %v", want, empty)
+		}
+	}
+}
+
+// TestBuildWithSlotsIgnoresNonChainSlots 引擎/编译器提供的槽位(task /
+// iteration)不纳入空槽位清单:非循环工作流里 {{iteration}} 恒为空,把它
+// 算进来就是纯噪音。
+func TestBuildWithSlotsIgnoresNonChainSlots(t *testing.T) {
+	m := NewManager()
+	ec := &ExecutionContext{
+		State: map[string]any{"task": "任务"}, // iteration 键不存在
+	}
+	_, empty := m.BuildWithSlots("review", ec, "review")
+	for _, s := range empty {
+		if s == StateKeyTask || s == StateKeyIteration {
+			t.Errorf("%q 不是上游产出的链槽位,不该报为空槽位(实际 %v)", s, empty)
+		}
+	}
+}
+
+// TestBuildWithSlotsRespectsModeScope mode 剔掉的槽位(plan 模式没有
+// git_diff / review)不得报为空槽位 —— 那个 mode 根本拿不到它。
+func TestBuildWithSlotsRespectsModeScope(t *testing.T) {
+	m := NewManager()
+	ec := &ExecutionContext{State: map[string]any{}}
+	_, empty := m.BuildWithSlots("plan", ec, "plan")
+	for _, s := range empty {
+		if s == StateKeyGitDiff || s == StateKeyReview {
+			t.Errorf("plan 模式拿不到 %q,不该报为空槽位(实际 %v)", s, empty)
+		}
+	}
+}
+
+// TestBuildWithSlotsKeepsNonEmptyValues 有内容的槽位不得报空:
+// 数字 0、布尔 false、空列表(渲染出来是 "[]"/"0"/"false",事实是**可见**的)。
+func TestBuildWithSlotsKeepsNonEmptyValues(t *testing.T) {
+	m := NewManager()
+	ec := &ExecutionContext{
+		State: map[string]any{
+			"test_result": "TESTS-PASSED",
+			"issues":      []any{},
+			"last_output": 0,
+		},
+	}
+	_, empty := m.BuildWithSlots("fix", ec, "fix")
+	for _, s := range empty {
+		if s == StateKeyTestResult || s == StateKeyIssues || s == StateKeyLastOutput {
+			t.Errorf("%q 有内容(渲染出来不是空串),不该报为空槽位(实际 %v)", s, empty)
+		}
+	}
+}
+
 // fakeWriter 是 StateWriter 的内存实现(测试专用)。
 type fakeWriter struct {
 	m    map[string]any

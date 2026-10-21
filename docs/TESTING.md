@@ -3,10 +3,10 @@
 > 共 8 轮测试验证(超过最低 5 轮要求),其中轮次 2-8 为浏览器视觉测试(GUI 黑盒)。
 > 每次功能完成与 Bug 修复均有独立 git 提交(见提交号)。
 >
-> **当前状态(轮次 71-82,对应 commit `3e4a5b3`)**:
-> Go 测试文件 **141** 个 / 有测试的包 **21** 个 / 顶层 `func Test*` **782** 个;
-> 前端测试文件 **22** 个 / 用例 **268** 条;门禁 **9 步** + **17** 条自检场景,
-> 实测 **118s**。
+> **当前状态(轮次 71-83,对应 commit `3e4a5b3` + 本轮工作区改动)**:
+> Go 测试文件 **141** 个 / 有测试的包 **21** 个 / 顶层 `func Test*` **789** 个;
+> 前端测试文件 **22** 个 / 用例 **268** 条;门禁 **9 步** + **27** 条自检场景,
+> 实测 **113s**。
 > (第十四轮**已落地** commit `91fe3e2`;第十五轮(迭代 21B)**已落地**
 > commit `908ba0b` —— 取消终态语义 / ExtraArgs 值形态 / 门禁第 6 步判据;
 > 第十六轮(迭代 17)**已落地** commit `e62f4ff` —— 单源回归锁去恒真 /
@@ -14,9 +14,10 @@
 > commit `e62f4ff` —— 跨节点上下文链路修复 / env 第四态 / 权限三态 /
 > argv 凭据告警,见"轮次 81"一节;第十八轮(迭代 20)**已落地**
 > commit `3e4a5b3` —— 设置读失败可观测 / 内置 Agent 注册失败上抛 / Set 白名单化,
-> 见"轮次 82"一节。)完整清单与逐文件说明见
+> 见"轮次 82"一节;第十九轮(迭代 20 收口)**已落地** —— 空上下文可见(#280)/
+> 门禁第 6 步的断言维度(#289),见"轮次 83"一节。)完整清单与逐文件说明见
 > "轮次 41-44 / 45-48 / 49-52 / 53-56 / 57-60 / 61-70 / 71-79 / 轮次 80 /
-> 轮次 81 / 轮次 82"十节;"某条测试在什么改动下
+> 轮次 81 / 轮次 82 / 轮次 83"十一节;"某条测试在什么改动下
 > 会变红"的实测记录见"改坏实现 → 测试变红"专节、"终审实测记录"专节与
 > "第八~十轮实测记录"专节;门禁自身的盲区见"门禁盲区"一节,
 > 门禁的**自检**机制见"门禁自检"专节;**形态 × 出口**的脱敏回归锁见
@@ -1436,6 +1437,12 @@ vitest **233/233**(0 → 233);门禁 9 步通过。
 
 ### 轮次 78:第十四轮(迭代 18)—— 门禁自检的完备性加固 + 剩余开放项收口
 
+> **当前自检场景总数:27 条**(`scripts/verify.sh` 的 `SELFCHECK_EXPECTED`)。
+> 第十四轮(轮次 78)加了 5 条(共 14 条);第十五轮(轮次 79)加 1 条(伪造输出,
+> 17 条);第十六~十八轮(轮次 80-82)加了 6 条(路径排除规则 4 条 + 孤儿包候选
+> 2 条,23 条);**第十九轮(轮次 83)加 4 条(第 6 步"断言扫描"判定,27 条)** ——
+> 逐条见下表与各轮次小节。
+>
 > 这一轮的**主体**是**门禁自检本身的完备性加固**(门禁脚本的判定逻辑,
 > 不改产品代码),
 > 起因:第十三轮把门禁的**判据**修好了(#251 / #252),但"判据有没有被自检
@@ -1622,6 +1629,39 @@ go 指令 → 门禁**红**。
 `./scripts/verify.sh` **9 步通过**(实测 **118s**,分步 0s / 0s / 5s / 16s / 34s /
 7s / 24s / 7s / 24s)、`docs/check-numbering.sh` 通过
 (缺陷号区间 1..288 连续)。
+
+### 轮次 83:第十九轮(迭代 20 收口)—— 空上下文可见(#280)/ 门禁第 6 步的断言维度(#289)
+
+> 登记于 `docs/OPTIMIZATION.md` 第十三节末"轮次 83"小节(#280 关闭 / #289 关闭 /
+> #290 有意边界)。
+>
+> 本轮是**收口轮**:两份独立的终审复审交叉验证了同一份剩余清单,收掉最后两条。
+> 两条同属一族:**"空洞不可见"** —— ① 运行时:上游没产出 → 下游空上下文
+> **零告警**;② 门禁:零断言的测试包能骗过**整条 9 步门禁**。
+>
+> **本轮新增 Go 顶层用例 +7 例**(`contextx/context_test.go` 4 例 +
+> `workflow/runtime/context_chain_test.go` 3 例),**未新增测试文件**
+> (141 → **141**),顶层 `func Test*` 782 → **789**;门禁自检场景 23 → **27**。
+
+| 文件 | 锁住的行为 |
+| --- | --- |
+| `contextx/context_test.go`(**改,+4 例**) | **空槽位必须能被看见**(#280):`TestBuildWithSlotsReportsEmptyChainSlots`(**键存在但值为空串**的 `plan` 与**键根本不存在**的 `review` 都要进"空槽位"清单;同时断言**数据表本身不变**(键仍在、值仍是空串 —— 渲染口径"键存在 = 可解析"**不动**))、`TestBuildWithSlotsIgnoresNonChainSlots`(**`task` / `iteration` 不是上游产出的链槽位** —— 非循环工作流里 `{{iteration}}` 恒为空,算进来就是纯噪音)、`TestBuildWithSlotsRespectsModeScope`(plan 模式拿不到 `git_diff` / `review` → **不得**报为空槽位)、`TestBuildWithSlotsKeepsNonEmptyValues`(**有内容的值不算空** —— 数字 0、空列表 `[]` 渲染出来是有内容的("0" / "[]"),不是"缺失") |
+| `workflow/runtime/context_chain_test.go`(**改,+3 例 —— 本轮核心**) | **"上游没产出"必须可见**(#280):`TestEmptyUpstreamSlotIsVisible`(上游成功但 summary/output **均为空** → 下游 `{{plan}}` 渲染成空串 → **必须**有 `node.warning` 且 `reason="empty_context_slots"`、**点名 `plan`**、**挂在下游节点上**;执行**仍落 COMPLETED** —— 语义是"可见但不阻断")、`TestEmptySlotWarningAbsentWhenUpstreamProduced`(上游**有产出**时**不得**出现空槽位告警 —— 否则就是噪音,和"缺失必须可见"一样有害)、`TestEmptySlotAndMissingVarAreDistinguishable`(拼错的 `{{revwie}}` 与空槽位的 `{{plan}}` **必须报成两种 reason** —— 用户要能分清"我拼错了"与"上游没给我东西") |
+
+**门禁侧(本轮改了 `scripts/verify.sh` 第 6 步)**:
+
+| 项 | 内容 |
+| --- | --- |
+| 新判据 | 第 6 步除"有真实执行并通过的顶层用例"(框架事件)外,**再加一条**:该包的 `*_test.go` 里**必须真的有断言**(静态扫描)。**按包**判定:包里有一处断言即达标 |
+| 为什么不用 `go vet` | 实测 `go vet -tests` 对一个**零断言**的包 **exit 0** —— vet 的 tests 分析器查的是**测试函数签名/示例命名**,**不是断言数**;断言数**不在 `go test -json` 的事件里**。所以只能静态扫源码 |
+| 口径 | 断言 = 惯例接收者(t/tb/tt/t2…)上的 `Error/Errorf/Fatal/Fatalf/Fail/FailNow` 或第三方 `assert./require.` 的调用;扫描范围**只限该包的 `*_test.go`**(生产代码里 `err.Error()` / `fmt.Errorf()` 本仓库实测 73 + 71 处,扫生产代码等于没有判据) |
+| **先剥注释** | `strip_go_comments`(字符串/字符常量状态感知):注释里的 `t.Errorf` **不是断言**。**实测**:一个只在注释里提到 `t.Fatal` 的零断言包,若不剥注释会被判成"有断言"而放行 —— 本项目的测试文件**大量**在注释里写着"这里应该 t.Errorf(...)",不剥注释等于判据当场失效 |
+| 自检(+4 条,23 → **27**) | ① 有断言的包**不得**被误报(绿方向);② 零断言的包**必须**被抓(红方向,#289 的绕过本身);③ **只在注释里**提到断言的包**必须**被抓(证明剥注释真的生效);④ 反向对照(对有断言的包断言"必须在报告里"**必须失败** —— 证明这个判定函数真的在区分,不是恒真) |
+| 实测证据 | 隔离副本里放一个只含 `func TestNothingRuns(t *testing.T) { _ = 1 }` 的包 → **修前**:9 步门禁 **exit 0**(110s,全绿);**修后**:红在第 6 步("以下包的测试代码里没有任何断言");**真实仓库**:9 步 **全绿**(误报率实测 **0** —— 21 个包逐个扫,无一被报出) |
+
+**本轮验证**:`go vet` 干净、`go test -race -count=1 ./...` **21 个包全绿**、
+vitest **268/268**、`./scripts/verify.sh` **9 步通过**(实测 **113s**)、
+`docs/check-numbering.sh` 通过(缺陷号区间 1..290 连续)。
 
 ## 门禁第 6 步:伪造输出绕过 —— 为什么不能用文本解析
 
@@ -2270,6 +2310,7 @@ await new Promise((r) => setTimeout(r, 0));   // ×2
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 83 | **第十九轮(迭代 20 收口)**:空上下文可见 / 门禁第 6 步的断言维度 | ✅ 已落地(工作区,待提交) | **#280 关闭**:"上游什么都没产出"曾是**静默空上下文**(`contextx.Build` 总是把链键写进数据表 → 模板引擎按"键存在 = 可解析"判缺失 → `{{plan}}` 永远不被报成缺失 → 下游拿到空串、节点照常 SUCCESS、**零告警**)→ 改**上下文层报"空槽位"**(`contextx.BuildWithSlots` 产出"键存在但值为空"的链槽位清单;运行期把**被提示词引用到的**空槽位报成 `node.warning` / `reason="empty_context_slots"`),**可见但不阻断**;`template` 包的"键存在 = 可解析"口径**不动**(渲染层口径 ≠ 上下文层事实)。**#289 关闭**:门禁第 6 步只看"**有代码跑过**"→ 一个**零断言**的用例(`{ _ = 1 }`)真的执行、真的 pass → **9 步门禁全绿**(隔离副本实测 exit 0)→ 第 6 步加**第二个判据**:包里必须**真的有断言**(静态扫描;实测 `go vet -tests` **检测不出**零断言测试,断言数不在框架事件里);扫描**只限 `*_test.go`**且**先剥注释**(注释里的 `t.Errorf` 不是断言 —— 实测不剥注释会让只提注释的零断言包溜过去);自检 +4 条(23 → **27**)。**#290 新登记**:断言判据"按包 + 文本级"的粒度与实现 —— **有意边界,不修**(细到"每个用例"必然误报)。新增顶层用例 **+7 例**(`contextx/context_test.go` 4 / `workflow/runtime/context_chain_test.go` 3),**未新增测试文件**(141 → **141**),顶层 `func Test*` 782 → **789**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **113s**),新判据在真实仓库上**误报 0** |
 | 82 | **第十八轮(迭代 20)**:设置读失败可观测 / 内置 Agent 注册失败上抛 / Set 白名单化 | ✅ 已进主干(`3e4a5b3`) | #281-#283 共 **3 条**,**全部关闭**:**#281** `Settings.Info()` 吞掉 `git_working_dir` 的**读错误** → 静默回落到内存态目录,界面显示的不是库里那个,**用户一保存就把损坏行覆盖成内存值**(损坏事实消失)→ 改**三态分开**(读到 / `NOT_FOUND` 正常初始态 / 其它读失败)+ 记 ERROR + 响应新增 `git_working_dir_read_failed` 标记(`omitempty`,正常响应形状不变);启动路径同样留痕;**#282** `reloadAgents` 里 4 处 `_ = a.Agents.Register(...)` → 内置 Agent 注册失败**一行日志都没有**(此前不可达,但"不可达"不等于"永远不可达")→ 改 **ERROR 日志 + 上抛**(`NewApp` 启动即失败,零误伤风险);**#283** `SettingsService.Set(key, value)` **任意键写入**经 Wails IPC 暴露(`main.go:310` 的 `wails.NewService(app.Settings)` + 生成绑定 `settingsservice.ts:48`)→ 可绕过 `permMu` 写 `agent_policies`(并发保护失效)、绕过 `git_working_dir` 存在性与 `log_level` 校验 → 改**白名单三键** + **复用 `Update` 的同一套校验** + **值类型校验**(此前 `value any` 可把字符串 `"true"` 写进 `allow_script_nodes`),`agent_policies` **刻意排除**;`Update` 自己也改为复用 `Set`(设置写入的**唯一实现**)。新增测试文件 **3 个 Go**(`app/application/settings_read_failure_test.go` 6 例 / `app/application/agent_registration_test.go` 2 例 / `app/application/settings_set_whitelist_test.go` 8 例);新增专节"轮次 82"一节;Go 测试文件 138 → **141**,顶层 `func Test*` 766 → **782**;前端 22 文件 / **268** 用例(未动前端代码);门禁 9 步通过(实测 **118s**) |
 | 81 | **第十七轮(迭代 19)**:跨节点上下文链路修复 / env 第四态 / 权限三态 / argv 凭据告警 | ✅ 已进主干(`e62f4ff`) | #270-#278 共 **9 条**,**全部关闭**:**#270**(**P0**)跨节点上下文整条链是死的(`{{plan}}` / `{{review}}` / `{{issues}}` / `{{test_result}}` **永远渲染成空串** —— 而仓库自带的 `workflows/examples/coding-task.yaml` 就在用 `{{plan}}`,这条示例**从未生效过**却一直报 SUCCESS)→ 改写**活的会话状态**并让写失败显式失败 + 键名统一到 10 个常量 + `pickText` 取第一个**非空**值(同链第二个断点);**#271** env 表的**第四态**缺失(只改模型的请求会顺手删掉全部凭据)→ 缺省 = 不修改 / `{}` = 显式清空 / `{k:v}` = 整表替换;**#272** 权限端点无法区分"缺省"与"false"(缺键 → false → 其余能力**静默吊销**)→ 改局部更新 + 非布尔值 400;**#273** **argv 是凭据的"本机可见"出口**(`extra_args` 原样进子进程 argv)→ 启动 CLI 前按**值形态**告警(只报下标**不回显值**)+ **绝不改写 argv**;**#274** `retry.max_attempts` 非数值 → 重试被静默关闭 → 运行期 **fail closed** + 校验期子键类型校验(两边同源);**#275** mock `behavior` 整体替换 → 改**逐键合并** + 未知键/错类型报错;**#276** 出口分支下标写失败被吞(恢复路径回放分支的**唯一依据**)→ 写失败返回 error;**#277** Git 工作目录不校验存在性("保存成功"但之后每个节点都失败)→ 落库前校验;**#278** 备份恢复的"运行时应用失败"信号前端整个丢掉 → 前端补类型与警告。新增测试文件 **11 个 Go**(`workflow/runtime/context_chain_test.go` 10 例 / `contextx/context_test.go` +5 / `api/agent_config_env_test.go` 2 / `api/agent_permission_patch_test.go` 4 / `app/application/agent_env_contract_test.go` 4 / `app/application/settings_gitdir_test.go` 4 / `app/application/mock_behavior_test.go` 6 / `agent/claude/claude_argv_test.go` 2 / `agent/pi/pi_argv_test.go` 2 / `workflow/runtime/retry_policy_test.go` 5 / `workflow/validator/retry_config_test.go` 5 / `workflow/compiler/route_branch_test.go` 3)+ 改 4 个既有文件(`contextx` / `state_mask_test.go` / `cas_conflict_test.go` / `node_config_test.go`);新增专节"轮次 81"一节;Go 测试文件 126 → **138**,顶层 `func Test*` 711 → **766**;前端 22 文件 / **268** 用例;门禁 9 步通过(97s) |
 | 80 | **第十六轮(迭代 17)**:单源回归锁去恒真 / 取消残余窗口的边界 | ✅ 已进主干(`e62f4ff`) | **#263 已关闭**(恒真的"单源"回归锁):跨包逐字节比对搬到 `agent/credential_mask_test.go`(`agent` 依赖 `logx`,logx 反向 import agent 会成环 → 只能写在能同时 import 两边的包里),23 条输入 `agent.MaskCredentialValues(x)` 与 `logx.MaskCredentialValues(x)` 必须逐字节相同;`logx` 侧同名用例改成比对**两个不同的入口**;覆盖矩阵加"Mask 不得比 MaskCredentialValues 少遮";加**防空转守卫**(函数对象 + AST)。**造坏四组全红**(实现改坏 / agent 侧自写一份 / 改成别名 / 比对改回同一函数)。**#269 新登记**:取消的残余窗口(读库之后、执行恰好完成 → 200 而最终 COMPLETED)**实测 ≈0.5ms**(上一轮估的"µs 级"宽一个量级;成因是**两段 DB 往返**("请求到达 → ctx 真被取消" + "最后一次取消检查 → 终态落库"),分段测量后各 ≈250µs),不是句柄摘除;220 次随机采样:混合带 [-300µs,+250µs],约一半落到 200 假成功,9/220 ≈ 4%)→ **判定为可接受的边界**(状态与事件流仍正确:执行真的跑完了 → COMPLETED + 只有一条 workflow.completed + 没有 workflow.cancelled;用户的取消意图已满足),不修代码,改**语义登记 + 确定性用例钉死**(`workflow/runtime/cancel_residual_test.go`,探针 + 阻塞事件总线;造坏:人为关上窗口 → 用例变红)。新增测试文件 **1 个 Go**(`workflow/runtime/cancel_residual_test.go` 1 例)+ 改 `agent/credential_mask_test.go`(+2 例)/ `logx/credential_test.go` / `workflow/runtime/engine.go`(注释 + 测试接缝 `cancelProbe`);新增专节"轮次 80"一节;Go 测试文件 126 → **127**,顶层 `func Test*` 711 → **714**;前端未动 |(恒真的"单源"回归锁):跨包逐字节比对搬到 `agent/credential_mask_test.go`(`agent` 依赖 `logx`,logx 反向 import agent 会成环 → 只能写在能同时 import 两边的包里),23 条输入 `agent.MaskCredentialValues(x)` 与 `logx.MaskCredentialValues(x)` 必须逐字节相同;`logx` 侧同名用例改成比对**两个不同的入口**;覆盖矩阵加"Mask 不得比 MaskCredentialValues 少遮";加**防空转守卫**(函数对象 + AST)。**造坏四组全红**(实现改坏 / agent 侧自写一份 / 改成别名 / 比对改回同一函数)。**#269 新登记**:取消的残余窗口(读库之后、执行恰好完成 → 200 而最终 COMPLETED)**实测 ≈0.5ms**(上一轮估的"µs 级"宽一个量级;成因是**两段 DB 往返**("请求到达 → ctx 真被取消" + "最后一次取消检查 → 终态落库",分段测量后各 ≈250µs),不是句柄摘除;220 次随机采样:混合带 [-300µs,+250µs],约一半落到假成功,9/220 ≈ 4%)→ **判定为可接受的边界**(状态与事件流仍正确:执行真的跑完了 → COMPLETED + 只有一条 workflow.completed + 没有 workflow.cancelled;用户的取消意图已满足),不修代码,改**语义登记 + 确定性用例钉死**(`workflow/runtime/cancel_residual_test.go`,探针 + 阻塞事件总线;造坏:人为关上窗口 → 用例变红)。新增测试文件 **1 个 Go**(`workflow/runtime/cancel_residual_test.go` 1 例)+ 改 `agent/credential_mask_test.go`(+2 例)/ `logx/credential_test.go` / `workflow/runtime/engine.go`(注释 + 测试接缝 `cancelProbe`);新增专节"轮次 80"一节;Go 测试文件 126 → **127**,顶层 `func Test*` 711 → **714**;前端未动 |

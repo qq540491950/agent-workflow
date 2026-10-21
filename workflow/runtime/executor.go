@@ -395,7 +395,7 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		Variables:   env.Vars,
 		State:       e.stateView(st),
 	}
-	data := e.CtxMgr.Build(mode, ec, node.ID)
+	data, emptySlots := e.CtxMgr.BuildWithSlots(mode, ec, node.ID)
 	prompt := cfgStr(node, "prompt")
 	if prompt == "" {
 		// prompt 有两种写法:字符串,或 {template: ...}(契约表里 prompt 的
@@ -424,6 +424,7 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 		}
 	}
 	instructions := rendered
+	instructionsTpl := ""
 	if extra := cfgStr(node, "instructions"); extra != "" {
 		r2, m2, rerr := e.Tpl.RenderErr(extra, data)
 		if rerr != nil {
@@ -433,6 +434,7 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 			}
 		}
 		missing = append(missing, m2...)
+		instructionsTpl = extra
 		instructions = strings.TrimSpace(rendered + "\n\n" + r2)
 	}
 	// 缺失变量必须可见:此前 `rendered, _ :=` 把 missing 列表直接丢掉 ——
@@ -440,6 +442,10 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 	// Agent 收到残缺 prompt 并照常返回 SUCCESS/decision,没有任何告警。
 	// 不让节点失败(可能是合法的可选变量),但要发事件 + 写日志。
 	e.reportMissingVars(env, node, missing)
+	// "上游没产出"同样必须可见(#280):键**存在**但值为空时,模板引擎按
+	// "键存在=可解析"的口径不报缺失 → {{plan}} 渲染成空串 → 下游照常
+	// 返回 SUCCESS,用户以为"方案传给下游了"。
+	e.reportEmptySlots(env, node, emptySlots, referencedVars(e.Tpl, prompt, instructionsTpl))
 
 	// 节点级 model 覆盖(DSL config.model)> Agent 默认模型
 	nodeModel := cfgStr(node, "model")
@@ -572,6 +578,80 @@ func (e *Engine) reportMissingVars(env *compiler.RunEnv, node *model.Node, missi
 	env.Bus.Emit(event.New("node.warning", env.Exec.ID, node.ID, map[string]any{
 		"node": node.ID, "reason": "missing_template_vars", "missing": uniq, "message": msg,
 	}))
+}
+
+// reportEmptySlots 上报"上游没有产出"的上下文槽位(#280)。
+//
+// 与 reportMissingVars 的分工(两条 reason 不同,用户才能区分"我拼错了"
+// 与"上游没给我东西"):
+//   - missing_template_vars:键**不存在**(变量名拼错)→ 模板层报;
+//   - empty_context_slots:键**存在但值为空**(上游没产出)→ 上下文层报。
+//
+// **可见但不阻断**(语义选择的理由见 docs/OPTIMIZATION.md #280):
+// 空上下文下 Agent 仍可能凭自身知识给出有效结论,硬失败(方案甲)会把
+// "可选引用"变成硬约束 —— 需求.md 十六节把 review 的上下文列为"**至少**
+// 提供",而那份清单本身就含有天然为空的项(Previous Review / Git Diff /
+// Test Result);需求.md 三十五节只规定模板引擎支持哪些变量,**没有**
+// "必需/可选"契约表 → 方案丙(区分必需与可选)在当前 DSL 里没有承载点。
+// 所以:发事件 + 记日志,节点照常成功。
+//
+// 只报**被提示词引用到**的空槽位:没被引用的空槽位与这个节点无关,
+// 报出来是纯噪音。
+func (e *Engine) reportEmptySlots(env *compiler.RunEnv, node *model.Node, emptySlots []string, referenced map[string]bool) {
+	if len(emptySlots) == 0 || len(referenced) == 0 {
+		return
+	}
+	var hit []string
+	for _, s := range emptySlots {
+		if referenced[s] {
+			hit = append(hit, s)
+		}
+	}
+	if len(hit) == 0 {
+		return
+	}
+	sort.Strings(hit)
+	msg := "上游未产出,提示词里的上下文槽位渲染成空串: " + strings.Join(hit, ", ")
+	logx.Warn(msg, "execution", env.Exec.ID, "node", node.ID)
+	// 同一个事件类型(node.warning)、不同的 reason —— 前端与审计流可以
+	// 按 reason 区分"拼错了"与"上游没产出"。
+	env.Bus.Emit(event.New("node.warning", env.Exec.ID, node.ID, map[string]any{
+		"node": node.ID, "reason": "empty_context_slots", "slots": hit, "message": msg,
+	}))
+}
+
+// referencedVars 返回模板里引用到的变量名集合(去重)。
+//
+// 口径:**用空数据表渲染一次** —— 模板引擎对"数据表里没有的键"一律报成
+// missing(这正是"键存在=可解析"的反面),于是 missing 列表恰好就是
+// "这个模板引用了哪些变量"。
+//
+// 为什么不自己解析 {{...}} 占位符:解析口径必须只有一份(约定 13 的同源
+// 精神 —— template 包是唯一定义处)。自己写一套正则解析,将来 template
+// 包改了占位符语法,这里会静默失配。
+//
+// 渲染出错(理论上不会:同一个模板用真实数据渲染已经成功)→ 返回空集合,
+// 调用方跳过空槽位告警(不阻断执行)。
+func referencedVars(tpl TemplateRenderer, texts ...string) map[string]bool {
+	out := map[string]bool{}
+	if tpl == nil {
+		return out
+	}
+	for _, txt := range texts {
+		if txt == "" {
+			continue
+		}
+		_, missing, err := tpl.RenderErr(txt, map[string]any{})
+		if err != nil {
+			continue
+		}
+		for _, m := range missing {
+			if m != "" {
+				out[m] = true
+			}
+		}
+	}
+	return out
 }
 
 // invokeAgent 调用 Agent 并把结果映射为节点结果。

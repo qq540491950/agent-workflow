@@ -591,7 +591,7 @@ echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推�
 # 计数变量的赋值发生在**函数体内**(不是子 shell),因此计数能真正累加。
 selfcheck_count=0
 # 期望的自检场景条数。**新增或删除任何一条自检场景,都必须同步改这里** ——
-# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 23 条:
+# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 27 条:
 #   1-3  交叉检查:windows 测试文件对照 / 测试文件类型错 / 源文件类型错
 #   4-9  孤儿包检查:windows·freebsd·js 各一条绿 + 一条红
 #   10   孤儿包检查:目录混包(两个 package 名)必须被抓
@@ -599,12 +599,15 @@ selfcheck_count=0
 #   12   目标平台枚举断言的反向对照:三平台手写清单必须通不过
 #   13-17 第 6 步"真实用例"判定:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓
 #          / 伪造输出包被抓 / 反向对照(对正常包断言"必须在报告里"必须失败)
-#   18-21 路径排除规则(第十八轮终验 #279):build/ 下的项目代码包必须在门禁
+#   18-21 第 6 步"断言扫描"判定(#289):有断言的包不误报 / 零断言的包被抓 /
+#          只在注释里提到断言的包被抓 / 反向对照(有断言的包断言"必须在
+#          报告里"必须失败)
+#   22-25 路径排除规则(第十八轮终验 #279):build/ 下的项目代码包必须在门禁
 #          包集合里 / 类型正确时必须能过编译 / 类型错误时必须被抓 /
 #          Wails 平台脚手架(build/ios)必须继续被排除
-#   22-23 孤儿包候选:build/ 下的包必须在候选里 / testdata/ 下的包必须不在
+#   26-27 孤儿包候选:build/ 下的包必须在候选里 / testdata/ 下的包必须不在
 #          候选里(Go 工具链约定 —— 夹具目录不可见是正确行为)
-SELFCHECK_EXPECTED=23
+SELFCHECK_EXPECTED=27
 
 # selfcheck_ok <标签> <命令...> —— 断言命令必须**成功**(绿方向)。
 selfcheck_ok() {
@@ -872,7 +875,10 @@ echo "OK"
 end_step
 
 step "6/9" "每个包都必须有真实执行的用例"
-# 逐包核对"至少有一条**真正执行并通过**的顶层用例"。
+# 逐包核对两件事:
+#   ① 至少有一条**真正执行并通过**的顶层用例(框架事件判据);
+#   ② 测试代码里**至少有一处断言**(静态扫描判据,#289)——
+#      "跑过了"不等于"验证过什么"。
 #
 # ---- 判据:框架事件,不是文本输出 ----------------------------------------
 # `go test -json` 每行是一个扁平 JSON 对象,框架给每个用例发一条事件:
@@ -1047,6 +1053,130 @@ MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
 	fail "第 6 步判定执行失败(拿不到 go test -json 事件 —— 必须红,不能静默跳过)"
 [ -z "$MISSING" ] || fail "以下包缺少真实执行的用例:$MISSING"
 
+# ---- 第 6 步的第二个判据:包里必须真的有"断言"(不只是"跑过的用例")----
+#
+# 上面的判据证明的是"**有代码跑过**";它证明不了"**验证过什么**"。
+# 一个**零断言**的用例(只调用函数、不断言)照样会拿到框架的顶层 pass
+# 事件 → 判据判"有真实用例" → 整个门禁放行。
+#
+# 实测(隔离副本,轮次 83):造一个只含
+#     func TestNothing(t *testing.T) { _ = 1 }
+# 的新包 → 第 6 步判"有真实用例" → 9 步门禁全绿 = 绕过(#289)。
+# 这个包实际上**什么都没验证** —— 它和"没有测试文件"的包一样,是穿着
+# 测试外衣的空壳。
+#
+# **为什么不用 `go vet -tests`**:实测它**检测不出**"没有断言的测试" ——
+# vet 的 tests 分析器查的是测试函数签名/示例命名,**不是断言数**;对一个
+# 零断言的包 `go vet -tests ./...` exit 0(实测)。断言数**不在框架事件里**
+# (`go test -json` 不报告),只能静态扫源码。
+#
+# 口径(**必须写清,否则会误报**):
+#   - **按包**判定:包里只要有**一处**断言调用就算达标 —— 不是"每个用例
+#     都要有断言"(那必然误报:表格驱动测试把断言放在子函数/辅助函数里
+#     是常态)。
+#   - 断言调用 = ① 惯例接收者(t / tb / tt / t2 …)上的
+#     Error/Errorf/Fatal/Fatalf/Fail/FailNow 方法调用,或
+#     ② 第三方断言包 assert./require. 的调用。
+#   - 扫描范围 = 该包的 `*_test.go`(**只扫测试文件**):生产代码里
+#     `err.Error()` / `fmt.Errorf()` 满地都是(本仓库实测 73 + 71 处),
+#     扫生产代码等于没有判据。
+#
+# 已知边界(**有意取舍**,登记在案,不是缺陷):
+#   - 判据是**按包**的:"1 个真断言 + 9 个零断言用例"的包照样通过;
+#   - 接收者名不遵循 t/tb/tt 惯例的 testing.T 认不出来(极罕见);
+#   - 断言写在**非测试文件**里的 testing 助手中(本仓库零命中)认不出来;
+#   - 判据认的是**文本形态**:任何 X.Error( 形态的调用(哪怕 X 不是
+#     testing.T)都算断言 —— **偏松不偏严**,不会造成误报。
+ASSERT_CALL_RE='(^|[^A-Za-z0-9_])(tb|tt|t[0-9]*)\.(Errorf?|Fatalf?|FailNow?|Fail)\(|(^|[^A-Za-z0-9_])(assert|require)\.[A-Za-z_][A-Za-z0-9_]*\('
+
+# strip_go_comments <文件> → 打印**去掉注释**后的源码(字符串/字符常量里
+# 的内容替换成空串)。
+#
+# 为什么必须去注释:本项目的测试文件**大量**在注释里写着"这里应该
+# t.Errorf(...)" —— 文本级扫描会把注释当成断言,判据当场失效(实测:
+# 一个只在注释里提到 t.Fatal 的零断言包,被扫描判成"有断言"而放行)。
+# 注释不是断言,注释里的 t.Errorf **不能**算数。
+#
+# 为什么不用简单的 sed 's://.*::':字符串里的 "//"(URL、路径)会把
+# **同一行后面真实的断言**一起切掉 —— 判据被削弱(漏报)。这里的 awk
+# 跟踪字符串/字符常量/原始字符串状态:
+#   - 字符串里的 // 与 /* 不算注释;
+#   - 字符串**内容**本身被替换成空串(否则 `msg := "t.Error("` 这种
+#     字符串会被当成断言);
+#   - 跨行的 /* */ 块注释用状态位跨行延续。
+strip_go_comments() {
+	awk '
+	BEGIN { IN_BLOCK = 0; SQ = sprintf("%c", 39) }
+	{
+		out = ""
+		i = 1
+		n = length($0)
+		while (i <= n) {
+			c = substr($0, i, 1)
+			if (IN_BLOCK) {
+				if (c == "*" && substr($0, i + 1, 1) == "/") { IN_BLOCK = 0; i += 2; continue }
+				i++
+				continue
+			}
+			if (c == "/" && substr($0, i + 1, 1) == "/") break
+			if (c == "/" && substr($0, i + 1, 1) == "*") { IN_BLOCK = 1; i += 2; continue }
+			if (c == "\"" || c == SQ || c == "`") {
+				q = c
+				out = out c
+				i++
+				while (i <= n) {
+					c = substr($0, i, 1)
+					if (c == "\\" && q != "`") { i += 2; continue }
+					i++
+					if (c == q) { out = out c; break }
+				}
+				continue
+			}
+			out = out c
+			i++
+		}
+		print out
+	}
+	' "$1"
+}
+
+# assert_scan_report <模块目录> <包列表> → 打印"测试代码里没有任何断言"的包
+#   (每行 "  <pkg>: <原因>");空输出 = 全部达标。
+#
+# 门禁与**自检**走同一个函数 —— 理由同 real_usage_verdict:自检若自己另写
+# 一套判定,将来有人把这里改坏,自检照样绿,盲区就又回来了。
+#
+# 拿不到包清单(go list 失败)→ 返回非 0 → 门禁**红**(fail closed),
+# 绝不"扫不到就当达标"。
+assert_scan_report() {
+	as_dir="$1"
+	as_pkgs="$2"
+	as_list=$(cd "$as_dir" && go list -f '{{.ImportPath}}{{"\037"}}{{.Dir}}{{"\037"}}{{range .TestGoFiles}}{{.}} {{end}}{{"\037"}}{{range .XTestGoFiles}}{{.}} {{end}}' $as_pkgs 2>/dev/null) || return 1
+	[ -n "$as_list" ] || return 1
+	printf '%s\n' "$as_list" | while IFS=$'\037' read -r as_pkg as_pkgdir as_test as_xtest; do
+		[ -n "$as_pkg" ] || continue
+		as_files="$as_test $as_xtest"
+		# **没有测试文件的包不归这里管**:它们由"真实用例"判据报出来
+		# (0 个真实用例 / 没有测试文件),不重复报。
+		[ -n "$(printf '%s' "$as_files" | tr -d ' ')" ] || continue
+		as_hit=""
+		for as_f in $as_files; do
+			# 文件名是**相对于包目录**的(go list 给的是基名)。
+			[ -f "$as_pkgdir/$as_f" ] || continue
+			if strip_go_comments "$as_pkgdir/$as_f" | grep -qE "$ASSERT_CALL_RE"; then
+				as_hit="$as_f"
+				break
+			fi
+		done
+		[ -n "$as_hit" ] && continue
+		printf "  %s: 测试代码里没有任何断言(用例跑了,但什么都没验证)\n" "$as_pkg"
+	done
+}
+
+NO_ASSERT=$(assert_scan_report "$ROOT" "$CHECK_PKGS") ||
+	fail "第 6 步的断言扫描执行失败(拿不到包清单 —— 必须红,不能静默跳过)"
+[ -z "$NO_ASSERT" ] || fail "以下包的测试代码里没有任何断言:$NO_ASSERT"
+
 # ---- 门禁自检:第 6 步的判定本身必须真的能抓到 0 用例 / 全 skip / 伪造输出 -
 # 为什么必须有这一段:第 6 步是门禁里**最复杂**的一段判定(框架事件 + 顶层/
 # 子用例的区分 + 窄化/兜底两段执行)。它守护的正是 #252 的绕过场景本身 ——
@@ -1067,7 +1197,8 @@ MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
 # gofmt 清单。go.mod 的 go 指令取自仓库自己的 go.mod(不硬编码版本号)。
 # 成本:两次小模块的 `go test` ≈ 2s(实测)。
 USAGE_CHECK_DIR=$(mktemp -d /tmp/awo-verify-usagecheck.XXXXXX)
-mkdir -p "$USAGE_CHECK_DIR/good" "$USAGE_CHECK_DIR/zero" "$USAGE_CHECK_DIR/skip" "$USAGE_CHECK_DIR/fake"
+mkdir -p "$USAGE_CHECK_DIR/good" "$USAGE_CHECK_DIR/zero" "$USAGE_CHECK_DIR/skip" "$USAGE_CHECK_DIR/fake" \
+	"$USAGE_CHECK_DIR/noassert" "$USAGE_CHECK_DIR/asserted" "$USAGE_CHECK_DIR/commentonly"
 printf 'module awo/usagecheck\n\ngo %s\n' "$SELF_GO_VER" >"$USAGE_CHECK_DIR/go.mod"
 printf 'package good\n\nimport "testing"\n\nfunc TestGood(t *testing.T) { _ = 1 }\n' >"$USAGE_CHECK_DIR/good/good_test.go"
 printf 'package zero\n\nfunc helperOnly() {}\n' >"$USAGE_CHECK_DIR/zero/zero_test.go"
@@ -1075,6 +1206,15 @@ printf 'package skip\n\nimport "testing"\n\nfunc TestSkipped(t *testing.T) { t.S
 # 伪造包:用例被 t.Skip 跳过(什么都没验证),却自己打印框架格式的行 ——
 # 迭代 14B 的文本判据会放行它,本轮的框架事件判据必须抓住它。
 printf 'package fake\n\nimport (\n\t"fmt"\n\t"testing"\n)\n\nfunc TestForged(t *testing.T) {\n\tfmt.Println("=== RUN   Forged")\n\tfmt.Println("--- PASS: Forged (0.00s)")\n\tt.Skip("环境不具备")\n}\n' >"$USAGE_CHECK_DIR/fake/fake_test.go"
+# 零断言包:用例**真的跑了**、真的 pass 了,但**没有任何断言** ——
+# 框架照样给它顶层 pass 事件 → "真实用例"判据放行它(#289 的绕过本身)。
+printf 'package noassert\n\nimport "testing"\n\nfunc TestNoAssert(t *testing.T) {\n\t_ = 1\n}\n' >"$USAGE_CHECK_DIR/noassert/noassert_test.go"
+# 有断言的包:断言扫描的**对照组**(绿方向 —— 没有它,下面两条红断言是恒真的)。
+printf 'package asserted\n\nimport "testing"\n\nfunc TestAsserted(t *testing.T) {\n\tif 1 != 1 {\n\t\tt.Fatal("不可能")\n\t}\n}\n' >"$USAGE_CHECK_DIR/asserted/asserted_test.go"
+# 只在**注释里**提到断言的包:注释不是断言 —— 文本级扫描必须先把注释去掉,
+# 否则这个包会被判成"有断言"而放行(实测:本仓库的测试文件大量在注释里
+# 写着"这里应该 t.Errorf(...)",不处理注释等于判据失效)。
+printf 'package commentonly\n\nimport "testing"\n\n// 这里应该 t.Errorf(但注释不是断言)\nfunc TestCommentOnly(t *testing.T) {\n\t_ = 1\n}\n' >"$USAGE_CHECK_DIR/commentonly/commentonly_test.go"
 USAGE_TEXT_LOG="$USAGE_CHECK_DIR/test.log"
 if ! ( cd "$USAGE_CHECK_DIR" && go test -count=1 -v ./... ) >"$USAGE_TEXT_LOG" 2>&1; then
 	# 隔离模块自己跑不起来 = 自检环境不可用 → 必须红,不能静默跳过
@@ -1120,6 +1260,25 @@ selfcheck_ok "第 6 步判定:伪造 '=== RUN'/'--- PASS' 输出的包必须被�
 # 反向对照:同一个判定函数,对**正常包**断言"必须在报告里"必须失败 ——
 # 它若通过,说明这个函数根本没有在区分(恒真),上面几条就都是空转。
 selfcheck_red "第 6 步判定必须能区分:正常包不在报告里 → 断言'在报告里'必须失败" usage_expect "awo/usagecheck/good" "$USAGE_REPORT" "yes"
+
+# ---- 门禁自检:第 6 步的"断言扫描"必须真的能抓到零断言的包(#289)--------
+# 为什么要单独一段:上面那组场景护的是"**有没有跑**";这一组护的是
+# "**验证过什么**"。两者的绕过场景不同,必须各有一组自检:
+#   - 用例跑了但**零断言** → 框架给顶层 pass 事件 → "真实用例"判据放行
+#     (这正是 #289 的绕过本身)→ 必须由断言扫描抓住。
+#
+# 断言扫描会把自检模块里**所有**零断言的包都报出来(good/zero/skip/fake
+# 本来就没有断言)—— 这是判据的语义,不是误报;本组只断言两件事:
+#   1. 有断言的包(对照组)→ **不得**被报出来(绿方向:没有这一条,下面
+#      那条红断言就是恒真的);
+#   2. 零断言的包 → 必须被报出来(红方向:证明判据真的在区分);
+#   3. 反向对照:对有断言的包断言"必须在报告里"必须失败(证明它能判负)。
+ASSERT_REPORT=$(assert_scan_report "$USAGE_CHECK_DIR" "awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip awo/usagecheck/fake awo/usagecheck/noassert awo/usagecheck/asserted awo/usagecheck/commentonly") ||
+	fail "门禁自检失败:第 6 步的断言扫描函数自身执行失败(自检环境不可用 —— 必须红,不能静默跳过)"
+selfcheck_ok "第 6 步断言扫描:有断言的包不得被误报(否则新判据把正常代码挡在门外)" usage_expect "awo/usagecheck/asserted" "$ASSERT_REPORT" "no"
+selfcheck_ok "第 6 步断言扫描:零断言的包必须被抓(否则'新增一个恒真测试包'就能绕过门禁 —— #289 的绕过本身)" usage_expect "awo/usagecheck/noassert" "$ASSERT_REPORT" "yes" "没有任何断言"
+selfcheck_ok "第 6 步断言扫描:只在注释里提到断言的包必须被抓(注释不是断言 —— 否则文本扫描等于没有判据)" usage_expect "awo/usagecheck/commentonly" "$ASSERT_REPORT" "yes" "没有任何断言"
+selfcheck_red "第 6 步断言扫描必须能区分:有断言的包不在报告里 → 断言'在报告里'必须失败" usage_expect "awo/usagecheck/asserted" "$ASSERT_REPORT" "yes"
 rm -rf "$USAGE_CHECK_DIR"
 USAGE_CHECK_DIR=""
 
@@ -1132,8 +1291,8 @@ USAGE_CHECK_DIR=""
 [ "$selfcheck_count" -eq "$SELFCHECK_EXPECTED" ] ||
 	fail "门禁自检失败:实际执行了 $selfcheck_count 条自检场景,期望 $SELFCHECK_EXPECTED 条 —— 有自检被删掉,或新增后没同步 SELFCHECK_EXPECTED"
 
-echo "OK($CHECK_COUNT 个包均有真实执行并通过的用例)"
-echo "   自检通过:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓 / 伪造输出包被抓"
+echo "OK($CHECK_COUNT 个包均有真实执行并通过的用例,且测试代码里都有断言)"
+echo "   自检通过:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓 / 伪造输出包被抓 / 零断言包被抓"
 end_step
 
 step "7/9" "前端 lint / 构建 / vitest"
