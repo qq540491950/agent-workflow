@@ -170,6 +170,22 @@ edges: []
 	}
 	waitForState(t, eng, exec.ID, model.ExecutionRunning)
 
+	// 等**节点已启动**(node.started 事件)再抢裁决 —— 把竞态变成确定时序。
+	//
+	// 为什么必须等(迭代 33 P2-2):只等"执行进入 RUNNING"**不足以**保证
+	// 取消分支会被走到 —— 执行协程启动时会核对库里的状态
+	// (engine.go 的"启动即核对状态"):若此刻库里已经是 CANCELLED,
+	// 协程会**直接收尾返回**,根本不会走进取消分支 → 取消分支的 CAS
+	// 冲突**一次都不会发生** → 本用例等满 10s 超时失败。
+	//
+	// 实测(迭代 33 终审 P2-2):隔离跑 15/15 通过,**CPU 负载下 9/10 失败**
+	// —— 基线门禁的第 5 步实测红过一次。根因就是上面这个"协程还没启动
+	// 就被抢裁决"的窗口:负载越高,窗口越容易被命中。
+	//
+	// 显式等 node.started 事件:节点**真的跑起来了**,取消分支必然被走到
+	// —— 断言一个字都不改(意图与强度不变,只是把时序固定住)。
+	waitEvent(t, bus, event.NodeStarted, 10*time.Second)
+
 	// 另一个写者抢先裁决成 CANCELLED
 	ok, err := repo.CasExecutionState(exec.ID,
 		[]model.ExecutionState{model.ExecutionRunning}, model.ExecutionCancelled)

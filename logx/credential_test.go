@@ -1,6 +1,7 @@
 package logx
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -360,16 +361,11 @@ func TestBareBase64WithPaddingIsNotTruncated(t *testing.T) {
 
 // countHumps 统计"大写字母后紧跟小写字母"的次数(驼峰起伏)。
 //
-// 与 credential.go 的 isCamelIdentifier 同一口径 —— 用例用它自检
-// "夹具会不会被驼峰护栏挡下"(护栏一旦变化,本用例的前提自检会先红)。
+// 直接复用**生产实现**的 camelHumps —— 护栏口径变了,用例的前提自检
+// 跟着变(否则用例会"测错东西":夹具其实已被别的规则挡下,却以为
+// 测的是驼峰护栏)。
 func countHumps(v string) int {
-	n := 0
-	for i := 1; i < len(v); i++ {
-		if v[i-1] >= 'A' && v[i-1] <= 'Z' && v[i] >= 'a' && v[i] <= 'z' {
-			n++
-		}
-	}
-	return n
+	return camelHumps(v)
 }
 
 // TestBasicAuthBase64IsMasked "Basic <base64>" 形态必须被脱敏。
@@ -481,6 +477,10 @@ func TestCredentialShapeCoverageMatrix(t *testing.T) {
 			"-----END RSA PRIVATE KEY-----"
 		pemBody = "MIIEowIBAAKCAQEA7Zx9mQ2pL7vR4tY6uZ8c1d0eF3gH5jK"
 	)
+	// 随机 base64(迭代 33 / #342):固定 seed 的第 0 个样本 ——
+	// 旧口径下它被"驼峰护栏"放过(原样输出)。
+	// (不是常量:它由固定 seed 的 PRNG 生成。)
+	randomBase64 := randomBase64Samples(1)[0]
 
 	type row struct {
 		shape string
@@ -564,6 +564,18 @@ func TestCredentialShapeCoverageMatrix(t *testing.T) {
 			shape: "+AKIA…(diff 行前缀)", in: "+AKIAIOSFODNN7EXAMPLE",
 			secret: "AKIAIOSFODNN7EXAMPLE", maskedByMask: true, maskedByValues: true,
 		},
+		{
+			// 迭代 33(P3-2)新增:**双** diff 行前缀("++AKIA…")—— 旧切分规则
+			// 只摘一个行首 '+',剩下的 '+' 让 AWS 密钥的锚定规则匹配不上。
+			shape: "++AKIA…(双 diff 行前缀)", in: "++AKIAIOSFODNN7EXAMPLE",
+			secret: "AKIAIOSFODNN7EXAMPLE", maskedByMask: true, maskedByValues: true,
+		},
+		{
+			// 迭代 33(P1-1)新增:随机 base64 裸值 —— 旧口径被"驼峰护栏"
+			// 放过(194/200 原样输出)。
+			shape: "随机 base64(裸值)", in: "value " + randomBase64,
+			secret: randomBase64, maskedByMask: true, maskedByValues: true,
+		},
 	}
 
 	for _, r := range rows {
@@ -589,5 +601,267 @@ func TestCredentialShapeCoverageMatrix(t *testing.T) {
 					r.in, gotMask)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 迭代 33(P1-1):随机 base64 凭据不得因"驼峰护栏"蒙混过关
+// ---------------------------------------------------------------------------
+
+// b64Alphabet 是标准 base64 的字母表(含 '+' / '/')。
+const b64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+// sampleRand 是一个**确定性**的伪随机数发生器(xorshift64*)。
+//
+// 刻意不用 math/rand:它的输出序列不承诺跨 Go 版本稳定,而本文件要的
+// 是"同一份样本永远不变"的回归锁 —— 样本一变,用例测的就不是同一条
+// 路径了(而且"样本变了"这件事本身没人会发现)。
+type sampleRand struct{ state uint64 }
+
+func newSampleRand(seed uint64) *sampleRand {
+	return &sampleRand{state: seed}
+}
+
+func (r *sampleRand) next() uint64 {
+	x := r.state
+	x ^= x >> 12
+	x ^= x << 25
+	x ^= x >> 27
+	r.state = x
+	return x * 2685821657736338717
+}
+
+func (r *sampleRand) byte() byte { return byte(r.next() >> 33) }
+
+func (r *sampleRand) intn(n int) int { return int(r.next() % uint64(n)) }
+
+// randomBase64Samples 生成 n 个随机 base64 样本(两种形态交替)。
+//
+//   - **std**:随机字节 → 标准 base64(含 '+' / '/' 与 '=' 填充)—— 真实
+//     token 最常见的形态;
+//   - **raw**:直接从 base64 字母表取字符(无填充)——"裸" base64。
+//
+// 样本集是**固定**的(seed 固定 + 算法固定):换 seed 等于换一份样本,
+// 回归锁就断了。
+//
+// **每个样本都保证含至少一个数字** —— 这是本轮修法的**范围边界**,不是
+// 样本挑选:
+// 裸值语境的高熵门槛本身就要求"含数字"(≥24 字符 + 大小写混合 + 数字,
+// 见 highEntropy 的设计说明:否则 40 位 git SHA、base64 测试夹具这类
+// 正常内容会被抹掉,毁掉 diff 的审计价值)。终审复核的前提同样是
+// "随机 base64 必含数字"。
+// **不含数字的长串仍不脱敏**(实测:随机 base64 里约 1.6% 不含数字)——
+// 那是高熵门槛的边界,不是驼峰护栏的,见本轮交付报告的"残余边界"一节。
+func randomBase64Samples(n int) []string {
+	rng := newSampleRand(20251021)
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		var s string
+		if i%2 == 0 {
+			size := 18 + rng.intn(46) // 18..63 字节 → 24..88 个 base64 字符
+			buf := make([]byte, size)
+			for j := range buf {
+				buf[j] = rng.byte()
+			}
+			s = base64.StdEncoding.EncodeToString(buf)
+		} else {
+			size := 24 + rng.intn(40) // 24..63 个字符
+			buf := make([]byte, size)
+			for j := range buf {
+				buf[j] = b64Alphabet[int(rng.byte())%len(b64Alphabet)]
+			}
+			s = string(buf)
+		}
+		out = append(out, ensureDigit(s, rng))
+	}
+	return out
+}
+
+// ensureDigit 保证样本里至少有一个数字(样本生成的最后一步,见
+// randomBase64Samples 的说明)。
+func ensureDigit(s string, rng *sampleRand) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			return s
+		}
+	}
+	b := []byte(s)
+	pos := rng.intn(len(b))
+	b[pos] = byte('0' + rng.intn(10))
+	return string(b)
+}
+
+// TestRandomBase64CredentialsAreMasked 随机 base64 凭据必须**全部**被脱敏。
+//
+// **回归背景(迭代 33 终审 P1-1)**:裸值语境的高熵规则本来有一条"驼峰
+// 标识符"护栏 —— "大写字母后紧跟小写字母"连续出现 ≥4 次就当它是类名 /
+// 测试名,不当凭据。实测:随机字符里这个形态的概率约 16.5%,32~64 字符的
+// 串几乎必然攒够 4 次 → **194/200 个随机 base64 原样输出**(节点 output /
+// state_json / 事件流 / SSE / git diff 六个出口全部明文)。
+//
+// 现在驼峰护栏已收窄(见 isCamelIdentifier):随机 base64 必须全部遮住。
+func TestRandomBase64CredentialsAreMasked(t *testing.T) {
+	samples := randomBase64Samples(200)
+	if len(samples) != 200 {
+		t.Fatalf("样本数不对: %d", len(samples))
+	}
+	leaked := 0
+	for i, s := range samples {
+		for _, outlet := range []struct {
+			name string
+			got  string
+		}{
+			{"Mask", Mask(s)},
+			{"MaskCredentialValues", MaskCredentialValues(s)},
+		} {
+			if outlet.got == s {
+				leaked++
+				t.Errorf("样本 #%d 未被 %s 脱敏(驼峰护栏放行了随机 base64): %q",
+					i, outlet.name, s)
+				continue
+			}
+			if !strings.Contains(outlet.got, maskPlaceholder) {
+				t.Errorf("样本 #%d 的 %s 出口没有占位符: %q → %q", i, outlet.name, s, outlet.got)
+			}
+		}
+	}
+	if leaked == 0 {
+		t.Logf("200 个随机 base64 样本全部被脱敏(std %d 个 + raw %d 个)",
+			len(samples)/2, len(samples)-len(samples)/2)
+	}
+}
+
+// TestCamelCodeIdentifiersArePreserved 代码标识符必须原样保留(绿方向)。
+//
+// 这是驼峰护栏存在的**全部理由**:git diff 里的标识符被抹掉,审计价值
+// 就没了。本用例是上面那条"随机 base64 必须被遮"的**反向对照** ——
+// 没有它,判据整个退化成"什么高熵串都遮",正常代码全被挡在门外。
+//
+// 清单覆盖三类:
+//
+//   - 不含数字的普通标识符(getToken / apiKey …);
+//   - 含数字的真实仓库标识符(TestXxx…404 / …Dir1637892132 / …Sha256);
+//   - 缩写型(TestJSONBody… / TestHTTPServer…)。
+func TestCamelCodeIdentifiersArePreserved(t *testing.T) {
+	idents := []string{
+		"getToken",
+		"apiKey",
+		"mySecretKey",
+		"userAccessToken",
+		"refreshTokenValue",
+		"clientSecretKey",
+		"serviceAccountName",
+		"authTokenHeader",
+		"readSessionCookie",
+		"parseCredentialFile",
+		"buildAuthorizationHeader",
+		"decodeJwtPayload",
+		"getUserAccessTokenFromSha256",
+		"TestScriptNodeHonorsTimeoutAndWorkingDir1637892132",
+		"TestJSONBodyTooLargeReturns413",
+		"TestBasicAuthBase64IsMasked",
+		"TestRetryPolicyAcceptsUint64",
+		"TestTemplateIterationFloat64",
+		"TestGetWorkflowVersionMissingIs404",
+		"TestStubScenarioMatrixExit143",
+		"TestHTTPServerHandlerName",
+		"TestSha256ChecksumAlgorithmName",
+	}
+	for _, id := range idents {
+		if got := MaskCredentialValues(id); got != id {
+			t.Errorf("代码标识符被改动(值形态出口) %q → %q", id, got)
+		}
+		if got := Mask(id); got != id {
+			t.Errorf("代码标识符被改动(键名∪值形态出口) %q → %q", id, got)
+		}
+	}
+}
+
+// TestMaskIsIdempotentForRandomBase64 随机 base64 的脱敏必须幂等。
+//
+// 落库侧与读出口各过一次(节点 output 落库时脱敏,API 读出口再脱敏),
+// 两次结果必须逐字节相同 —— 否则"库里那份"与"接口返回那份"对不上。
+func TestMaskIsIdempotentForRandomBase64(t *testing.T) {
+	for i, s := range randomBase64Samples(200) {
+		once := Mask(s)
+		twice := Mask(once)
+		if once != twice {
+			t.Errorf("样本 #%d 的 Mask 不幂等:\n输入: %q\n一次: %q\n两次: %q", i, s, once, twice)
+		}
+		onceC := MaskCredentialValues(s)
+		twiceC := MaskCredentialValues(onceC)
+		if onceC != twiceC {
+			t.Errorf("样本 #%d 的 MaskCredentialValues 不幂等:\n输入: %q\n一次: %q\n两次: %q",
+				i, s, onceC, twiceC)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 迭代 33(P3-1):赋值形态里的 PEM —— 掩码结果不得仍是"可再掩的形态"
+// ---------------------------------------------------------------------------
+
+// TestMaskIsIdempotentForPEMInAssignment 赋值形态里的 PEM 必须幂等。
+//
+// **回归背景(迭代 33 终审 P3-1)**:PEM 嵌在键值赋值形态时,一次脱敏留下
+// "…-----***"(掩码占位符紧跟在 BEGIN 行的破折号之后),二次脱敏会**再追加**
+// 一段占位符 → "…-----******"。这违反"脱敏幂等"这条**已声明**的不变量:
+// 库里那份与接口返回那份内容不同,审计对不上。
+//
+// 修法:让 PEM 正则认得"已经掩过的形态"(占位符紧跟 BEGIN 行,或单独成行),
+// 于是二次脱敏是恒等变换。
+func TestMaskIsIdempotentForPEMInAssignment(t *testing.T) {
+	const (
+		pemBody  = "MIIEowIBAAKCAQEA7Zx9mQ2pL7vR4tY6uZ8c1d0eF3gH5jK"
+		pemMulti = "-----BEGIN RSA PRIVATE KEY-----\n" + pemBody + "\n-----END RSA PRIVATE KEY-----"
+		pemOne   = "-----BEGIN RSA PRIVATE KEY-----" + pemBody + "-----END RSA PRIVATE KEY-----"
+	)
+	forms := []string{
+		"PRIVATE_KEY=" + pemMulti,
+		"private_key: " + pemMulti,
+		"token=" + pemOne,
+		`key="` + pemMulti + `"`,
+		"++" + pemMulti,
+		"+" + pemMulti,
+		pemMulti,
+		pemOne,
+	}
+	for _, in := range forms {
+		once := Mask(in)
+		twice := Mask(once)
+		if once != twice {
+			t.Errorf("Mask 对赋值形态里的 PEM 不幂等:\n输入: %q\n一次: %q\n两次: %q", in, once, twice)
+		}
+		if strings.Contains(once, pemBody) {
+			t.Errorf("PEM 明文仍在: %q → %q", in, once)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 迭代 33(P3-2):双 diff 前缀("++AKIA…")不得漏
+// ---------------------------------------------------------------------------
+
+// TestDoubleDiffPrefixCredentialIsMasked 行首的多个 diff 前缀必须逐个摘掉。
+//
+// **回归背景(迭代 33 终审 P3-2)**:旧的切分规则只摘**一个**行首 '+' / '-'。
+// 于是 "++AKIAIOSFODNN7EXAMPLE"(文件内容本身以 '+' 开头,又落在 diff 的
+// 新增行里)只摘掉一个 '+' → 剩下的 "+AKIA…" 不匹配 AWS 密钥的锚定规则
+// (^AKIA…$)→ 整串原样输出 → 经 /api/git/diff 明文外泄。
+func TestDoubleDiffPrefixCredentialIsMasked(t *testing.T) {
+	const secret = "AKIAIOSFODNN7EXAMPLE"
+	for _, in := range []string{
+		"++" + secret,
+		"--" + secret,
+		"+++" + secret,
+		"diff --git a/x b/x\n+" + "+" + secret,
+	} {
+		got := Mask(in)
+		if strings.Contains(got, secret) {
+			t.Errorf("双 diff 前缀的凭据未脱敏: %q → %q", in, got)
+		}
+		if !strings.Contains(got, maskPlaceholder) {
+			t.Errorf("期望出现脱敏占位符: %q → %q", in, got)
+		}
 	}
 }

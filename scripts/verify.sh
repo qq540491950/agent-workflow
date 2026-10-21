@@ -593,7 +593,7 @@ echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推�
 # 计数变量的赋值发生在**函数体内**(不是子 shell),因此计数能真正累加。
 selfcheck_count=0
 # 期望的自检场景条数。**新增或删除任何一条自检场景,都必须同步改这里** ——
-# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 36 条:
+# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 41 条:
 #   1-3  交叉检查:windows 测试文件对照 / 测试文件类型错 / 源文件类型错
 #   4-9  孤儿包检查:windows·freebsd·js 各一条绿 + 一条红
 #   10   孤儿包检查:目录混包(两个 package 名)必须被抓
@@ -615,7 +615,10 @@ selfcheck_count=0
 #   33-36 迭代 31(第三十二轮终审 P1)的四种"新手法"绕过:死分支里的调用 /
 #          从未被调用的函数字面量 / 无匹配 case 里的调用 / 链式辅助函数
 #          (每条都同时断言对应的绿方向)
-SELFCHECK_EXPECTED=36
+#   37-41 迭代 32(第三十三轮终审 P1-2)的五种"以值引用"绕过:包级 var 取走 /
+#          局部别名取走 / 结构体字段 / 方法值取走 / 链式外层被取走
+#          (每条都同时断言对应的绿方向)
+SELFCHECK_EXPECTED=41
 
 # selfcheck_ok <标签> <命令...> —— 断言命令必须**成功**(绿方向)。
 selfcheck_ok() {
@@ -1128,7 +1131,7 @@ MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
 #   ④ **链式**辅助函数(outer→inner),outer 只在恒假分支里被调用。
 #
 # 根因:死分支里的调用点也被计入"引用数",`FuncLit` 则完全不追踪调用关系。
-# 现在改成:
+# 迭代 31 改成:
 #
 #   - **可达引用计数**:引用点只在**可达**位置计数(恒假分支 / 无匹配 case /
 #     零次循环体 / 不可达的辅助函数 / 从未被调用的函数字面量里的引用点
@@ -1140,14 +1143,42 @@ MISSING=$(real_usage_verdict "$ROOT" "$CHECK_PKGS" "$TEST_LOG") ||
 #     链式(outer→inner)因此自动传递:A 不可达 ⇒ A 的调用点不计 ⇒
 #     B 的可达引用数减一 ⇒ B 也不可达。
 #
+# ---- 迭代 32(第三十三轮终审 P1-2):可达性 = **真实调用点** ----------------
+# 迭代 31 的判据仍然是**文本计数**("可达位置上出现过这个标识符"),
+# 于是"把辅助函数**以值**取走"就能冒充"调用过" —— 终审实测**五种手法**
+# 全部骗过门禁(9 步全绿 exit 0):
+#
+#   ① `var f func(*testing.T) = helper; _ = f`(包级变量 + 显式函数类型);
+#   ② `alias := helper`(局部别名,从不调用);
+#   ③ 把 helper 塞进**结构体字段**(`holder{fn: helper}`);
+#   ④ **方法值** `f := h.assertNeverRuns`(取出方法,从不调用);
+#   ⑤ **链式**辅助函数:外层 outer 只被以值引用,内层 inner 才有断言。
+#
+# 现在的判据:**可达 = 有一个"把它当函数调用"的位置**,
+# 即 `ast.CallExpr` 的 callee **解析到该 FuncDecl**:
+#
+#   - `helper(t)` —— 直接调用(callee 是标识符 → 解析到同名顶层函数);
+#   - `h.method(t)` —— 方法调用(callee 是选择器 → 解析到本包的方法;
+#     接收者类型能推断出来时按类型精确匹配,推断不出来且同名方法只有一个
+#     时取它,同名方法有多个时**保守**认为都可能被调用);
+#   - `f(t)`(f 是 helper 的别名)—— **函数值别名**:变量 ← 函数 / 方法值的
+#     绑定按作用域收集(局部 + 包级),别名链(a := helper; b := a)用
+#     不动点求解;调用 `f(t)` 时回溯到真正的 FuncDecl。
+#
+# **"以值引用"一律不算调用**:赋值、塞进结构体字段、取出方法值 ——
+# 只要没有真的被调用,辅助函数就是不可达的,里面的断言永远不触发。
+#
 # 已知边界(**有意取舍**,登记在案,不是缺陷):
 #   - 判据是**按包**的:"1 个真断言 + 9 个零断言用例"的包照样通过;
 #   - 接收者名不遵循 t/tb/tt 惯例的 testing.T 认不出来(极罕见);
 #   - 断言写在**非测试文件**里的 testing 助手中(本仓库零命中)认不出来;
 #   - 恒假判定只覆盖**常量**表达式:条件里一旦出现运行期变量,就保守地
 #     认为该分支**可能**触发(偏松不偏严,不会造成误报);
-#   - "未被调用"按**可达位置出现过**判定:函数值/方法值等**非调用**
-#     形态也算"出现过" → 偏保守(宁可漏判,不可误报);
+#   - **通过结构体字段调用**辅助函数(`h.fn(t)`)解析不到具体 FuncDecl →
+#     该辅助函数会被判成"未被调用"(**可能误报**;本仓库零命中,
+#     差分比对:真实仓库逐包 live 计数与改前**完全一致**);
+#   - 多个同名方法且接收者类型推断不出来时,保守认为**都**被调用
+#     (宁可漏判,不可误报);
 #   - **函数字面量作为参数传给别的函数**(如 `t.Run("x", func(t *testing.T){…})`)
 #     无法静态判定调用与否 → 保守视为 live(残余边界:被调用的函数若其实
 #     丢弃了这个回调,里面的断言仍会被算成 live);
@@ -1289,6 +1320,9 @@ func scanPackage(pkg *pkgFiles) (int, int, []string) {
 	}
 	// 函数字面量的"语法级可调用性"(迭代 31):见 prepareLits。
 	a.prepareLits(files)
+	// 顶层函数/方法的索引 + 函数值别名作用域(迭代 33):真实调用点的解析依据。
+	a.indexDecls(files)
+	a.buildScopes(files)
 	// 测试入口(Test*/Benchmark*/Fuzz*/Example*/init/main)恒可达 ——
 	// 它们由测试框架调用,不需要包内有调用点。
 	for _, f := range files {
@@ -1317,22 +1351,21 @@ func scanPackage(pkg *pkgFiles) (int, int, []string) {
 	// 单调递增 → 必然收敛;收敛那一轮的可达集合就是最终答案,
 	// 那一轮统计出来的断言数也就是最终答案。
 	for {
-		refs := map[string]int{}
+		calls := map[*ast.FuncDecl]bool{}
 		total, live = 0, 0
 		roundReasons := map[string]bool{}
 		for _, f := range files {
-			c := &counter{a: a, consts: consts, refs: refs, deadReasons: roundReasons}
+			c := &counter{a: a, consts: consts, calls: calls, deadReasons: roundReasons}
 			for _, decl := range f.Decls {
 				switch d := decl.(type) {
 				case *ast.FuncDecl:
 					if d.Body != nil {
-						if a.reachable[d] {
-							c.collectSignature(d)
-						}
+						c.scope = a.funcScopes[d]
 						c.walk(d.Body, a.funcDeadReason(d))
 					}
 				default:
 					// 包级声明(变量初始化等)在 init 时执行 → 可达。
+					c.scope = a.pkgScope
 					c.walk(decl, "")
 				}
 			}
@@ -1341,20 +1374,17 @@ func scanPackage(pkg *pkgFiles) (int, int, []string) {
 		}
 		deadReasons = roundReasons
 		changed := false
-		for _, f := range files {
-			for _, decl := range f.Decls {
-				fd, ok := decl.(*ast.FuncDecl)
-				if !ok || fd.Body == nil {
-					continue
-				}
-				if !isHelperFuncName(fd.Name.Name) || a.reachable[fd] {
-					continue
-				}
-				if refs[fd.Name.Name] > 0 {
-					a.reachable[fd] = true
-					changed = true
-				}
+		// **真实调用点**(迭代 33):辅助函数可达 = 有一个**可达**位置
+		// 把它当函数**调用**过。
+		//
+		// 链式(outer→inner)因此自动传递:A 不可达 ⇒ A 里的调用点不计
+		// ⇒ B 没有调用点 ⇒ B 也不可达。
+		for fd := range calls {
+			if !isHelperFuncName(fd.Name.Name) || a.reachable[fd] {
+				continue
 			}
+			a.reachable[fd] = true
+			changed = true
 		}
 		if !changed {
 			break
@@ -1454,6 +1484,325 @@ type analyzer struct {
 	scopes []*litScope
 	// reachable 是逐顶层函数的可达性(不动点迭代的结果)。
 	reachable map[*ast.FuncDecl]bool
+
+	// ---- 迭代 33(P1-2):真实调用点 ---------------------------------
+	// funcs 是包内**无接收者**的顶层函数(按名字索引)。
+	funcs map[string]*ast.FuncDecl
+	// methods 是包内的方法(方法名 → 声明列表)。
+	methods map[string][]*ast.FuncDecl
+	// methodsByType 是"接收者类型名 → 方法名 → 声明"。
+	methodsByType map[string]map[string]*ast.FuncDecl
+	// pkgScope 是包级的函数值别名作用域。
+	pkgScope *aliasScope
+	// funcScopes 是逐顶层函数的函数值别名作用域。
+	funcScopes map[*ast.FuncDecl]*aliasScope
+}
+
+// aliasScope 记录一个作用域里的"函数值别名"与"局部类型推断"。
+//
+// 用途:判定"把它当函数**调用**"的位置 ——
+// `var f = helper; f(t)` 里的 `f(t)` 是 helper 的**真实调用点**,
+// 而 `var f = helper; _ = f` 里的 `f` 只是**以值引用**。
+type aliasScope struct {
+	// assigns 是"变量 ← 右侧表达式"的原始绑定。
+	assigns []aliasAssign
+	// alias 是"变量 → 被赋值的函数声明"(固定点求解后的结果)。
+	alias map[string][]*ast.FuncDecl
+	// types 是"变量 → 类型名"的局部类型推断。
+	types map[string]string
+}
+
+// aliasAssign 是一条"变量 ← 表达式"的绑定。
+type aliasAssign struct {
+	name string
+	rhs  ast.Expr
+}
+
+func newAliasScope() *aliasScope {
+	return &aliasScope{alias: map[string][]*ast.FuncDecl{}, types: map[string]string{}}
+}
+
+// lookupAlias 取一个变量名对应的函数声明(含别名链的传递解析)。
+func (s *aliasScope) lookupAlias(name string) []*ast.FuncDecl {
+	if s == nil {
+		return nil
+	}
+	return s.alias[name]
+}
+
+// resolve 求解"变量 → 函数声明"的绑定(不动点:处理 `a := helper; b := a`)。
+func (s *aliasScope) resolve(a *analyzer) {
+	for {
+		changed := false
+		for _, as := range s.assigns {
+			if len(s.alias[as.name]) > 0 {
+				continue
+			}
+			switch rhs := as.rhs.(type) {
+			case *ast.Ident:
+				if fd, ok := a.funcs[rhs.Name]; ok {
+					s.alias[as.name] = []*ast.FuncDecl{fd}
+					changed = true
+					continue
+				}
+				if targets := s.alias[rhs.Name]; len(targets) > 0 {
+					s.alias[as.name] = targets
+					changed = true
+				}
+			case *ast.SelectorExpr:
+				if m := a.resolveMethod(rhs, s); m != nil {
+					s.alias[as.name] = []*ast.FuncDecl{m}
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			return
+		}
+	}
+}
+
+// indexDecls 建立包内顶层函数与方法的索引。
+func (a *analyzer) indexDecls(files []*ast.File) {
+	a.funcs = map[string]*ast.FuncDecl{}
+	a.methods = map[string][]*ast.FuncDecl{}
+	a.methodsByType = map[string]map[string]*ast.FuncDecl{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			if fd.Recv == nil {
+				a.funcs[fd.Name.Name] = fd
+				continue
+			}
+			a.methods[fd.Name.Name] = append(a.methods[fd.Name.Name], fd)
+			if tname := receiverTypeName(fd); tname != "" {
+				if a.methodsByType[tname] == nil {
+					a.methodsByType[tname] = map[string]*ast.FuncDecl{}
+				}
+				a.methodsByType[tname][fd.Name.Name] = fd
+			}
+		}
+	}
+}
+
+// buildScopes 建立包级与逐顶层函数的"函数值别名"作用域。
+func (a *analyzer) buildScopes(files []*ast.File) {
+	a.pkgScope = newAliasScope()
+	a.funcScopes = map[*ast.FuncDecl]*aliasScope{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body == nil {
+					continue
+				}
+				sc := newAliasScope()
+				collectScopeBindings(d, sc)
+				sc.resolve(a)
+				a.funcScopes[d] = sc
+			case *ast.GenDecl:
+				collectGenDeclBindings(d, a.pkgScope)
+			}
+		}
+	}
+	a.pkgScope.resolve(a)
+}
+
+// receiverTypeName 取方法的接收者类型名(去掉指针与泛型参数)。
+func receiverTypeName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return ""
+	}
+	return typeNameOf(fd.Recv.List[0].Type)
+}
+
+// typeNameOf 取一个类型表达式里的类型名(只认本包内可静态看出的几种)。
+//
+// 认不出的(外部包类型"testing.T"、接口、泛型实例)→ 返回 ""。
+func typeNameOf(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.StarExpr:
+		return typeNameOf(x.X)
+	case *ast.CompositeLit:
+		return typeNameOf(x.Type)
+	case *ast.UnaryExpr:
+		if x.Op == token.AND {
+			return typeNameOf(x.X)
+		}
+	case *ast.CallExpr:
+		// new(T)
+		if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 {
+			return typeNameOf(x.Args[0])
+		}
+	}
+	return ""
+}
+
+// collectScopeBindings 收集一个顶层函数作用域里的绑定。
+//
+// 收集三类:
+//   - 接收者与形参 → types(局部类型推断);
+//   - `x := T{}` / `var x T` → types;
+//   - `x := helper` / `x := h.method` → assigns(函数值别名)。
+func collectScopeBindings(fd *ast.FuncDecl, sc *aliasScope) {
+	if fd.Recv != nil {
+		for _, f := range fd.Recv.List {
+			for _, n := range f.Names {
+				sc.types[n.Name] = receiverTypeName(fd)
+			}
+		}
+	}
+	if fd.Type != nil && fd.Type.Params != nil {
+		for _, f := range fd.Type.Params.List {
+			tname := typeNameOf(f.Type)
+			for _, n := range f.Names {
+				if tname != "" {
+					sc.types[n.Name] = tname
+				}
+			}
+		}
+	}
+	ast.Inspect(fd.Body, func(m ast.Node) bool {
+		switch x := m.(type) {
+		case *ast.AssignStmt:
+			if x.Tok != token.DEFINE && x.Tok != token.ASSIGN {
+				return true
+			}
+			for i, rhs := range x.Rhs {
+				if i >= len(x.Lhs) {
+					break
+				}
+				id, ok := x.Lhs[i].(*ast.Ident)
+				if !ok || id.Name == "_" {
+					continue
+				}
+				bindAssign(id.Name, rhs, sc)
+			}
+		case *ast.ValueSpec:
+			for i, name := range x.Names {
+				if i < len(x.Values) {
+					bindAssign(name.Name, x.Values[i], sc)
+					continue
+				}
+				if x.Type != nil {
+					if tname := typeNameOf(x.Type); tname != "" {
+						sc.types[name.Name] = tname
+					}
+				}
+			}
+		}
+		return true
+	})
+}
+
+// bindAssign 处理一条"变量 ← 表达式"绑定。
+func bindAssign(name string, rhs ast.Expr, sc *aliasScope) {
+	switch rhs.(type) {
+	case *ast.Ident, *ast.SelectorExpr:
+		sc.assigns = append(sc.assigns, aliasAssign{name: name, rhs: rhs})
+	case *ast.CompositeLit, *ast.UnaryExpr, *ast.CallExpr:
+		if tname := typeNameOf(rhs); tname != "" {
+			sc.types[name] = tname
+		}
+	}
+}
+
+// collectGenDeclBindings 收集包级声明里的绑定(`var f = helper` 等)。
+func collectGenDeclBindings(gd *ast.GenDecl, sc *aliasScope) {
+	for _, spec := range gd.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for i, name := range vs.Names {
+			if i < len(vs.Values) {
+				bindAssign(name.Name, vs.Values[i], sc)
+				continue
+			}
+			if vs.Type != nil {
+				if tname := typeNameOf(vs.Type); tname != "" {
+					sc.types[name.Name] = tname
+				}
+			}
+		}
+	}
+}
+
+// resolveMethod 把 `x.m` 解析到包内的方法声明。
+//
+// 解析顺序:接收者类型能推断出来 → 用它;只有一个同名方法 → 用它;
+// 否则 → nil(调用方按"保守"处理)。
+func (a *analyzer) resolveMethod(sel *ast.SelectorExpr, sc *aliasScope) *ast.FuncDecl {
+	name := sel.Sel.Name
+	cands := a.methods[name]
+	if len(cands) == 0 {
+		return nil
+	}
+	if len(cands) == 1 {
+		return cands[0]
+	}
+	if sc != nil {
+		if id, ok := sel.X.(*ast.Ident); ok {
+			if tname, ok := sc.types[id.Name]; ok {
+				if m, ok := a.methodsByType[tname][name]; ok {
+					return m
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// resolveCallee 把调用的 callee 解析到包内的 FuncDecl 列表。
+//
+// **迭代 33(P1-2)的核心**:可达性只看"**把它当函数调用**"的位置 ——
+// `helper(t)` / `h.method(t)` / `f(t)`(f 是 helper 的别名)。
+// 仅仅"名字出现过"(赋值、塞进结构体字段、取出方法值)都**不算**调用。
+//
+// 解析不出来(调用的是外部包 / 未知函数)→ 返回 nil(不牵强)。
+func (a *analyzer) resolveCallee(fun ast.Expr, sc *aliasScope) []*ast.FuncDecl {
+	for {
+		p, ok := fun.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		fun = p.X
+	}
+	switch x := fun.(type) {
+	case *ast.Ident:
+		// 函数值别名优先(`f := helper; f(t)`)。
+		if decls := sc.lookupAlias(x.Name); len(decls) > 0 {
+			return decls
+		}
+		if decls := a.pkgScope.lookupAlias(x.Name); len(decls) > 0 {
+			return decls
+		}
+		if fd, ok := a.funcs[x.Name]; ok {
+			return []*ast.FuncDecl{fd}
+		}
+		return nil
+	case *ast.SelectorExpr:
+		name := x.Sel.Name
+		cands := a.methods[name]
+		if len(cands) == 0 {
+			return nil // 不是本包的方法(外部包 / 结构体字段)→ 不牵强
+		}
+		if m := a.resolveMethod(x, sc); m != nil {
+			return []*ast.FuncDecl{m}
+		}
+		// 接收者类型推断不出来 → 保守:同名方法都算"被调用"
+		// (宁可漏判,不可误报 —— 误报会把正常代码挡在门外)。
+		return cands
+	case *ast.IndexExpr:
+		// 泛型实例化:helper[int](t)
+		return a.resolveCallee(x.X, sc)
+	}
+	return nil
 }
 
 // litScope 是一个"作用域"(顶层函数体 或 包级)里与**函数字面量**有关的信息。
@@ -1611,7 +1960,7 @@ func collectCalls(n ast.Node, called map[string]bool, immediate map[*ast.FuncLit
 func scopeCalls(n ast.Node, consts map[string]constVal) map[string]bool {
 	c := &counter{
 		consts:         consts,
-		refs:           map[string]int{},
+		calls:          map[*ast.FuncDecl]bool{},
 		called:         map[string]bool{},
 		deadReasons:    map[string]bool{},
 		optimisticLits: true,
@@ -1666,9 +2015,12 @@ type counter struct {
 	// a 是可达性分析器(提供函数字面量的可调用性)。
 	a      *analyzer
 	consts map[string]constVal
-	// refs 是**可达**引用点的计数(只在可达位置计数)——
-	// "从未被调用"的判据(迭代 31:从"名字出现过"升级为"可达地出现过")。
-	refs map[string]int
+	// calls 是**真实调用点**的集合(迭代 33):
+	// 只有"把它当函数调用"的位置才算 —— 赋值 / 塞进结构体字段 /
+	// 取出方法值都**不算**。可达性由它决定。
+	calls map[*ast.FuncDecl]bool
+	// scope 是当前函数作用域的绑定(函数值别名 + 局部类型)。
+	scope *aliasScope
 	// called 是本作用域里在**可达**位置被**调用**的标识符。
 	// 只在"乐观"模式下使用(见 optimisticLits):判定"变量有没有被调用过"
 	// 时用它 —— 死分支里的 `f()` 不算"调用过 f"。
@@ -1797,19 +2149,17 @@ func (c *counter) walk(n ast.Node, dead string) {
 				c.deadReasons[dead] = true
 			}
 		}
-		// **可达引用点**(迭代 31):标识符只在**可达**位置计数 ——
-		// 恒假分支 / 无匹配 case / 零次循环体 / 不可达的辅助函数 /
-		// 从未被调用的函数字面量里的引用点一律**不计**。
+		// **真实调用点**(迭代 33):可达性只看"把它当**函数**调用"的位置。
 		//
-		// 这一条把"辅助函数是否被调用"从"名字在包里出现过"升级为
-		// "**可达地**被调用过":`if false { helper(t) }` 里的调用点
-		// 不再让 helper 被误判成"已调用"。
+		// 迭代 31 的口径是"可达位置上的标识符出现"(文本计数)——
+		// 于是"以值引用"就能冒充调用:`var f = helper; _ = f`、
+		// 把 helper 塞进结构体字段、`f := h.method` 取出方法值、
+		// `alias := helper` 不调用 …… 五种手法全部骗过门禁。
+		// 现在只有 callee 解析到该 FuncDecl 的 CallExpr 才算数。
 		if dead == "" {
-			if id, ok := m.(*ast.Ident); ok {
-				c.refs[id.Name]++
-			}
-			// 可达位置上的**调用点**(判定"变量有没有被调用过"用)。
 			if call, ok := m.(*ast.CallExpr); ok {
+				c.recordCall(call)
+				// 可达位置上的**调用点**(判定"变量有没有被调用过"用)。
 				if id, ok := call.Fun.(*ast.Ident); ok && c.called != nil {
 					c.called[id.Name] = true
 				}
@@ -2049,31 +2399,16 @@ func (a *analyzer) funcDeadReason(fn *ast.FuncDecl) string {
 	return reasonUncallable
 }
 
-// collectSignature 把**可达**函数的签名(接收者/参数类型)里的标识符计进 refs。
+// recordCall 记录一个**真实调用点**:把 callee 解析到包内的 FuncDecl。
 //
-// 只用于可达函数:签名在声明时求值,不属于任何分支,因此恒可达。
-// 不可达函数的签名不计入 —— 否则"不可达函数提到过某个名字"会让
-// 那个辅助函数被误判成"可达"。
-func (c *counter) collectSignature(fd *ast.FuncDecl) {
-	if fd.Recv != nil {
-		collectIdents(fd.Recv, c.refs)
-	}
-	if fd.Type != nil {
-		collectIdents(fd.Type, c.refs)
-	}
-}
-
-// collectIdents 把节点里出现过的标识符计进 refs。
-func collectIdents(n ast.Node, refs map[string]int) {
-	if n == nil {
+// 解析不出来(外部包函数 / 未知)→ 不记录(不牵强)。
+func (c *counter) recordCall(call *ast.CallExpr) {
+	if c.calls == nil || c.a == nil {
 		return
 	}
-	ast.Inspect(n, func(m ast.Node) bool {
-		if id, ok := m.(*ast.Ident); ok {
-			refs[id.Name]++
-		}
-		return true
-	})
+	for _, fd := range c.a.resolveCallee(call.Fun, c.scope) {
+		c.calls[fd] = true
+	}
 }
 
 // isHelperFuncName 判定一个函数名是不是"辅助函数"(而不是测试入口)。
@@ -2426,7 +2761,12 @@ mkdir -p "$USAGE_CHECK_DIR/good" "$USAGE_CHECK_DIR/zero" "$USAGE_CHECK_DIR/skip"
 	"$USAGE_CHECK_DIR/deadfunclit" "$USAGE_CHECK_DIR/deadfunclitbranch" \
 	"$USAGE_CHECK_DIR/livefunclit" "$USAGE_CHECK_DIR/liveimmediate" \
 	"$USAGE_CHECK_DIR/deadcasehelper" "$USAGE_CHECK_DIR/livecasehelper" \
-	"$USAGE_CHECK_DIR/deadchainhelper"
+	"$USAGE_CHECK_DIR/deadchainhelper" \
+	"$USAGE_CHECK_DIR/deadvaluevar" "$USAGE_CHECK_DIR/deadvaluealias" \
+	"$USAGE_CHECK_DIR/deadvaluefield" "$USAGE_CHECK_DIR/deadvaluemethod" \
+	"$USAGE_CHECK_DIR/deadvaluechain" \
+	"$USAGE_CHECK_DIR/livevaluealias" "$USAGE_CHECK_DIR/livevaluemethod" \
+	"$USAGE_CHECK_DIR/liveruncallback"
 printf 'module awo/usagecheck\n\ngo %s\n' "$SELF_GO_VER" >"$USAGE_CHECK_DIR/go.mod"
 printf 'package good\n\nimport "testing"\n\nfunc TestGood(t *testing.T) { _ = 1 }\n' >"$USAGE_CHECK_DIR/good/good_test.go"
 printf 'package zero\n\nfunc helperOnly() {}\n' >"$USAGE_CHECK_DIR/zero/zero_test.go"
@@ -2497,6 +2837,37 @@ printf 'package deadcasehelper\n\nimport "testing"\n\nfunc TestDeadCaseHelper(t 
 printf 'package livecasehelper\n\nimport "testing"\n\nfunc TestLiveCaseHelper(t *testing.T) {\n\tswitch 1 {\n\tcase 1:\n\t\tassertHelper(t)\n\t}\n}\n\nfunc assertHelper(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/livecasehelper/livecasehelper_test.go"
 # B7:链式辅助函数 —— outer 只在恒假分支里被调用,断言在 inner 里。
 printf 'package deadchainhelper\n\nimport "testing"\n\nfunc TestDeadChainHelper(t *testing.T) {\n\t_ = 1\n\tif false {\n\t\tassertOuter(t)\n\t}\n}\n\nfunc assertOuter(t *testing.T) {\n\tassertInner(t)\n}\n\nfunc assertInner(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/deadchainhelper/deadchainhelper_test.go"
+# ---- 迭代 33(第三十三轮终审 P1-2):五种"以值引用"绕过 ---------------------
+# 上面四种(死分支/函数字面量/无匹配 case/链式)是第三十二轮覆盖的形态。
+# 这一组是终审实测到的**五种新手法** —— 它们的共同点是把辅助函数
+# **以值**取走(helper / 方法值),却**从不调用**它:
+#
+#   B8 `var f func(*testing.T) = helper; _ = f`(包级变量 + 显式函数类型);
+#   B9 `alias := helper` 取出别名却从不调用(局部变量);
+#   B10 把 helper 塞进**结构体字段**(holder{fn: helper});
+#   B11 **方法值** `f := h.assertNeverRuns` 取出方法却不调用;
+#   B12 **链式** helper:外层 outer 只被**以值引用**,内层 inner 才有断言。
+#
+# 改前它们全部能让整条 9 步门禁 **exit 0 全绿放行**(断言被计成 live):
+# 旧判据是"可达位置上的标识符出现"(文本计数)→ 取值即算"被调用过"。
+# 改后判据是**真实调用点**(callee 解析到该 FuncDecl)→ 五种手法全部被抓。
+#
+# 每条都配**绿对照**(绿方向):判据不能把正常写法挡在门外 ——
+#   G1 `var f = helper; f(t)` —— 取了别名但**真的调用了** → 必须算 live;
+#   G2 `h.assertRuns(t)` —— 方法**真的被调用** → 必须算 live;
+#   G3 `t.Run("x", func(t *testing.T){…})` —— 回调由框架调用 → 必须算 live。
+printf 'package deadvaluevar\n\nimport "testing"\n\nfunc TestDeadValueVar(t *testing.T) {\n\t_ = 1\n}\n\nvar f func(*testing.T) = helper\n\nfunc helper(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/deadvaluevar/deadvaluevar_test.go"
+printf 'package deadvaluealias\n\nimport "testing"\n\nfunc TestDeadValueAlias(t *testing.T) {\n\talias := helper\n\t_ = alias\n}\n\nfunc helper(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/deadvaluealias/deadvaluealias_test.go"
+printf 'package deadvaluefield\n\nimport "testing"\n\ntype holder struct{ fn func(*testing.T) }\n\nfunc TestDeadValueField(t *testing.T) {\n\th := holder{fn: helper}\n\t_ = h\n}\n\nfunc helper(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/deadvaluefield/deadvaluefield_test.go"
+printf 'package deadvaluemethod\n\nimport "testing"\n\ntype helper struct{}\n\nfunc (h helper) assertNeverRuns(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n\nfunc TestDeadValueMethod(t *testing.T) {\n\th := helper{}\n\tf := h.assertNeverRuns\n\t_ = f\n}\n' >"$USAGE_CHECK_DIR/deadvaluemethod/deadvaluemethod_test.go"
+printf 'package deadvaluechain\n\nimport "testing"\n\nfunc TestDeadValueChain(t *testing.T) {\n\t_ = outer\n}\n\nfunc outer(t *testing.T) { inner(t) }\n\nfunc inner(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/deadvaluechain/deadvaluechain_test.go"
+# 绿对照 G1:取了别名但**真的调用了** → 必须算 live。
+printf 'package livevaluealias\n\nimport "testing"\n\nfunc TestLiveValueAlias(t *testing.T) {\n\tvar f func(*testing.T) = helper\n\tf(t)\n}\n\nfunc helper(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n' >"$USAGE_CHECK_DIR/livevaluealias/livevaluealias_test.go"
+# 绿对照 G2:方法**真的被调用** → 必须算 live。
+printf 'package livevaluemethod\n\nimport "testing"\n\ntype helper struct{}\n\nfunc (h helper) assertRuns(t *testing.T) {\n\tgot := 1 + 1\n\tif got != 2 {\n\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t}\n}\n\nfunc TestLiveValueMethod(t *testing.T) {\n\th := helper{}\n\th.assertRuns(t)\n}\n' >"$USAGE_CHECK_DIR/livevaluemethod/livevaluemethod_test.go"
+# 绿对照 G3:t.Run 的回调由框架调用 → 必须算 live(不能因为
+# "callee 不是 FuncDecl"就误杀)。
+printf 'package liveruncallback\n\nimport "testing"\n\nfunc TestLiveRunCallback(t *testing.T) {\n\tt.Run("sub", func(t *testing.T) {\n\t\tgot := 1 + 1\n\t\tif got != 2 {\n\t\t\tt.Fatalf("1+1 != 2? got %%d", got)\n\t\t}\n\t})\n}\n' >"$USAGE_CHECK_DIR/liveruncallback/liveruncallback_test.go"
 USAGE_TEXT_LOG="$USAGE_CHECK_DIR/test.log"
 if ! ( cd "$USAGE_CHECK_DIR" && go test -count=1 -v ./... ) >"$USAGE_TEXT_LOG" 2>&1; then
 	# 隔离模块自己跑不起来 = 自检环境不可用 → 必须红,不能静默跳过
@@ -2555,7 +2926,7 @@ selfcheck_red "第 6 步判定必须能区分:正常包不在报告里 → 断�
 #      那条红断言就是恒真的);
 #   2. 零断言的包 → 必须被报出来(红方向:证明判据真的在区分);
 #   3. 反向对照:对有断言的包断言"必须在报告里"必须失败(证明它能判负)。
-ASSERT_REPORT=$(assert_scan_report "$USAGE_CHECK_DIR" "awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip awo/usagecheck/fake awo/usagecheck/noassert awo/usagecheck/asserted awo/usagecheck/commentonly awo/usagecheck/deadassert awo/usagecheck/liveassert awo/usagecheck/deadloop awo/usagecheck/deadcase awo/usagecheck/deadhelper awo/usagecheck/livehelper awo/usagecheck/deadbranchhelper awo/usagecheck/livebranchhelper awo/usagecheck/deadfunclit awo/usagecheck/deadfunclitbranch awo/usagecheck/livefunclit awo/usagecheck/liveimmediate awo/usagecheck/deadcasehelper awo/usagecheck/livecasehelper awo/usagecheck/deadchainhelper") ||
+ASSERT_REPORT=$(assert_scan_report "$USAGE_CHECK_DIR" "awo/usagecheck/good awo/usagecheck/zero awo/usagecheck/skip awo/usagecheck/fake awo/usagecheck/noassert awo/usagecheck/asserted awo/usagecheck/commentonly awo/usagecheck/deadassert awo/usagecheck/liveassert awo/usagecheck/deadloop awo/usagecheck/deadcase awo/usagecheck/deadhelper awo/usagecheck/livehelper awo/usagecheck/deadbranchhelper awo/usagecheck/livebranchhelper awo/usagecheck/deadfunclit awo/usagecheck/deadfunclitbranch awo/usagecheck/livefunclit awo/usagecheck/liveimmediate awo/usagecheck/deadcasehelper awo/usagecheck/livecasehelper awo/usagecheck/deadchainhelper awo/usagecheck/deadvaluevar awo/usagecheck/deadvaluealias awo/usagecheck/deadvaluefield awo/usagecheck/deadvaluemethod awo/usagecheck/deadvaluechain awo/usagecheck/livevaluealias awo/usagecheck/livevaluemethod awo/usagecheck/liveruncallback") ||
 	fail "门禁自检失败:第 6 步的断言扫描函数自身执行失败(自检环境不可用 —— 必须红,不能静默跳过)"
 selfcheck_ok "第 6 步断言扫描:有断言的包不得被误报(否则新判据把正常代码挡在门外)" usage_expect "awo/usagecheck/asserted" "$ASSERT_REPORT" "no"
 selfcheck_ok "第 6 步断言扫描:零断言的包必须被抓(否则'新增一个恒真测试包'就能绕过门禁 —— #289 的绕过本身)" usage_expect "awo/usagecheck/noassert" "$ASSERT_REPORT" "yes" "没有任何断言"
@@ -2616,6 +2987,18 @@ selfcheck_ok "第 6 步断言扫描:辅助函数**只在恒假分支里**被调�
 selfcheck_ok "第 6 步断言扫描:写在**从未被调用的函数字面量**里的断言必须被抓(否则'f := func(){ t.Errorf(...) }; _ = f'就能绕过门禁 —— 第三十二轮终审 P1 的 B5;同一条自检还盯住'只在死分支里被调用'的变体);同一条自检同时断言'赋值后被调用'与'立即调用'两种正常写法不得被误报(绿方向)" assert_expect_dead_multi "awo/usagecheck/deadfunclit,awo/usagecheck/deadfunclitbranch" "$ASSERT_REPORT" "从未被调用的函数字面量" "awo/usagecheck/livefunclit" "awo/usagecheck/liveimmediate"
 selfcheck_ok "第 6 步断言扫描:辅助函数**只在无匹配 switch 分支里**被调用时,它里面的断言必须被抓(否则'switch 1 { case 2: helper(t) }'就能绕过门禁 —— 第三十二轮终审 P1 的 B6);同一条自检同时断言'在匹配的分支里被调用时不得被误报'(绿方向)" assert_expect_dead_multi "awo/usagecheck/deadcasehelper" "$ASSERT_REPORT" "未被调用的辅助函数" "awo/usagecheck/livecasehelper"
 selfcheck_ok "第 6 步断言扫描:**链式**辅助函数(outer→inner)里、outer 只在恒假分支被调用时,inner 的断言必须被抓(否则'死分支调 outer → outer 调 inner'就能绕过门禁 —— 第三十二轮终审 P1 的 B7);同一条自检同时断言'辅助函数被调用时不得被误报'(绿方向)" assert_expect_dead_multi "awo/usagecheck/deadchainhelper" "$ASSERT_REPORT" "未被调用的辅助函数" "awo/usagecheck/livehelper"
+# ---- 迭代 33(第三十三轮终审 P1-2):五种"以值引用"绕过 ---------------------
+# 这五种手法改前都能让整条 9 步门禁 **exit 0 全绿放行**(断言被计成 live):
+# 取走辅助函数(包级 var / 局部别名 / 结构体字段 / 方法值)却**从不调用**。
+# 改后判据是**真实调用点**(callee 解析到该 FuncDecl)→ 五种手法全部被抓。
+#
+# 每条自检都同时断言**绿方向**(对应的正常写法不得被误报)——
+# 只有红方向的自检是恒真的:判据整个失效时它照样"通过"。
+selfcheck_ok "第 6 步断言扫描:辅助函数被**以值**取走(var f func(*testing.T) = helper)却从不调用时,它里面的断言必须被抓(否则'取走 helper 存起来'就能绕过门禁 —— 第三十三轮终审 P1-2 的 B8);同一条自检同时断言'取了别名并**真的调用**'不得被误报(绿方向)" assert_expect_dead_multi "awo/usagecheck/deadvaluevar" "$ASSERT_REPORT" "未被调用的辅助函数" "awo/usagecheck/livevaluealias"
+selfcheck_ok "第 6 步断言扫描:辅助函数被**以值**取走(alias := helper)却从不调用时,它里面的断言必须被抓(否则'alias := helper 不调用'就能绕过门禁 —— 第三十三轮终审 P1-2 的 B9);同一条自检同时断言'取了别名并**真的调用**'不得被误报(绿方向)" assert_expect_dead_multi "awo/usagecheck/deadvaluealias" "$ASSERT_REPORT" "未被调用的辅助函数" "awo/usagecheck/livevaluealias"
+selfcheck_ok "第 6 步断言扫描:辅助函数只被塞进**结构体字段**(holder{fn: helper})时,它里面的断言必须被抓(否则'把 helper 存进结构体'就能绕过门禁 —— 第三十三轮终审 P1-2 的 B10);同一条自检同时断言'辅助函数被调用时'不得被误报(绿方向)" assert_expect_dead_multi "awo/usagecheck/deadvaluefield" "$ASSERT_REPORT" "未被调用的辅助函数" "awo/usagecheck/livehelper"
+selfcheck_ok "第 6 步断言扫描:**方法值**被取走(f := h.assertNeverRuns)却从不调用时,方法里的断言必须被抓(否则'取出方法值不用'就能绕过门禁 —— 第三十三轮终审 P1-2 的 B11);同一条自检同时断言'方法**真的被调用**'不得被误报(绿方向)" assert_expect_dead_multi "awo/usagecheck/deadvaluemethod" "$ASSERT_REPORT" "未被调用的辅助函数" "awo/usagecheck/livevaluemethod"
+selfcheck_ok "第 6 步断言扫描:链式辅助函数里、**外层只被以值引用**(outer 从不被调用)时,内层的断言必须被抓(否则'死链 + 取值'就能绕过门禁 —— 第三十三轮终审 P1-2 的 B12);同一条自检同时断言'辅助函数被调用时'不得被误报(绿方向)" assert_expect_dead_multi "awo/usagecheck/deadvaluechain" "$ASSERT_REPORT" "未被调用的辅助函数" "awo/usagecheck/livehelper"
 selfcheck_red "第 6 步断言扫描必须能区分:有断言的包不在报告里 → 断言'在报告里'必须失败" usage_expect "awo/usagecheck/asserted" "$ASSERT_REPORT" "yes"
 rm -rf "$USAGE_CHECK_DIR"
 USAGE_CHECK_DIR=""

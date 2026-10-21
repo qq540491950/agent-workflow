@@ -2961,10 +2961,46 @@ pi 的输出形态本就是自由文本,仓库自带示例工作流
    内部并发(本轮只验适配器侧的共享状态无竞争)。
 3. **`pi` 适配器仍无真机冒烟** —— 开放项(自轮次 29 起)保持开放。
 
+## 第二十九轮(迭代 33 收口):凭据脱敏的最后关口 + 门禁可达性
+
+> 输入是**收官验收复审**的结论(**0 P0 / 2 P1** + 2 条 P2/P3)。
+> 缺陷登记见 `docs/OPTIMIZATION.md` 第十三节末"轮次 92"小节(#342-#346)。
+
+### 本轮新增/修改的测试用例清单
+
+| 文件 | 用例 | 覆盖的缺陷 | 断言意图 |
+| --- | --- | --- | --- |
+| `logx/credential_test.go` | `TestRandomBase64CredentialsAreMasked` | **#342** | 200 个**固定 seed** 的随机 base64 样本(std 100 + raw 100)→ `Mask` 与 `MaskCredentialValues` **两个出口**都必须遮住(不能只遮一个);且必须出现占位符 |
+| `logx/credential_test.go` | `TestCamelCodeIdentifiersArePreserved` | **#342**(绿方向) | 22 个代码标识符(含 `getToken` / `apiKey` / `mySecretKey` / `userAccessToken` … 与仓库里真实存在的 `TestScriptNodeHonorsTimeoutAndWorkingDir1637892132` / `TestJSONBodyTooLargeReturns413` / `TestSha256ChecksumAlgorithmName`)**原样保留** —— 收窄判据不能把正常代码全当凭据 |
+| `logx/credential_test.go` | `TestMaskIsIdempotentForRandomBase64` | **#342** | 200 个随机样本"掩一次 vs 掩两次"**逐字节相同**(落库侧与读出口各过一次) |
+| `logx/credential_test.go` | `TestMaskIsIdempotentForPEMInAssignment` | **#345** | 8 种"PEM 嵌在赋值形态"的输入(赋值 / 冒号 / 引号 / 双 diff 前缀 / 裸块)→ **幂等** + **明文不残留** |
+| `logx/credential_test.go` | `TestDoubleDiffPrefixCredentialIsMasked` | **#346** | `++AKIA…` / `--AKIA…` / `+++AKIA…` / `diff --git …` 四种形态 → 遮住,且**行首标记保留**(diff 的行标记是审计证据) |
+| `logx/credential_test.go` | `TestBareBase64WithPaddingIsNotTruncated`(改) | **#342** | 夹具前提自检改用**生产实现**的 `camelHumps`(口径不再两处各写一份);断言**未改** |
+| `workflow/runtime/cas_conflict_test.go` | `TestCancelCommitConflictIsExpectedRace`(改) | **#344** | 前置条件从"等 `RUNNING`"改成"等 **`node.started`**";**断言意图与强度一个字没改** —— 只是把竞态变成确定时序 |
+| `scripts/verify.sh`(门禁自检) | 5 条新场景(`SELFCHECK_EXPECTED` **36 → 41**) | **#343** | 五种"以值引用"绕过各一条**红**场景(断言**具体原因** `未被调用的辅助函数`),每条同时断言**绿方向**(`var f = helper; f(t)` 真调用 / `h.assertRuns(t)` 方法真调用 / `t.Run(…, func(){…})` 回调) |
+
+### 本轮的**红 → 绿**实测
+
+| 编号 | 红(改前) | 绿(改后) |
+| --- | --- | --- |
+| #342 | 旧 `credential.go` + 新测试:200 个随机 base64 样本中 **180 个逃逸** → **360 条断言失败**(例:`样本 0 未被 Mask 脱敏(驼峰护栏放行了随机 base64): "S0H0NtfHXZIK8I50kOM7scZAisuWnEn52qh3SwQAex4R2EXITPLsXHpz1+2CsUpT5lU="`) | 200/200 全遮;22 个标识符全保留;200 个样本幂等 |
+| #343 | 旧扫描器(文本计数):5 个绕过包 `deadvaluevar 1 1` / `deadvaluealias 1 1` / `deadvaluefield 1 1` / `deadvaluemethod 1 1` / `deadvaluechain 1 1` —— **live 全等于 total** | 新扫描器(真实调用点):5 个包**全部** `live = 0` + `未被调用的辅助函数`;3 个绿对照全部 `live = 1`;**真实仓库 22 包 / 171 文件逐包 live 计数 0 差异** |
+| #344 | 隔离副本(HEAD 版用例)+ CPU 负载 + `GOMAXPROCS=1`:**10/10 失败** —— `取消分支的 CAS 冲突未被计数(事件: [workflow.started])` | 同样条件下 **0/10 失败** |
+| #345 | 一次 `…-----***` / 两次 `…-----******` | 一次 == 两次(逐字节) |
+| #346 | `"++AKIAIOSFODNN7EXAMPLE"` 原样输出 | 遮住,`++` 保留 |
+
+### 本轮的门禁**负向验证**(证明自检非恒真)
+
+把 `scripts/verify.sh` 内嵌的 `assertscan` **换回旧版**(文本计数)后重跑门禁
+第 6 步:新增的 5 条自检场景**全部变红**(旧扫描器把 5 个绕过包判成
+`live = 1` → `usage_expect … "yes"` 失败)→ **门禁红**。
+换回新版后同一条自检**绿**。
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
+| 92 | **第二十九轮(迭代 33 收口)**:随机 base64 凭据不被脱敏 / 门禁可被"以值引用"骗过 / CAS 冲突用例去 flake / `logx.Mask` 非幂等 / 双 diff 前缀漏 | ✅ 已落地(工作区,待提交) | **#342-#346 共 5 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 92 小节):**#342**(P1)随机 base64 凭据**不被脱敏** —— 裸值高熵规则的"驼峰标识符"护栏("大写后紧跟小写"≥4 次就豁免)对随机字符**几乎必然**满足(实测 16.5%/位)→ 护栏等于"高熵串豁免"→ 随机 base64 **194/200 原样输出**(终审实测 198/200)→ node output / state_json / 事件流 / SSE / git diff 六出口全明文 → **驼峰护栏收窄为五条**(起伏≥4 / 驼峰词序列 / 词长≥2 / 每词含小写 / **数字段≤1 处**),并补"整段就是路径"的路径护栏;**#343**(P1)门禁第 6 步的断言扫描可被 **5 种"以值引用"手法**骗过(整条 9 步门禁全绿放行)→ 可达性改为**真实调用点**(`ast.CallExpr` 的 callee 解析到该 `FuncDecl`;函数值别名按作用域解析,别名链用不动点求解),自检 **36 → 41**;**#344**(P2)`TestCancelCommitConflictIsExpectedRace` 在 CPU 负载下**假红**(实测 10/10 失败)→ 前置从"等 RUNNING"改成"等 **node.started**",断言未改;**#345**(P3)`logx.Mask` **非幂等**(赋值内 PEM:一次 `…-----***`、两次 `…-----******`)→ PEM 正则认得已掩形态;**#346**(P3)`++AKIA…`(**双 diff 前缀**)漏 → 行首 `+`/`-` **逐个**摘除。**红→绿证据**:旧实现 + 新测试 → 360 条断言失败 / 旧扫描器 5 个绕过包 `live == total` / 负载下 10/10 失败 / 一次两次不等 / `++AKIA…` 原样输出;改后全部转绿。**误报 0**:新旧扫描器在真实仓库 22 包 / 171 文件上**逐包 live 计数完全一致**。**新增测试**:`logx/credential_test.go` 5 个用例 + 门禁自检 5 条场景;**修改**:`logx/credential_test.go` 的夹具前提自检改用生产实现的 `camelHumps`、`workflow/runtime/cas_conflict_test.go` 的前置条件(断言未改)。Go 测试文件 **171** 个(不变)/ 顶层 `func Test*` **904 → 909**;门禁 **9 步全绿**(总耗时 **138s**) |
 | 91 | **第二十八轮(迭代 32 收口)**:门禁断言扫描的 4 个新盲区 + 终审复审确认关闭 6 条遗留项 | ✅ 已落地(工作区,待提交) | **#341 共 1 条,已关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 91 小节):**#341**(P1)门禁第 6 步的断言扫描可被 **4 种手法**骗过(辅助函数**只在恒假分支**里被调用 / 断言在**从未被调用的函数字面量**里 / 辅助函数**只在无匹配 switch 分支**里被调用 / **链式**辅助函数只在恒假分支被调用)→ **整条 9 步门禁全绿放行**;根因:`funcUnreachableReason` 用 `refs[name] > 0` 判"是否被调用",而 `packageRefs` 把**恒假分支里的调用点**也计入,且 `FuncLit` 完全不追踪调用关系 → 修法:**判据从"存在性"升级为"可达性"**(引用点收集时跳过不可达分支里的调用点 + `FuncLit` 内断言要求该字面量确有调用点 + 链式辅助函数用**不动点迭代**传递可达性);自检 **32 → 36** 条(B4/B5/B6/B7 各一条红场景 + 绿方向)。**红→绿证据**(本轮自建"抽出 assertscan 单独编译"的手法):旧扫描器 4 个绕过包全部 `live == total` → 新扫描器全部 `live == 0` 且**原因与形态一一对应**;**误报 0**:新旧扫描器在本仓库 22 个包 / 171 个测试文件上**逐包 live 计数完全一致**(3304 条断言全 live)。**另关闭 6 条**终审复审确认的遗留项(**#270** 跨节点上下文链 / **#321** `submit` 产物 / **#318** AKIA 粘连 / **#323** 权限死入口 / **#306** NaN 连坐 / **#322** SSE 慢客户端阈值),逐条核实方式见"轮次 91"一节。**仍然开着 2 处**(有意边界):函数字面量**作为参数**传给别的函数 / 辅助函数以**函数值**形态传递 —— 静态判不出 → 保守记为 live(#320 残余同族,见 OPTIMIZATION 第 76 条) |
 | 90 | **第二十六轮(迭代 31 收口)**:真实适配器路径的"同形替身"场景矩阵(14 场景 × claude/pi 两侧) | ✅ 已落地(工作区,待提交) | **#336-#340 共 5 条**(逐条见 `docs/OPTIMIZATION.md` 轮次 90 小节):**#336**(P0)CLI **退出码 0 但 stdout 为空** → 适配器一律 `StatusSuccess` + 空决策→ 节点绿灯、路由**静默走默认分支**(约定 14"该失败却成功")→ 两侧 `parseOutput` **先判空**→ 显式 FAILED + 可读原因(第二十九轮的 P3 由此**升级为 P0**:同一函数里"截断"早已是显式失败,信息量更少的空输出却是成功 —— 两套口径自相矛盾);**#337**(P1)claude:stdout **不是合法 JSON 信封**(前置提示行 / 纯文本 / 非法字节)→ 整段 Unmarshal 失败 → **决策整个丢失** → 改成**先找信封再解析**(整段 → 尾部对象 → 第一个对象,取第一个**像信封**的:含 `result`/`is_error` 字段);**#338**(P1)进程组击杀**只在取消/超时路径兑现** —— CLI 正常退出但孤儿持有管道时(`ErrWaitDelay` 路径)孤儿**继续在后台跑**(进程泄漏)→ 新增 `agent.KillProcessGroup` 在 Wait 返回后收掉孤儿(失败路径同样收);**#339**(P3)pi:自由文本输出是合法形态但**静默成功** → 改成"成功但留痕"(`Data["decision_missing"]` + 摘要标注),**不判失败**(判失败会打断仓库示例工作流的 plan/execute 节点);**#340**(P2)"信号杀死 + 孤儿持有管道"不会被 `ErrWaitDelay` 掩盖成成功 —— 实现本来就对,本轮把它**钉住**(新增 `fork_and_signal` 替身形态 + 两条孤儿用例)。**红→绿证据**:隔离副本把适配器实现**还原为 HEAD**、只保留本轮测试 → claude 侧 7 条矩阵用例 + 2 条孤儿用例红、pi 侧 5 条矩阵用例 + 2 条孤儿用例红;本轮实现全绿。新增测试文件 **5 个 Go**(`agent/internal/stubcli/stubcli_test.go` 3 / `agent/claude/stub_matrix_test.go` 5 / `agent/pi/stub_matrix_test.go` 5 / 两侧 `main_test.go` 各 1)+ 改 4 个既有 Go 文件(`agent/claude/claude.go` / `agent/pi/pi.go` / `agent/process_unix.go` / `agent/process_windows.go`)+ 3 个既有测试文件的断言(`claude_test.go` 的 `TestParseOutputNonJSON`、`claude_audit_test.go` 的 `TestParseOutputRejectsInvalidDecision`、`claude_argv_test.go` 的假 CLI 形态);前端**未改动** |
 | 88-89 | **第二十五轮(迭代 30 收口)**:git 出口脱敏 / 状态码语义 / 前端错误文案统一 / 错误文本去内部细节 / panic 兜底 / 路由级 404 文案 | ✅ 已落地(工作区,待提交) | **#330-#335 共 6 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 88-89 小节):**#330**(P0,越界)`GET /api/git/diff` 返回**未脱敏**文件内容(用户代码库里的 `.env` / 含密钥文件凭据明文进响应体,再由 GitPanel 渲染到屏幕)→ git 包的**五个出口**(`Status`/`Diff`/`Log`/`Commit`/`CurrentBranch`)一律过 `logx.Mask`(键名 ∪ 值形态,**与节点 output 出口同源**);为什么不用更松的"只按值形态":`.env` 里的密码多半是**低熵**的(`DB_PASSWORD=hunter2`)—— 值形态规则判它"不是凭据",只靠它秘密照样明文出站;**可读性回归锁**:普通 diff 拿 `git diff` 原文**逐字节**比对;**#331**(P1)内部错误(DB 锁死 / Agent 崩溃 / 超时)**一律报 400** → 用户与监控无法区分"填错了"与"后端炸了",且 `api/server_test.go` 的"错误必须是 4xx"断言把错误行为**钉成了契约** → 新增 `statusForError`(**先 code 再 kind**):内部类 → 500/502/504,**既有 4xx 映射一条没动**;**#332**(P1)同一后端错误前端**两种文案**(43 处 `toast.error` vs 16 处 `reportError`;丢掉 scope、丢掉错误码、绕过 `NETWORK_HINTS` 的中文翻译 —— 网络失败时弹的是浏览器的原始英文 `Failed to fetch`)→ 43 处逐个换成 `reportError(e, scope)` + **静态守卫**(生产代码里 `toast.error` 只许出现在 `lib/errors.ts`);`NETWORK_HINTS` 补 `AbortError` 与 `timeout of Nms exceeded`;`STATUS_HINTS` 补 5xx;`httpText` 非 JSON 分支截断 200 字;桌面 `toApiError` 补 code/kind 兜底 + panic 归一;**#333**(P2)错误文本夹带 Go/SQL/git 内部细节(`json: cannot unmarshal string into Go struct field AgentConfig.extra_args of type []string`)→ `badRequest` 改结构化错误 + 三个调用点给人话 + `wrap` 出口文本过 `logx.Mask`(原始错误只进日志);**#334**(P2)`wrap` 无 `recover()` → panic 一路冒到 net/http(服务器模式 EOF / 桌面模式泄漏 Go 包路径)→ 兜住后回 500 `INTERNAL`(`http.ErrAbortHandler` 放行;响应已提交时不再写错误体);**#335**(P3)路由级 404 文案"接口不存在"面向开发者 → 面向用户但可定位的措辞。**红→绿证据**:① `diff 不得含凭据明文("sk-ant-supersecret1234567890abcdef")` → 无明文 ② `状态码 = 400,期望 500` → 500 ③ `panic: runtime error: index out of range [3] with length 2 [recovered, repanicked]` → 500 `INTERNAL` ④ `404 文案仍是开发者口径: 接口不存在` → 新文案。新增测试文件 **3 个 Go**(`git/mask_test.go` 6 / `api/git_mask_test.go` 2 / `api/error_contract_test.go` 8)+ 改 2 个既有 Go 文件(`api/server_test.go` 1 处断言 / `git/` 无);Go 测试文件 163 → **171**、顶层 `func Test*` 869 → **899**;前端 24 → **25** 文件 / 293 → **302** 用例;**既有断言变更逐条**:① `api/server_test.go` 的"必须 4xx"→"4xx 或 5xx"(**理由**:它钉住的正是缺陷本身;精确映射改由 `TestErrorStatusMappingByKind` 逐条断言)② 前端 5 条精确匹配的 toast 断言(加了 scope)③ `api.test.ts` 的 `expect(err.code).toBeUndefined()` → `toBe("BAD_REQUEST")`(桌面模式补 code/kind 兜底,旧断言钉的是"两种模式形状不同构")④ 404 夹具同步新文案 ⑤ `Agents.test.tsx` 的 `beforeEach` 加 `resetErrorDedup()`(5 秒去重是生产行为,不是缺陷) |
