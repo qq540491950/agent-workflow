@@ -592,39 +592,20 @@ echo "孤儿包候选目录: $ORPHAN_COUNT 个(按 git 跟踪的 .go 文件推�
 #
 # 计数变量的赋值发生在**函数体内**(不是子 shell),因此计数能真正累加。
 selfcheck_count=0
-# 期望的自检场景条数。**新增或删除任何一条自检场景,都必须同步改这里** ——
-# 改漏了 → 门禁红(这正是这个守卫的作用)。当前 41 条:
-#   1-3  交叉检查:windows 测试文件对照 / 测试文件类型错 / 源文件类型错
-#   4-9  孤儿包检查:windows·freebsd·js 各一条绿 + 一条红
-#   10   孤儿包检查:目录混包(两个 package 名)必须被抓
-#   11   目标平台枚举:必须是 go 工具全集(不是手写清单)
-#   12   目标平台枚举断言的反向对照:三平台手写清单必须通不过
-#   13-17 第 6 步"真实用例"判定:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓
-#          / 伪造输出包被抓 / 反向对照(对正常包断言"必须在报告里"必须失败)
-#   18-23 第 6 步"断言扫描"判定(#289 + 第二轮终验 P2-1):有断言的包不误报 /
-#          零断言的包被抓 / 只在注释里提到断言的包被抓 / 恒不触发的断言被抓 /
-#          运行期才成立的正常断言不误报 / 反向对照(有断言的包断言"必须在
-#          报告里"必须失败)
-#   24-27 路径排除规则(第十八轮终验 #279):build/ 下的项目代码包必须在门禁
-#          包集合里 / 类型正确时必须能过编译 / 类型错误时必须被抓 /
-#          Wails 平台脚手架(build/ios)必须继续被排除
-#   28-29 孤儿包候选:build/ 下的包必须在候选里 / testdata/ 下的包必须不在
-#          候选里(Go 工具链约定 —— 夹具目录不可见是正确行为)
-#   30-32 迭代 27(终审 P1-2)的三类"死断言"绕过:零次循环 / 无匹配分支 /
-#          未被调用的辅助函数(最后一条同时断言绿方向)
-#   33-36 迭代 31(第三十二轮终审 P1)的四种"新手法"绕过:死分支里的调用 /
-#          从未被调用的函数字面量 / 无匹配 case 里的调用 / 链式辅助函数
-#          (每条都同时断言对应的绿方向)
-#   37-41 迭代 32(第三十三轮终审 P1-2)的五种"以值引用"绕过:包级 var 取走 /
-#          局部别名取走 / 结构体字段 / 方法值取走 / 链式外层被取走
-#          (每条都同时断言对应的绿方向)
-SELFCHECK_EXPECTED=41
+# "实际执行"清单:每个 selfcheck_ok/red 调用把自己的标签写进去,
+# 在计数守卫处与注册表(scripts/selfcheck_registry.txt)逐条比对 ——
+# 少一条 / 多一条 / 顺序变了都会红。注册表是期望值的**唯一来源**,
+# 这里不再有手抄的常量(#325:人肉同步的常量 + 注释清单已退役)。
+SELFCHECK_OBS=$(mktemp /tmp/awo-selfcheck-obs.XXXXXX)
+# 期望条数 = 注册表的非注释行数(每行一条场景)。
+SELFCHECK_EXPECTED=$(grep -cv '^#' scripts/selfcheck_registry.txt)
 
 # selfcheck_ok <标签> <命令...> —— 断言命令必须**成功**(绿方向)。
 selfcheck_ok() {
 	sc_label="$1"
 	shift
 	selfcheck_count=$((selfcheck_count + 1))
+	printf '%s\n' "$sc_label" >>"$SELFCHECK_OBS" # 登记进"实际执行"清单(计数守卫处与注册表逐条比对)
 	if ! "$@"; then
 		fail "门禁自检失败:[$sc_label] 本该通过的命令失败了 —— 自检或它守护的防线已失效"
 	fi
@@ -635,6 +616,7 @@ selfcheck_red() {
 	sc_label="$1"
 	shift
 	selfcheck_count=$((selfcheck_count + 1))
+	printf '%s\n' "$sc_label" >>"$SELFCHECK_OBS"
 	if "$@"; then
 		fail "门禁自检失败:[$sc_label] 本该被抓住的坏情况却通过了 —— 这道防线没有生效"
 	fi
@@ -3004,13 +2986,23 @@ rm -rf "$USAGE_CHECK_DIR"
 USAGE_CHECK_DIR=""
 
 # ---- 自检场景计数守卫(防"自检被删 → 门禁恒绿")-------------------------
-# 每条自检场景都会给 selfcheck_count 加一;这里的期望值见 SELFCHECK_EXPECTED
-# 的注释。**少一条 → 门禁红**(有人删掉了自检调用却没改期望值);
-# **多一条 → 门禁红**(新增了自检却忘了同步期望值)。
-# 守卫的边界:它挡得住"手滑/重构误删",挡不住"有人同时改了脚本和期望值"
-# —— 那已经不是疏忽,是刻意绕过,靠 code review 与 git 历史发现。
+# 两道比对,期望值都来自注册表(scripts/selfcheck_registry.txt,#325):
+#   ① 条数:实际执行条数 == 注册表条数。少一条(删了自检)→ 红;
+#      多一条(新增了自检没登记)→ 红。
+#   ② 逐条标签:实际执行的标签序列与注册表**逐字一致**(顺序也算)。
+#      条数对不上会先红在 ①;①过了②还红 = 有人"删一条同时加一条"
+#      凑总数 —— 那种手工平衡在逐条 diff 下无所遁形。
+# 守卫的边界:刻意绕过仍需同时改注册表 —— 但注册表是专门的清单文件,
+# 每行一条场景、头部写明维护规则,删行在 diff 里一目了然;
+# "顺手改个常量就能盖住删除"的结构性问题(#325)已经不存在。
 [ "$selfcheck_count" -eq "$SELFCHECK_EXPECTED" ] ||
-	fail "门禁自检失败:实际执行了 $selfcheck_count 条自检场景,期望 $SELFCHECK_EXPECTED 条 —— 有自检被删掉,或新增后没同步 SELFCHECK_EXPECTED"
+	fail "门禁自检失败:实际执行了 $selfcheck_count 条自检场景,注册表期望 $SELFCHECK_EXPECTED 条 —— 有自检被删掉,或新增后没登记进 scripts/selfcheck_registry.txt"
+if ! diff -u <(grep -v '^#' scripts/selfcheck_registry.txt) \
+	<(grep -vx -e 'meta-guard-red' -e 'meta-guard-ok' "$SELFCHECK_OBS") \
+	>/tmp/awo-selfcheck-diff.txt 2>&1; then
+	fail "门禁自检失败:实际执行的自检清单与注册表不一致(见 /tmp/awo-selfcheck-diff.txt)—— 自检被改/被删/顺序变了,或注册表没同步"
+fi
+rm -f "$SELFCHECK_OBS"
 
 echo "OK($CHECK_COUNT 个包均有真实执行并通过的用例,且测试代码里都有断言)"
 echo "   自检通过:正常包不误报 / 0 用例包被抓 / 全 skip 包被抓 / 伪造输出包被抓 / 零断言包被抓"
