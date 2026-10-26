@@ -568,7 +568,14 @@ function DesignerInner() {
           <Button variant="outline" size="sm" onClick={() => validate()}>
             <ShieldCheck className="mr-1 h-4 w-4" /> 校验
           </Button>
-          <Button variant="outline" size="sm" onClick={save} disabled={saving}>
+          {/* Cmd/Ctrl+S 快捷保存存在但不可见 —— 按钮上注明,快捷键才有被发现的可能 */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={save}
+            disabled={saving}
+            title="保存(⌘S / Ctrl+S)"
+          >
             <Save className="mr-1 h-4 w-4" /> 保存
           </Button>
           <Button size="sm" onClick={openRun}>
