@@ -18,3 +18,7 @@ bin/agent-workflow-server-smoke
 /node_modules/
 /package.json
 /package-lock.json
+
+# TypeScript 增量构建产物(tsc -b 写在工作区根部,不属于任何提交)
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo

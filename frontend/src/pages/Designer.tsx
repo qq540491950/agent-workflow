@@ -569,6 +569,7 @@ function DesignerInner() {
           <ReactFlow
             nodes={nodes}
             edges={edges}
+            colorMode="dark"
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
