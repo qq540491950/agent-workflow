@@ -296,6 +296,22 @@ function DesignerInner() {
       setWf(w);
       hydrate(w);
       setTimeout(() => fitView({ padding: 0.15 }), 60);
+      // 打开即静默校验一次:导入/保存时带回的警告(如 SUBWORKFLOW_NOT_FOUND
+      // "运行时将失败")此前只在用户点「校验」或保存时可见 —— 带着已知问题
+      // 的工作流每次打开都装作没事,用户要等到运行失败才知道(约定 14:
+      // 该报告却没报告)。静默 = 不弹 toast,错误面板照常显示。
+      api
+        .validateWorkflow(w)
+        .then((res) => {
+          if (!res.valid) setErrors(res.errors);
+          else if (res.warnings?.length)
+            setErrors(res.warnings.map((x) => ({ ...x, code: "⚠ " + x.code })));
+        })
+        .catch((e) => {
+          // 预校验失败不阻断打开画布(用户仍可查看/编辑,点「校验」会看到
+          // 原因),但要留痕 —— 静默吞错守卫(error-guard)也要求不得是空 catch。
+          console.warn("打开工作流时的预校验失败(点「校验」可重试)", e);
+        });
     }).catch((e) => {
       setLoadError(e.message);
       reportError(e, "加载工作流");
