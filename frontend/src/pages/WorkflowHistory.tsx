@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { usePageTitle } from "@/lib/use-page-title";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
 import { reportError } from "@/lib/errors";
@@ -38,6 +38,9 @@ function dur(e: Execution): string {
 export default function WorkflowHistory() {
   const { id = "" } = useParams();
   const [wf, setWf] = useState<Workflow | null>(null);
+  // 工作流不存在(过期链接):此前 toast 一闪,页面留在"空列表"的假象里。
+  const [loadFailed, setLoadFailed] = useState(false);
+  const nav = useNavigate();
   usePageTitle(wf ? `历史:${wf.name}` : "执行历史");
   const [execs, setExecs] = useState<Execution[]>([]);
   const [versions, setVersions] = useState<number[]>([]);
@@ -50,8 +53,14 @@ export default function WorkflowHistory() {
     // 现在统一走 reportError(同一个错误 5 秒内只提示一次)。
     api
       .getWorkflow(id)
-      .then(setWf)
-      .catch((e: unknown) => reportError(e, "加载工作流详情"));
+      .then((w) => {
+        setLoadFailed(false);
+        setWf(w);
+      })
+      .catch((e: unknown) => {
+        setLoadFailed(true);
+        reportError(e, "加载工作流详情");
+      });
     api
       .listExecutions(id, 100)
       .then((x) => setExecs(asArray<Execution>(x)))
@@ -83,6 +92,17 @@ export default function WorkflowHistory() {
       reportError(e, "查看工作流版本");
     }
   };
+
+  if (loadFailed && !wf) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
+        <p>工作流不存在,或已被删除(链接可能已过期)</p>
+        <Button variant="outline" size="sm" onClick={() => nav("/workflows")}>
+          返回工作流列表
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full overflow-auto p-6">

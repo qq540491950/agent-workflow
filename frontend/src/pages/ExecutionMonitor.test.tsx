@@ -492,3 +492,34 @@ describe("ExecutionMonitor 实时日志跟随滚动", () => {
     expect(box().scrollTop).toBe(1800); // 又跟到底了
   });
 });
+
+// ---- 迭代 35:加载失败要有明确失败态,不能永远"加载中…" ------------------
+// 过期深链指向已删除的执行:此前只有一条 toast(4 秒后消失),页面永远
+// 停在"加载中…"—— 明确的失败却渲染成"还在等",用户只能干等。
+describe("ExecutionMonitor 加载失败态", () => {
+  it("执行不存在时显示失败态与返回入口(不无限加载)", async () => {
+    m.getExecution.mockRejectedValue({
+      code: "NOT_FOUND",
+      message: "执行 \"exec-gone\" 不存在",
+      status: 404,
+    });
+    renderMonitor();
+    await settle();
+    expect(screen.getByText(/执行不存在,或已被删除/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "返回执行列表" })).toBeTruthy();
+    expect(screen.queryByText("加载中…")).toBeNull();
+  });
+
+  it("随后刷新成功则恢复正常视图(失败态可恢复)", async () => {
+    m.getExecution
+      .mockRejectedValueOnce({ code: "NOT_FOUND", message: "不存在", status: 404 })
+      .mockResolvedValue(exec());
+    renderMonitor();
+    await settle();
+    expect(screen.getByText(/执行不存在,或已被删除/)).toBeTruthy();
+    // SSE 触发的下一次刷新拿到数据 → 失败态退场
+    emit(m.handlers, makeEvent("workflow.started", "ex-1"));
+    await advance(250);
+    expect(screen.queryByText(/执行不存在,或已被删除/)).toBeNull();
+  });
+});

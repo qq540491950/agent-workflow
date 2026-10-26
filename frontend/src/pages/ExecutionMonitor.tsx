@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CheckCircle2, XCircle, Circle, PauseCircle, Ban } from "lucide-react";
 import { api, asArray, subscribeEvents } from "@/lib/api";
@@ -210,6 +210,11 @@ export function decisionTone(decision: string): string {
 export default function ExecutionMonitor() {
   const { id = "" } = useParams();
   const [exec, setExec] = useState<Execution | null>(null);
+  // 加载失败(典型:过期深链指向已删除的执行):此前只有一条 toast
+  // (4 秒后消失),页面永远停在"加载中…" —— 明确失败必须给出明确的
+  // 失败态与出口,而不是无限加载。
+  const [loadFailed, setLoadFailed] = useState(false);
+  const nav = useNavigate();
   usePageTitle(exec ? `执行:${exec.workflow_name}` : "执行详情");
   const [nodes, setNodes] = useState<ExecutionNode[]>([]);
   const [events, setEvents] = useState<UIEvent[]>([]);
@@ -237,6 +242,7 @@ export default function ExecutionMonitor() {
       ]);
       // 已经切换到别的执行(或发起了更新的请求):旧响应丢弃,不得覆盖。
       if (!guard.isCurrent(seq)) return;
+      setLoadFailed(false);
       setExec(e);
       // 一律过 asArray:桌面 IPC 与 SPA fallback 异常路径下可能返回
       // null 或被解析成 HTML 兜底页的对象,直接 setNodes(ns) 会在
@@ -254,6 +260,7 @@ export default function ExecutionMonitor() {
       setArtifacts(asArray<Artifact>(arts));
     } catch (err) {
       if (!guard.isCurrent(seq)) return;
+      setLoadFailed(true);
       reportError(err, "加载执行详情");
     }
   }, [id, guard]);
@@ -286,6 +293,16 @@ export default function ExecutionMonitor() {
     };
   }, [id, refresh, guard]);
 
+  if (loadFailed && !exec) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
+        <p>执行不存在,或已被删除(链接可能已过期)</p>
+        <Button variant="outline" size="sm" onClick={() => nav("/executions")}>
+          返回执行列表
+        </Button>
+      </div>
+    );
+  }
   if (!exec) {
     return <div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>;
   }

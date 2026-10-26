@@ -135,3 +135,19 @@ describe("WorkflowHistory 失败必须可见", () => {
     expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toContain("加载执行记录");
   });
 });
+
+// ---- 迭代 35:工作流不存在时的失败态 --------------------------------------
+// 过期链接打开历史页:此前 toast 一闪,页面留在"空列表"假象里。
+describe("WorkflowHistory 加载失败态", () => {
+  it("工作流不存在时显示失败态与返回入口", async () => {
+    m.getWorkflow.mockRejectedValue({
+      code: "NOT_FOUND",
+      message: "工作流 \"wf-gone\" 不存在",
+      status: 404,
+    });
+    renderHistory();
+    await settle();
+    expect(screen.getByText(/工作流不存在,或已被删除/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "返回工作流列表" })).toBeTruthy();
+  });
+});
