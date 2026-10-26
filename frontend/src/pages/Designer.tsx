@@ -712,10 +712,17 @@ function DesignerInner() {
           <DialogHeader>
             <DialogTitle>运行工作流</DialogTitle>
           </DialogHeader>
+          {/* 任务框回车 = 启动执行:填完任务直接回车是最自然的路径 */}
           <Input
             placeholder="任务描述(将作为 {{task}} 注入 Prompt)"
             value={task}
             onChange={(e) => setTask(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                run();
+              }
+            }}
           />
           <Textarea
             className="min-h-16 font-mono text-xs"
