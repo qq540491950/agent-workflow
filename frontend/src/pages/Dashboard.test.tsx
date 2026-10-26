@@ -208,13 +208,15 @@ describe("Dashboard 取消与失败分列", () => {
     expect(screen.queryByText("60%")).toBeNull();
   });
 
-  it("旧后端(没有 cancelled 字段)不会算出 NaN", async () => {
+  it("旧后端(缺 cancelled 字段)不会算出 NaN", async () => {
+    // 分母 = completed+failed(6+2=8 → 75%),cancelled 已不在公式里,
+    // 字段缺失与否都不影响成功率;缺 failed 同样走 ?? 0 兜底。
     const { cancelled: _dropped, ...legacy } = stat;
     m.stats.mockResolvedValue([legacy]);
     renderDashboard();
     await settle();
     expect(screen.queryByText("NaN%")).toBeNull();
-    expect(screen.getByText("60%")).toBeTruthy();
+    expect(screen.getByText("75%")).toBeTruthy();
   });
 });
 

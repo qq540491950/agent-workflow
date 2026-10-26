@@ -141,7 +141,9 @@ export default function Dashboard() {
 
       {stats.length > 0 && (
         <Card className="mt-6">
-          <CardContent className="pt-4">
+          {/* 窄视口(桌面窗口拖小)下七列表格放不下:横向滚动而不是截断
+              —— 此前成功率列被裁成"10C",数字直接读错 */}
+          <CardContent className="overflow-x-auto pt-4">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -156,10 +158,11 @@ export default function Dashboard() {
               </TableHeader>
               <TableBody>
                 {stats.map((st) => {
-                  // 成功率的分母**排除被取消的执行**:被用户叫停的执行
-                  // 不是"没做成",把它算进分母等于用户点一次取消就掉一截
-                  // 成功率(后端已把 failed 与 cancelled 分列)。
-                  const settled = st.total - (st.cancelled ?? 0);
+                  // 成功率的分母 = **已落定**的执行(completed+failed):
+                  // 被用户叫停的执行不是"没做成"(取消拉低成功率等于惩罚
+                  // 用户点取消);等待人工的执行还没到能评判成败的时刻,
+                  // 算进分母同样会把"运行正常"误读成"成功率在掉"。
+                  const settled = st.completed + (st.failed ?? 0);
                   // 没有任何"落定"的执行(一次都没跑,或只被取消过)时没有
                   // 成功率可言 —— 显示 0% 等于说"全失败",误导用户。
                   const rate = settled > 0 ? Math.round((st.completed / settled) * 100) : null;
