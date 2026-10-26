@@ -873,6 +873,7 @@ export function NodePropertyPanel({
         <span className="text-xs text-muted-foreground">启用节点(关闭则运行时跳过)</span>
         <Switch
           checked={cfg.enabled !== false}
+          aria-label="启用节点"
           onCheckedChange={(v) => setCfg("enabled", v)}
         />
       </div>
@@ -1113,6 +1114,7 @@ function WorkflowPropertyPanel({
         <span className="text-xs text-muted-foreground">启用工作流(禁用后不可运行)</span>
         <Switch
           checked={wf.enabled}
+          aria-label="启用工作流"
           onCheckedChange={(v) => onChange({ enabled: v })}
         />
       </div>

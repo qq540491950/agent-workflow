@@ -243,6 +243,7 @@ export default function Workflows() {
                 <TableCell>
                   <Switch
                     checked={w.enabled}
+                    aria-label={`启用或禁用:${w.name}`}
                     onCheckedChange={async (v) => {
                       // 此前是裸 await:失败时是 unhandled rejection,
                       // 界面毫无反馈,用户以为开关坏了。

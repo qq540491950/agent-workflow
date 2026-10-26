@@ -81,6 +81,7 @@ export default function Skills() {
                   <Switch
                     checked={s.enabled}
                     disabled={pendingSkill === s.id}
+                    aria-label={`启用或禁用:${s.name}`}
                     onCheckedChange={(v) => toggle(s, v)}
                   />
                 </TableCell>

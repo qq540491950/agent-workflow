@@ -184,7 +184,13 @@ export default function Agents() {
                   ] as const
                 ).map((k) => (
                   <TableCell key={k}>
-                    <Switch checked={a.permissions[k]} onCheckedChange={() => toggle(a, k)} />
+                    {/* 权限开关的语义在列表头(fs:read 等)与所在行(Agent),
+                        读屏只会念"开关" —— 组合出完整名称 */}
+                    <Switch
+                      checked={a.permissions[k]}
+                      aria-label={`${a.id} 的 ${k} 权限`}
+                      onCheckedChange={() => toggle(a, k)}
+                    />
                   </TableCell>
                 ))}
                 <TableCell className="space-x-1 text-right">

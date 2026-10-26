@@ -241,6 +241,7 @@ export default function Settings() {
               </div>
               <Switch
                 checked={allowScript}
+                aria-label="允许执行 script 节点"
                 onCheckedChange={(v) => {
                   // 开启是提权动作(任意本地命令执行):二次确认,拒绝则保持原值。
                   if (v && !allowScript) {
