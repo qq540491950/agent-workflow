@@ -391,6 +391,17 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 	// 不读(见上面 enabled 分支的提前 return)—— 那里报出来对用户无意义。
 	knownKeys := knownConfigKeys(spec)
 	for _, key := range unknownConfigKeys(n, knownKeys) {
+		// permissions 段写进节点 config = 权限收紧无声失效,与 DSL 解析层
+		// (workflow:/settings: 段错放)同一原则:fail closed,硬失败。
+		// 泛化的 UNKNOWN_NODE_CONFIG 只警告,压不住这种安全语义的静默丢失。
+		// 错误码与解析层同一个(dsl.MisplacedSection),两条保存入口
+		// (YAML 导入 / JSON 保存)都经此处,天然同 code。
+		if misplacedSectionKeys[key] {
+			addErr(model.CodeMisplacedSection, n.ID,
+				"节点 %q 的配置里出现 %q —— 权限覆盖只能写在文档根级(与 workflow 同级),不支持节点级;写在节点配置里会被整体忽略(权限收紧无声失效),请把它移到文档根级",
+				n.ID, key)
+			continue
+		}
 		msg := fmt.Sprintf("节点 %q 的配置键 %q 未被识别(运行期会忽略它,该设置不会生效)", n.ID, key)
 		if hint := closestConfigKey(key, knownKeys); hint != "" {
 			msg += fmt.Sprintf(";是否想写 %q?", hint)
@@ -676,6 +687,18 @@ func unknownConfigKeys(n model.Node, known []string) []string {
 	slices.Sort(out)
 	return out
 }
+
+// misplacedSectionKeys 是"出现在节点 config 里即等于写错层级"的文档根级
+// 段名集合(当前只有 permissions 段)。
+//
+// 拼写的唯一来源:model.PermissionSectionKeys(permission / permissions,
+// 即权限段在 JSON 载荷与 YAML DSL 里的两种正式写法)。
+//
+// 用户把权限覆盖写进节点 config,意图是"收紧该节点的权限",但节点级权限
+// 不受支持,运行期会整体忽略 → 权限收紧无声失效(约定 14:静默失效比
+// 崩溃更危险)。变量(如 variables)写错层级不在此列 —— 无安全语义,
+// 走泛化的 UNKNOWN_NODE_CONFIG 警告即可。
+var misplacedSectionKeys = model.PermissionSectionKeys()
 
 // closestConfigKey 在允许的键里找"最可能是用户想写的那个"。
 //

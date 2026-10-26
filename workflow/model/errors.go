@@ -23,6 +23,15 @@ const (
 	KindCancelledError   ErrorKind = "CancelledError"
 )
 
+// CodeMisplacedSection 是"permissions 段写错层级"的统一错误码。
+//
+// DSL 解析层(workflow/dsl,workflow:/settings: 段错放)与校验层
+// (workflow/validator,节点 config 里的 permissions 段)共用同一个
+// code —— 错误码字符串只在这一处定义,两处引用,不得再手抄第二份。
+// 放 model 而不放 dsl:dsl 的测试包 import 了 validator,validator 再
+// 回头 import dsl 会构成测试期 import cycle;model 是两包共同的底层依赖。
+const CodeMisplacedSection = "DSL_MISPLACED_KEY"
+
 // Error 是全项目的结构化错误。Code 用于程序化处理,Kind 用于分类。
 type Error struct {
 	Kind    ErrorKind `json:"kind"`

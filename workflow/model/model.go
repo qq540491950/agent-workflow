@@ -290,6 +290,17 @@ func (w *Workflow) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// PermissionSectionKeys 返回权限段在两种序列化格式下的正式拼写集合。
+//
+// 唯一来源 = 本文件:Permission 字段的 json tag(`permission`,上方
+// 结构体定义)与 UnmarshalJSON 接受的 DSL 根级写法(`permissions`,
+// 需求.md 第十八章)。校验层(workflow/validator)用它判定"权限段
+// 出现在节点 config 里 = 写错层级"(硬失败,错误码 CodeMisplacedSection);
+// 这两个拼写不得在 model 之外手抄第二份 —— 权限段改名时只改这里。
+func PermissionSectionKeys() map[string]bool {
+	return map[string]bool{"permission": true, "permissions": true}
+}
+
 // ExecutionState 是 Execution 的状态机状态。
 type ExecutionState string
 

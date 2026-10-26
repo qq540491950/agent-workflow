@@ -39,8 +39,9 @@ import (
 // 节点配置契约的唯一来源是 workflow/compiler/nodeconfig.go(约定 13),
 // 由校验期负责;variables/permissions 是开放的自由映射。
 
-// misplacedSection 是"放错层级的顶层段"在解析期给出的专属错误码。
-const misplacedSection = "DSL_MISPLACED_KEY"
+// misplacedSection 是"放错层级的顶层段"在解析期给出的错误码。
+// 字符串的唯一来源是 model.CodeMisplacedSection(与校验层共用,见其注释)。
+const misplacedSection = model.CodeMisplacedSection
 
 // sectionPath 描述闭合结构里的一个键路径(用于 IgnoredKeys 与日志)。
 func sectionPath(parts ...string) string { return strings.Join(parts, ".") }
