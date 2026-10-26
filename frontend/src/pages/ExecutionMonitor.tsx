@@ -72,10 +72,19 @@ function Timeline({
   );
 }
 
-function durationStr(start?: string, end?: string): string {
+function durationStr(start?: string, end?: string, running = false): string {
   if (!start) return "-";
   const t0 = new Date(start).getTime();
-  const t1 = end ? new Date(end).getTime() : Date.now();
+  if (!end) {
+    // 没有结束时间:运行中 → 实时走表;终态(如后端补齐 finished_at 之前
+    // 的存量行)→ 显示"—"。终态还拿"当前时间-开始时间"补,时钟会永远
+    // 走下去,用户会把"已完成"误读成"还在跑"。
+    if (!running) return "—";
+    // eslint-disable-next-line react-hooks/purity -- 运行中的耗时本来就是"当前时刻-开始时刻"
+    const ms = Math.max(0, Date.now() - t0);
+    return ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+  }
+  const t1 = new Date(end).getTime();
   const ms = Math.max(0, t1 - t0);
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
@@ -99,6 +108,52 @@ const MASK_MARK = "***";
 
 function maskNote(text: string | undefined): string | null {
   return text && text.includes(MASK_MARK) ? "(含脱敏内容,部分值以 *** 显示)" : null;
+}
+
+// NodeResult 是 agent 节点 result_json 的结构化形态(宽松解析:任何字段
+// 缺失/类型不对都落到零值,展示层自行取舍)。skill / git 等节点的
+// result_json 是别的形状 —— 解析失败时 result 为 null,只展示 output/error。
+export interface NodeResult {
+  summary?: string;
+  decision?: string;
+  error?: string;
+  output?: string;
+  data?: Record<string, unknown>;
+}
+
+export function parseNodeResult(raw: string | undefined): NodeResult | null {
+  if (!raw) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof v !== "object" || v === null) return null;
+  const o = v as Record<string, unknown>;
+  const str = (k: string) => (typeof o[k] === "string" && o[k] ? (o[k] as string) : undefined);
+  const data =
+    typeof o.Data === "object" && o.Data !== null && Object.keys(o.Data).length > 0
+      ? (o.Data as Record<string, unknown>)
+      : undefined;
+  const r: NodeResult = {
+    summary: str("Summary"),
+    decision: str("Decision"),
+    error: str("Error"),
+    output: str("Output"),
+    data,
+  };
+  return r.summary || r.decision || r.error || r.output || r.data ? r : null;
+}
+
+// nodeDecisionBadge 的语义:Decision 是 agent 的结构化路由依据(REJECTED /
+// APPROVED / WAIT_USER 等),"DONE" 是"普通完成",不差这一个徽标。
+// 徽标颜色跟语义走:拒绝 = 琥珀(不是错误,是路由),等待 = 琥珀,其余 = 中性。
+export function decisionTone(decision: string): string {
+  if (decision === "REJECTED") return "border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400";
+  if (decision === "WAIT_USER") return "border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400";
+  if (decision === "APPROVED") return "border-green-500/50 bg-green-500/10 text-green-600 dark:text-green-400";
+  return "";
 }
 
 export default function ExecutionMonitor() {
@@ -228,7 +283,7 @@ export default function ExecutionMonitor() {
             · v{exec.workflow_version} · {exec.task}
             {exec.started_at && (
               <span className="ml-2 font-mono text-[11px]">
-                · 耗时 {durationStr(exec.started_at, exec.finished_at)}
+                · 耗时 {durationStr(exec.started_at, exec.finished_at, exec.state === "RUNNING")}
               </span>
             )}
           </p>
@@ -377,6 +432,22 @@ export default function ExecutionMonitor() {
                         ×{n.attempt}
                       </Badge>
                     )}
+                    {/* 结构化路由结果(评审 APPROVED/REJECTED、人工 WAIT_USER):
+                        左侧列表是用户扫视执行路径的主视图,"代码评审 ×2"这种
+                        只报次数的展示让用户看不出第几次评审判了什么。 */}
+                    {(() => {
+                      const d = parseNodeResult(n.result_json)?.decision;
+                      return d && d !== "DONE" ? (
+                        <span
+                          className={cn(
+                            "ml-1 rounded border px-1 text-[10px]",
+                            decisionTone(d),
+                          )}
+                        >
+                          {d}
+                        </span>
+                      ) : null;
+                    })()}
                   </div>
                   <div className="text-[10px] text-muted-foreground">
                     {n.node_type}
@@ -431,8 +502,10 @@ export default function ExecutionMonitor() {
               <TabsContent value="nodes" className="mt-2">
                 <div className="max-h-[420px] space-y-2 overflow-auto">
                   {nodes.map((n) => {
+                    const result = parseNodeResult(n.result_json);
                     const body = n.output || n.error || "";
                     const note = maskNote(body);
+                    const hasData = result?.data !== undefined;
                     return (
                       <details key={n.id} className="rounded-md border">
                         <summary className="cursor-pointer px-3 py-1.5 text-sm">
@@ -440,11 +513,44 @@ export default function ExecutionMonitor() {
                           <span className="ml-2 text-xs text-muted-foreground">
                             {n.state}
                           </span>
+                          {/* Decision 是结构化路由依据(评审 APPROVED/REJECTED、
+                              人工 WAIT_USER):一眼看到路由结果,不用展开找。
+                              "DONE" 不显示 —— 它只表示"正常完成",没有信息量。 */}
+                          {result?.decision && result.decision !== "DONE" && (
+                            <span
+                              className={cn(
+                                "ml-2 rounded border px-1 text-[10px]",
+                                decisionTone(result.decision),
+                              )}
+                            >
+                              {result.decision}
+                            </span>
+                          )}
                         </summary>
-                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap bg-muted/40 p-2 text-[11px]">
-                          {body || "(无输出)"}
+                        <div className="space-y-1.5 bg-muted/40 p-2 text-[11px]">
+                          {result?.summary && (
+                            <div className="whitespace-pre-wrap">{result.summary}</div>
+                          )}
+                          {n.output && (
+                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap">
+                              {n.output}
+                            </pre>
+                          )}
+                          {n.error && (
+                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-red-400">
+                              {n.error}
+                            </pre>
+                          )}
+                          {hasData && (
+                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-muted-foreground">
+                              {JSON.stringify(result?.data, null, 2)}
+                            </pre>
+                          )}
+                          {!result?.summary && !body && !hasData && (
+                            <span className="text-muted-foreground">(无输出)</span>
+                          )}
                           {note && <span className="text-muted-foreground">{note}</span>}
-                        </pre>
+                        </div>
                       </details>
                     );
                   })}

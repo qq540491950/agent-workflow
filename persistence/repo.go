@@ -950,6 +950,19 @@ func (d *DB) CasExecutionState(id string, fromStates []model.ExecutionState, toS
 	return n > 0, nil
 }
 
+// MarkExecutionFinished 落执行结束时间(只写 finished_at 一列)。
+//
+// 供取消路径使用:取消的状态迁移走只改状态列的 CAS(状态裁决的唯一入口),
+// 结束时间由裁决赢家随后单独补写 —— CAS 成功后行归本次裁决所有,
+// 别的写者不会再碰这条行,直接写不引入覆盖。
+func (d *DB) MarkExecutionFinished(id, finishedAt string) error {
+	_, err := d.sql.Exec(`UPDATE executions SET finished_at=? WHERE id=?`, finishedAt, id)
+	if err != nil {
+		return wrap(err)
+	}
+	return nil
+}
+
 // DeleteExecution 级联删除执行及其节点/事件/制品。
 func (d *DB) DeleteExecution(id string) error {
 	tx, err := d.sql.Begin()

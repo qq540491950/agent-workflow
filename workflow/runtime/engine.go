@@ -561,6 +561,12 @@ func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 			fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, cur))
 	}
 	e.Bus.Emit(event.New(event.WorkflowCancelled, executionID, "", nil))
+	// 取消也是终态,结束时间必须落库(与 transitionAndSave 的盖章语义一致)。
+	// 状态 CAS 已成功,行归本次取消裁决所有;时间单独补写一条 —— 状态
+	// 裁决口是只改状态列的 CAS,不带 meta 列。
+	if err := e.Repo.MarkExecutionFinished(executionID, time.Now().Format(time.RFC3339Nano)); err != nil {
+		logx.Warn("取消后补写结束时间失败(状态已正确落库)", "execution", executionID, "error", err.Error())
+	}
 	// 节点收尾:这条路径没有协程会再来跑(等待人工的执行被取消后,
 	// 人工节点之后的那条路不会再走),非终态节点必须自己落成 SKIPPED
 	// —— 否则执行状态是"已取消",节点表里却还挂着"等待中/未开始"。
@@ -715,6 +721,10 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	delete(exec.StateData, compiler.KeyAbort)
 	delete(exec.StateData, "_error")
 	exec.Error = ""
+	// 重试是一次**新的运行**(与上面台账清零同一语义):清掉上一轮的
+	// 结束时间,否则行内是 RUNNING 却带着旧 finished_at,耗时/结束时间
+	// 展示的是"上一轮失败前"的旧账。新一轮终态时会盖上新的时间。
+	exec.FinishedAt = ""
 
 	e.save(exec)
 	e.Bus.Emit(event.New(event.WorkflowResumed, exec.ID, nodeID, map[string]any{
@@ -1175,11 +1185,24 @@ func (e *Engine) transitionAndSave(exec *model.Execution, to model.ExecutionStat
 		return model.NewError(model.KindStateError, "INVALID_TRANSITION",
 			fmt.Sprintf("非法状态转换 %s → %s", exec.State, to))
 	}
+	// 终态必须带上结束时间:此前执行级 FinishedAt 从未被赋值(只有节点级
+	// 有),已完成的执行 finished_at 恒为空 —— 前端耗时只能拿"当前时间-
+	// 开始时间"补,时钟永远在走;结束时间列一直是空。
+	// 在 CAS **之前**盖时间戳:casStateAndSave 把状态与元信息合成一条
+	// UPDATE,"COMPLETED"与"结束时间"同时可见。CAS 失败/被抢先则还原
+	// —— 那一行的归属是别的写者(它终态时会盖自己的时钟),本协程的
+	// 时间不得借 save(exec)(失败原因补写路径)留在别人的行上。
+	prevFinished := exec.FinishedAt
+	if isTerminalExecutionState(to) {
+		exec.FinishedAt = time.Now().Format(time.RFC3339Nano)
+	}
 	ok, err := e.casStateAndSave(exec, []model.ExecutionState{exec.State}, to)
 	if err != nil {
+		exec.FinishedAt = prevFinished
 		return err
 	}
 	if !ok {
+		exec.FinishedAt = prevFinished
 		cur := e.currentState(exec.ID)
 		logx.Warn("状态迁移被并发写者抢先,已放弃本次写入",
 			"execution", exec.ID, "from", exec.State, "to", to, "current", cur)
@@ -1188,6 +1211,15 @@ func (e *Engine) transitionAndSave(exec *model.Execution, to model.ExecutionStat
 	}
 	exec.State = to
 	return nil
+}
+
+// isTerminalExecutionState 报告执行状态是否为终态(COMPLETED/FAILED/CANCELLED)。
+// 终态判定只有这一份来源(约定 13):transitionAndSave 盖结束时间、
+// 前端耗时停表语义都与它对齐。
+func isTerminalExecutionState(s model.ExecutionState) bool {
+	return s == model.ExecutionCompleted ||
+		s == model.ExecutionFailed ||
+		s == model.ExecutionCancelled
 }
 
 // save 落库执行记录(只写非状态列;状态由 CAS 单独落定)。
