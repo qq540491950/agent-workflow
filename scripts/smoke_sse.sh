@@ -160,4 +160,40 @@ KA_CURL=""
 [ "$KA_OK" = "1" ] || fail "17s 内未见 keepalive"
 echo "OK: keepalive 注释行送达"
 
-echo "✅ SSE E2E PASS(4 项全部通过)"
+# ---- 第 5 项:断开的订阅必须真正释放(端到端)---------------------------
+# 此前"断开后订阅释放"只有单测覆盖(sse_test.go 的
+# TestSSEDisconnectReleasesSubscription):单测用 cancel context 模拟断开,
+# 真实进程 + 真实 TCP 断开( kill curl)这条路没有可观测点。现在
+# GET /api/sse/stats 暴露只读订阅计数,这里做端到端断言。
+#
+# 断开 → 释放不是瞬时的(r.Context().Done() 触发 + handler 返回),
+# 轮询 5s;归不了零 = 连接泄漏(每次断开残留一个 handler,事件扇出
+# 列表无限增长)。
+STATS=$(curl -sf "$BASE/api/sse/stats" 2>/dev/null) || fail "GET /api/sse/stats 不可用"
+echo "$STATS" | grep -q '"subscribers"' || fail "stats 响应形状不对: $STATS"
+ZERO=0
+for _ in $(seq 1 20); do
+	STATS=$(curl -sf "$BASE/api/sse/stats" 2>/dev/null || echo '{}')
+	if echo "$STATS" | grep -q '"subscribers":0'; then
+		ZERO=1
+		break
+	fi
+	kill -0 "$SERVER_PID" 2>/dev/null || fail "server 进程在等待期间退出"
+	sleep 0.25
+done
+[ "$ZERO" = "1" ] || fail "全部订阅断开后计数未归零(连接泄漏): $STATS"
+echo "OK: 断开后订阅计数归零(GET /api/sse/stats)"
+
+# ---- 第 6 项:订阅建立后计数 ≥1(端点不是恒 0 的摆设)-------------------
+# 反向对照:上一条断言"归零"时,端点若坏了恒返 0 也会"通过"。
+# 这里真连一条,计数必须看到 ≥1。
+curl -sN --max-time 3 "$BASE/api/events" >/dev/null 2>&1 &
+SC_PID=$!
+sleep 1
+STATS=$(curl -sf "$BASE/api/sse/stats" 2>/dev/null || echo '{}')
+kill "$SC_PID" 2>/dev/null || true
+wait "$SC_PID" 2>/dev/null || true
+echo "$STATS" | grep -Eq '"subscribers":[1-9]' || fail "订阅建立后计数仍为 0(端点没有真的在看订阅): $STATS"
+echo "OK: 订阅建立后计数 ≥1($STATS)"
+
+echo "✅ SSE E2E PASS(6 项全部通过)"

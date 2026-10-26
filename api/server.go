@@ -431,6 +431,13 @@ func (s *Server) routes() {
 
 	// SSE 实时事件
 	s.mux.HandleFunc("GET /api/events", s.handleSSE)
+	// SSE 订阅计数(只读,无敏感信息):SSE 断连后订阅是否释放此前只有
+	// 单测覆盖(sse_test.go),端到端层面(真实进程 + 真实 TCP 断开)没有
+	// 可观测点 —— 冒烟脚本靠它断言"断开后归零"(开放清单第 5 条)。
+	// 对运维也有用:排查"连接泄漏 / 订阅常驻"时一眼看到当前连接数。
+	s.mux.HandleFunc("GET /api/sse/stats", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		return writeJSON(w, map[string]int{"subscribers": s.app.EventSubscriberCount()}, nil)
+	}))
 }
 
 // wrap 统一错误处理与日志。

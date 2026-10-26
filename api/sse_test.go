@@ -400,3 +400,70 @@ func TestSSEDisconnectReleasesSubscription(t *testing.T) {
 		t.Errorf("断开后订阅未释放,残留 %d 个 handler", n)
 	}
 }
+
+// TestSSEStatsEndpointReflectsSubscriptions:GET /api/sse/stats 是订阅计数的
+// **HTTP 可观测点** —— 冒烟脚本(smoke_sse.sh)靠它在真实进程 + 真实 TCP
+// 断开下断言"断开后归零";本用例锁住端点语义(计数随订阅建立/释放变化)。
+func TestSSEStatsEndpointReflectsSubscriptions(t *testing.T) {
+	a, err := app.NewApp(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Repo.Close() })
+	s := NewServer(a)
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	stats := func() int {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/api/sse/stats")
+		if err != nil {
+			t.Fatalf("GET /api/sse/stats: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("stats → %d,期望 200", resp.StatusCode)
+		}
+		var body struct {
+			Subscribers int `json:"subscribers"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("解析 stats 响应: %v", err)
+		}
+		return body.Subscribers
+	}
+
+	if n := stats(); n != 0 {
+		t.Fatalf("初始订阅数应为 0,实际 %d", n)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("SSE 连接: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	deadline := time.Now().Add(3 * time.Second)
+	for stats() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := stats(); n != 1 {
+		t.Fatalf("订阅建立后 stats 应为 1,实际 %d", n)
+	}
+
+	cancel()
+	_ = resp.Body.Close()
+
+	deadline = time.Now().Add(5 * time.Second)
+	for stats() != 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := stats(); n != 0 {
+		t.Errorf("断开后 stats 应归零(订阅释放),实际 %d", n)
+	}
+}
