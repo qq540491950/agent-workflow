@@ -121,6 +121,7 @@ export default function Executions() {
                     size="icon"
                     variant="ghost"
                     title="删除记录"
+                    aria-label="删除这条执行记录"
                     className="text-muted-foreground hover:text-red-500"
                     onClick={async (ev) => {
                       ev.stopPropagation();

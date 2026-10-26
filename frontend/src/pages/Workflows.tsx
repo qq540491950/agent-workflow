@@ -265,6 +265,7 @@ export default function Workflows() {
                       size="icon"
                       variant="ghost"
                       title="运行"
+                      aria-label={`运行:${w.name}`}
                       onClick={() => openRun(w)}
                     >
                       <Play className="h-4 w-4" />
@@ -273,13 +274,16 @@ export default function Workflows() {
                       size="icon"
                       variant="ghost"
                       title="编辑"
+                      aria-label={`编辑:${w.name}`}
                       onClick={() => nav(`/workflows/${w.id}/design`)}
                     >
                       <Pencil className="h-4 w-4" />
                     </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button size="icon" variant="ghost">
+                        {/* 图标按钮没有可读文本:读屏器只会念"按钮"。
+                            带上工作流名,键盘/读屏用户能分清是哪一行的菜单。 */}
+                        <Button size="icon" variant="ghost" aria-label={`更多操作:${w.name}`}>
                           <MoreHorizontal className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>

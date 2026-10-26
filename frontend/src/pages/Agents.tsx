@@ -344,6 +344,7 @@ export default function Agents() {
                       size="icon"
                       variant="ghost"
                       className="text-red-500"
+                      aria-label={`删除环境变量 ${k}`}
                       onClick={() => {
                         const env = { ...(cfg.env ?? {}) };
                         delete env[k];
