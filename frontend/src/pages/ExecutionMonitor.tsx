@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CheckCircle2, XCircle, Circle, PauseCircle, Ban } from "lucide-react";
@@ -101,6 +101,56 @@ const nodeIcon: Record<string, React.ReactNode> = {
 };
 
 // 节点 output/error 落库前已脱敏(约定 8):形如 key=value 且 key 含
+/**
+ * 实时日志:新事件到达时自动滚到底部(跟随模式)。
+ *
+ * 此前是纯静态容器:执行进行中日志一直往下长,最新的事件永远在可视区外,
+ * 用户要不停手动滚动。跟随规则 —— 用户本来就在底部(或从未滚动)→
+ * 跟随到底;用户向上翻历史时不拽人,滚回底部即恢复跟随。
+ */
+function EventLog({ events }: { events: UIEvent[] }) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const stickRef = useRef(true);
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box || !stickRef.current) return;
+    box.scrollTop = box.scrollHeight;
+  }, [events.length]);
+  return (
+    <div
+      ref={boxRef}
+      onScroll={() => {
+        const box = boxRef.current;
+        if (!box) return;
+        stickRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+      }}
+      className="max-h-[420px] space-y-0.5 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[11px]"
+    >
+      {events.map((e, i) => (
+        <div key={i} className="flex gap-2">
+          <span className="text-muted-foreground">
+            {(e.timestamp ?? "").slice(11, 19)}
+          </span>
+          <span
+            className={cn(
+              e.type.includes("failed") && "text-red-400",
+              e.type.includes("approved") && "text-green-400",
+              e.type.includes("rejected") && "text-amber-400",
+              e.type.includes("input_required") && "text-amber-300",
+            )}
+          >
+            {e.type}
+          </span>
+          {e.node_id && <span className="text-muted-foreground">{e.node_id}</span>}
+        </div>
+      ))}
+      {events.length === 0 && (
+        <div className="py-6 text-center text-muted-foreground">暂无日志</div>
+      )}
+    </div>
+  );
+}
+
 // key/token/password/secret/authorization/credential 的值被替换为 ***。
 // 直接把 *** 摆出来,用户会以为节点只输出了三个星号;这里补一句说明,
 // 免得把"已脱敏"误读成"出错/输出为空"。
@@ -484,29 +534,7 @@ export default function ExecutionMonitor() {
                 <TabsTrigger value="state">State</TabsTrigger>
               </TabsList>
               <TabsContent value="events" className="mt-2">
-                <div className="max-h-[420px] space-y-0.5 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[11px]">
-                  {events.map((e, i) => (
-                    <div key={i} className="flex gap-2">
-                      <span className="text-muted-foreground">
-                        {(e.timestamp ?? "").slice(11, 19)}
-                      </span>
-                      <span
-                        className={cn(
-                          e.type.includes("failed") && "text-red-400",
-                          e.type.includes("approved") && "text-green-400",
-                          e.type.includes("rejected") && "text-amber-400",
-                          e.type.includes("input_required") && "text-amber-300",
-                        )}
-                      >
-                        {e.type}
-                      </span>
-                      {e.node_id && <span className="text-muted-foreground">{e.node_id}</span>}
-                    </div>
-                  ))}
-                  {events.length === 0 && (
-                    <div className="py-6 text-center text-muted-foreground">暂无日志</div>
-                  )}
-                </div>
+                <EventLog events={events} />
               </TabsContent>
               <TabsContent value="nodes" className="mt-2">
                 <div className="max-h-[420px] space-y-2 overflow-auto">

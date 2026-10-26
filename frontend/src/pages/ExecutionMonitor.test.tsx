@@ -419,3 +419,76 @@ describe("ExecutionMonitor 审批面板与执行状态一致", () => {
     expect(screen.getByText(/Workflow requires your input/)).toBeTruthy();
   });
 });
+
+// ---- 迭代 35:实时日志跟随滚动 -------------------------------------------
+//
+// 此前日志容器是纯静态的:执行进行中事件一直往下长,最新事件永远在
+// 可视区外,要不停手动滚动。跟随规则:用户在底部 → 跟随;上翻历史
+// → 不拽人;滚回底部 → 恢复跟随。
+describe("ExecutionMonitor 实时日志跟随滚动", () => {
+  // jsdom 没有布局:用 defineProperty 造 scrollHeight/clientHeight,
+  // scrollTop 可正常赋值,用来观察"是否自动滚底"。
+  function fakeScrollBox(box: HTMLElement) {
+    let h = 1000;
+    Object.defineProperty(box, "scrollHeight", { configurable: true, get: () => h });
+    Object.defineProperty(box, "clientHeight", { configurable: true, get: () => 200 });
+    Object.defineProperty(box, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    return () => { h += 400; }; // 新事件到达时让内容变长
+  }
+
+  function box() {
+    return document.querySelector('[role="tabpanel"] > div') as HTMLElement;
+  }
+
+  it("新事件到达时自动滚到底部(跟随模式)", async () => {
+    m.executionEvents.mockResolvedValue([makeEvent("workflow.started", "ex-1")]);
+    renderMonitor();
+    await settle();
+    const grow = fakeScrollBox(box());
+    expect(box().scrollTop).toBe(0);
+    // 新事件 → 内容变长 → 应自动滚到 scrollHeight(1400)
+    m.executionEvents.mockResolvedValue([
+      makeEvent("workflow.started", "ex-1"),
+      makeEvent("node.started", "ex-1"),
+    ]);
+    emit(m.handlers, makeEvent("node.started", "ex-1"));
+    grow();
+    await advance(250);
+    expect(box().scrollTop).toBe(1400);
+  });
+
+  it("用户向上翻历史时不拽人;滚回底部恢复跟随", async () => {
+    m.executionEvents.mockResolvedValue([makeEvent("workflow.started", "ex-1")]);
+    renderMonitor();
+    await settle();
+    const grow = fakeScrollBox(box());
+    // 用户上翻:scrollTop=10(距底 990 > 48)→ stick=false
+    box().scrollTop = 10;
+    fireEvent.scroll(box());
+    m.executionEvents.mockResolvedValue([
+      makeEvent("workflow.started", "ex-1"),
+      makeEvent("node.started", "ex-1"),
+    ]);
+    emit(m.handlers, makeEvent("node.started", "ex-1"));
+    grow();
+    await advance(250);
+    expect(box().scrollTop).toBe(10); // 没有被拽到底部
+
+    // 滚回底部 → 恢复跟随
+    box().scrollTop = 1400;
+    fireEvent.scroll(box());
+    m.executionEvents.mockResolvedValue([
+      makeEvent("workflow.started", "ex-1"),
+      makeEvent("node.started", "ex-1"),
+      makeEvent("node.completed", "ex-1"),
+    ]);
+    emit(m.handlers, makeEvent("node.completed", "ex-1"));
+    grow();
+    await advance(250);
+    expect(box().scrollTop).toBe(1800); // 又跟到底了
+  });
+});
