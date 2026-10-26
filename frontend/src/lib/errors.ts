@@ -53,6 +53,36 @@ const NETWORK_HINTS: Array<[RegExp, string]> = [
   [/timeout.*exceeded/i, "请求超时"],
 ];
 
+
+/** 单条校验错误的结构(后端 validator.ValidationError 的 JSON 形态)。 */
+interface ValidationErrLike {
+  code?: unknown;
+  message?: unknown;
+  node?: unknown;
+}
+
+/**
+ * 把 WORKFLOW_INVALID 的 message(校验错误数组的 JSON 文本)拍平成一句人话。
+ * 不是合法的"错误对象数组"形态时返回 null(调用方按原文显示)。
+ */
+export function flattenValidationErrors(raw: string): string | null {
+  if (!raw.startsWith("[")) return null;
+  let arr: unknown;
+  try {
+    arr = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const parts: string[] = [];
+  for (const item of arr) {
+    const o = (item && typeof item === "object" ? item : {}) as ValidationErrLike;
+    if (typeof o.message !== "string" || !o.message.trim()) return null;
+    parts.push(typeof o.node === "string" && o.node ? `[${o.node}] ${o.message}` : o.message);
+  }
+  return parts.join("; ");
+}
+
 /**
  * 把任意错误对象转成一句可读的中文。
  *
@@ -68,6 +98,16 @@ export function describeError(e: unknown): string {
   const raw = obj && typeof obj.message === "string" ? obj.message.trim() : "";
   const code = obj && typeof obj.code === "string" && obj.code ? obj.code : "";
   const status = obj && typeof obj.status === "number" && obj.status ? obj.status : 0;
+
+  // WORKFLOW_INVALID 的 message 是校验错误数组的 JSON 文本(应用层把
+  // validator.Result.Errors 整个 marshal 进 message)。直接显示就是一坨
+  // 机器可读的 JSON(走查实测:"导入工作流:[{\"code\":\"MISSING_NAME\"..." ),
+  // 每条错误的 message 本身已是人话 —— 这里拍平成一句,失败节点带上
+  // 节点定位;解析不动(形态不合预期)就按原文走通用路径,不硬造。
+  if (code === "WORKFLOW_INVALID") {
+    const flat = flattenValidationErrors(raw);
+    if (flat) return `${flat}(WORKFLOW_INVALID)`;
+  }
 
   let base = raw;
   if (!base) {

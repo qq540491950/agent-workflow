@@ -114,3 +114,47 @@ describe("reportError", () => {
     expect(toast.error).toHaveBeenCalledTimes(2);
   });
 });
+
+// ---- 迭代 35:WORKFLOW_INVALID 的 JSON 数组 message 必须拍平成人话 -------
+//
+// 应用层把 validator.Result.Errors 整个 marshal 进错误 message;直接显示
+// 是一坨机器可读 JSON(走查实测:导入缺 name 的 YAML,toast 弹出
+// "导入工作流:[{"code":"MISSING_NAME",...}](WORKFLOW_INVALID)")。
+describe("flattenValidationErrors / describeError:WORKFLOW_INVALID", () => {
+  it("错误数组拍平为分号连接的人话,失败节点带定位", () => {
+    const err = {
+      code: "WORKFLOW_INVALID",
+      message: JSON.stringify([
+        { code: "MISSING_NAME", node: "", message: "workflow.name 不能为空" },
+        { code: "EMPTY_WORKFLOW", node: "", message: "Workflow 至少需要一个节点" },
+      ]),
+    };
+    expect(describeError(err)).toBe(
+      "workflow.name 不能为空; Workflow 至少需要一个节点(WORKFLOW_INVALID)",
+    );
+  });
+
+  it("带 node 的错误给出节点定位", () => {
+    const err = {
+      code: "WORKFLOW_INVALID",
+      message: JSON.stringify([{ code: "X", node: "review", message: "表达式非法" }]),
+    };
+    expect(describeError(err)).toBe("[review] 表达式非法(WORKFLOW_INVALID)");
+  });
+
+  it("message 不是 JSON 数组时按原文走通用路径(不硬造)", () => {
+    const err = { code: "WORKFLOW_INVALID", message: "普通文本" };
+    expect(describeError(err)).toBe("普通文本(WORKFLOW_INVALID)");
+  });
+
+  it("数组里混进非对象元素 → 返回原文(拍平失败不吞错误内容)", () => {
+    const raw = JSON.stringify([{ message: "ok" }, 42]);
+    const err = { code: "WORKFLOW_INVALID", message: raw };
+    expect(describeError(err)).toBe(`${raw}(WORKFLOW_INVALID)`);
+  });
+
+  it("空数组视为拍平失败(显示原文而不是空白 toast)", () => {
+    const err = { code: "WORKFLOW_INVALID", message: "[]" };
+    expect(describeError(err)).toBe("[](WORKFLOW_INVALID)");
+  });
+});
