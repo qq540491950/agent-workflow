@@ -47,7 +47,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/api/workflows/{id}/run` | 启动执行 `{task, variables}`(异步) |
-| GET | `/api/executions?workflow_id=&limit=` | 执行列表(最新在前)。`limit` **上限 1000**,超出的数字按 1000 收敛(不再因整数溢出变成"不限制"而返回全表) |
+| GET | `/api/executions?workflow_id=&limit=` | 执行列表(最新在前)。`limit` **上限 1000**,超出的数字按 1000 收敛并打 `X-Limit-Truncated` / `X-Limit-Applied` 响应头(不再因整数溢出变成"不限制"而返回全表) |
 | GET | `/api/executions/{id}` | 执行详情(含 state_data 快照) |
 | GET | `/api/executions/{id}/nodes` | 节点执行明细(attempt/duration/output)。**output / error / result_json 已在读出口脱敏**(这些字段直接来自 Agent 的 stdout/stderr,常含凭据) |
 | GET | `/api/executions/{id}/events` | 事件流 |
@@ -213,7 +213,15 @@ net/http 的主动中止信号,按官方要求放行)。
 `limit` 查询参数上限 **1000**:此前用 `int` 累加解析,超长数字会整数溢出成
 负数,而仓储层把 `limit<=0` 解释为"不限制" —— 一个
 `?limit=99999999999999999999` 的请求会变成"返回全表"(内存与响应体都不可控)。
-现在超出的数字按 1000 收敛(注意:是**静默截断**,响应里没有"已截断"标记)。
+现在超出的数字按 1000 收敛;**发生收敛时**响应带两个头,
+消费方据此区分"就这么多"与"被截断了"(不发生时两个头都不存在):
+
+- `X-Limit-Truncated: true` —— 显式 `limit` 超过上限被收敛;
+- `X-Limit-Applied: 1000` —— 实际生效的条数上限。
+
+标记走响应头而非响应体字段:列表端点的响应体是裸数组,塞字段等于
+改所有列表接口的响应形状;头是可选读取的附加语义,不读不受影响。
+三个限列表端点(`/api/executions`、`/api/events/all`、`/api/git/log`)同口径。
 
 文本类端点(`/export`、`/versions/{n}`)失败时同样返回上述 JSON 错误体,
 客户端应按状态码判断而非直接使用响应内容。

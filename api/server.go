@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -171,8 +172,9 @@ func (s *Server) routes() {
 	// 执行
 	s.mux.HandleFunc("GET /api/executions", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		wfID := r.URL.Query().Get("workflow_id")
-		limit := queryInt(r, "limit", 0)
+		limit, truncated := queryLimit(r, "limit", 0)
 		execs, err := s.app.Executions.List(wfID, limit)
+		markLimitTruncated(w, truncated, limit)
 		return writeJSON(w, execs, err)
 	}))
 	s.mux.HandleFunc("GET /api/executions/{id}", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
@@ -245,7 +247,9 @@ func (s *Server) routes() {
 		return writeJSON(w, result, err)
 	}))
 	s.mux.HandleFunc("GET /api/events/all", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		evs, err := s.app.Executions.AllEvents(r.URL.Query().Get("type"), queryInt(r, "limit", 200))
+		limit, truncated := queryLimit(r, "limit", 200)
+		evs, err := s.app.Executions.AllEvents(r.URL.Query().Get("type"), limit)
+		markLimitTruncated(w, truncated, limit)
 		return writeJSON(w, evs, err)
 	}))
 	s.mux.HandleFunc("DELETE /api/executions/{id}", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
@@ -387,7 +391,9 @@ func (s *Server) routes() {
 		return writeJSON(w, map[string]any{"output": out}, err)
 	}))
 	s.mux.HandleFunc("GET /api/git/log", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		logs, err := s.app.GitAPI.Log(r.Context(), queryInt(r, "limit", 10))
+		limit, truncated := queryLimit(r, "limit", 10)
+		logs, err := s.app.GitAPI.Log(r.Context(), limit)
+		markLimitTruncated(w, truncated, limit)
 		return writeJSON(w, logs, err)
 	}))
 
@@ -873,22 +879,35 @@ func badRequest(msg string) error {
 // "返回全表"(内存与响应体都不可控)。
 const maxQueryLimit = 1000
 
-func queryInt(r *http.Request, key string, def int) int {
+func queryLimit(r *http.Request, key string, def int) (applied int, truncated bool) {
 	v := r.URL.Query().Get(key)
 	if v == "" {
-		return def
+		return def, false
 	}
 	n := 0
 	for _, c := range v {
 		if c < '0' || c > '9' {
-			return def
+			return def, false
 		}
 		n = n*10 + int(c-'0')
 		if n > maxQueryLimit {
-			return maxQueryLimit // 收敛到上限,杜绝溢出成负数
+			return maxQueryLimit, true // 收敛到上限,杜绝溢出成负数
 		}
 	}
-	return n
+	return n, false
+}
+
+// markLimitTruncated 在显式 limit 被上限收敛时打响应头。
+// 此前截断是静默的:消费方拿到 1000 条会把"就返回了 1000 条"误读成
+// "总共只有 1000 条"。标记走响应头而不是响应体字段 —— 列表端点的
+// 响应体是裸数组,塞字段等于改所有列表接口的响应形状(前端契约要同步,
+// 属跨层改动);头是消费方可选读取的附加语义,不读不受影响。
+func markLimitTruncated(w http.ResponseWriter, truncated bool, applied int) {
+	if !truncated {
+		return
+	}
+	w.Header().Set("X-Limit-Truncated", "true")
+	w.Header().Set("X-Limit-Applied", strconv.Itoa(applied))
 }
 
 // parseVersion 解析版本号路径参数:只接受十进制数字,且必须落在合理

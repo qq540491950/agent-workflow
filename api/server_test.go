@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1590,27 +1591,74 @@ func TestSettingsRejectsInvalidLogLevel(t *testing.T) {
 	}
 }
 
-// TestQueryIntOverflowIsClamped:查询参数里的 limit 此前用 int 累加解析,
+// TestQueryLimitOverflowIsClamped:查询参数里的 limit 此前用 int 累加解析,
 // 超长数字会整数溢出成负数,而仓储层把 limit<=0 解释为"不限制" ——
 // 一个 limit=99999999999999999999 的请求变成"返回全表"。
-func TestQueryIntOverflowIsClamped(t *testing.T) {
+// 截断必须同时带标志:静默截断会让消费方把"返回了 1000 条"误读成
+// "总共只有 1000 条"(开放清单第 4 条)。
+func TestQueryLimitOverflowIsClamped(t *testing.T) {
 	mk := func(q string) *http.Request {
 		return httptest.NewRequest(http.MethodGet, "/"+q, nil)
 	}
-	if got := queryInt(mk("?limit=25"), "limit", 7); got != 25 {
-		t.Errorf("limit=25 → %d,期望 25", got)
+	if got, tr := queryLimit(mk("?limit=25"), "limit", 7); got != 25 || tr {
+		t.Errorf("limit=25 → (%d,%v),期望 (25,false)", got, tr)
 	}
-	if got := queryInt(mk("?limit="), "limit", 7); got != 7 {
-		t.Errorf("空 limit → %d,期望默认值 7", got)
+	if got, tr := queryLimit(mk("?limit="), "limit", 7); got != 7 || tr {
+		t.Errorf("空 limit → (%d,%v),期望默认值 (7,false)", got, tr)
 	}
-	if got := queryInt(mk("?limit=abc"), "limit", 7); got != 7 {
-		t.Errorf("非数字 limit → %d,期望默认值 7", got)
+	if got, tr := queryLimit(mk("?limit=abc"), "limit", 7); got != 7 || tr {
+		t.Errorf("非数字 limit → (%d,%v),期望默认值 (7,false)", got, tr)
 	}
-	if got := queryInt(mk("?limit=99999999999999999999"), "limit", 7); got != maxQueryLimit {
-		t.Errorf("溢出 limit → %d,期望收敛到 %d(不得为负数或全表)", got, maxQueryLimit)
+	if got, tr := queryLimit(mk("?limit=99999999999999999999"), "limit", 7); got != maxQueryLimit || !tr {
+		t.Errorf("溢出 limit → (%d,%v),期望 (%d,true)(不得为负数或全表)", got, tr, maxQueryLimit)
 	}
-	if got := queryInt(mk("?limit=999999"), "limit", 7); got != maxQueryLimit {
-		t.Errorf("超上限 limit → %d,期望收敛到 %d", got, maxQueryLimit)
+	if got, tr := queryLimit(mk("?limit=999999"), "limit", 7); got != maxQueryLimit || !tr {
+		t.Errorf("超上限 limit → (%d,%v),期望 (%d,true)", got, tr, maxQueryLimit)
+	}
+	if got, tr := queryLimit(mk("?limit=1000"), "limit", 7); got != maxQueryLimit || tr {
+		t.Errorf("恰等于上限 → (%d,%v),期望 (%d,false) —— 等于上限不是截断", got, tr, maxQueryLimit)
+	}
+}
+
+// TestLimitTruncatedHeader:截断标记必须真正出现在响应头里,
+// 且未截断的请求不得带这两个头(消费方按"存在即截断"判定)。
+func TestLimitTruncatedHeader(t *testing.T) {
+	s := newTestServer(t)
+	do := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		return w
+	}
+
+	w := do("/api/executions?limit=999999")
+	if w.Code != http.StatusOK {
+		t.Fatalf("截断请求 → %d,期望 200(%s)", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("X-Limit-Truncated"); got != "true" {
+		t.Errorf("截断请求缺 X-Limit-Truncated: true,got %q", got)
+	}
+	if got := w.Header().Get("X-Limit-Applied"); got != strconv.Itoa(maxQueryLimit) {
+		t.Errorf("截断请求缺 X-Limit-Applied: %d,got %q", maxQueryLimit, got)
+	}
+
+	w = do("/api/executions?limit=50")
+	if w.Code != http.StatusOK {
+		t.Fatalf("常规请求 → %d,期望 200(%s)", w.Code, w.Body.String())
+	}
+	if w.Header().Get("X-Limit-Truncated") != "" || w.Header().Get("X-Limit-Applied") != "" {
+		t.Errorf("未截断的请求不应带截断头, got %v", w.Header())
+	}
+
+	// 三个列表端点同口径:events/all 与 git/log 也要打标。
+	for _, path := range []string{"/api/events/all?limit=424242", "/api/git/log?limit=424242"} {
+		w = do(path)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s → %d,期望 200(%s)", path, w.Code, w.Body.String())
+		}
+		if w.Header().Get("X-Limit-Truncated") != "true" {
+			t.Errorf("%s 缺截断标记,消费方会误读条数(got %v)", path, w.Header())
+		}
 	}
 }
 
