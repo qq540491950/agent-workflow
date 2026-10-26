@@ -1081,6 +1081,16 @@ export function NodePropertyPanel({
           <Input className="font-mono text-xs" value={String(cfg.workflow_id ?? "")} onChange={(e) => setCfg("workflow_id", e.target.value)} />
         </Row>
       )}
+      {(type === "parallel" || type === "merge") && (
+        // parallel / merge 没有任何专属配置键,面板只剩"名称/启用"两行 ——
+        // 空得像没加载完。一句话说清"控制结构在哪",省得用户在面板里
+        // 找不存在的配置项。
+        <p className="rounded-md border bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+          {type === "parallel"
+            ? "并行节点没有额外配置:从本节点引出的多条连线即并行分支,全部完成后由汇合(Merge)节点收拢。"
+            : "汇合节点没有额外配置:所有并行分支到达后才会继续往下走。"}
+        </p>
+      )}
     </div>
   );
 }
