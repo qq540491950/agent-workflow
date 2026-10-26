@@ -160,7 +160,9 @@ export default function Dashboard() {
                   // 不是"没做成",把它算进分母等于用户点一次取消就掉一截
                   // 成功率(后端已把 failed 与 cancelled 分列)。
                   const settled = st.total - (st.cancelled ?? 0);
-                  const rate = settled > 0 ? Math.round((st.completed / settled) * 100) : 0;
+                  // 没有任何"落定"的执行(一次都没跑,或只被取消过)时没有
+                  // 成功率可言 —— 显示 0% 等于说"全失败",误导用户。
+                  const rate = settled > 0 ? Math.round((st.completed / settled) * 100) : null;
                   return (
                     <TableRow key={st.workflow_id}>
                       <TableCell className="text-sm font-medium">
@@ -178,12 +180,16 @@ export default function Dashboard() {
                       <TableCell>
                         <div className="flex items-center gap-2">
                           <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
-                            <div
-                              className={cn("h-full", rate >= 80 ? "bg-green-500" : rate >= 50 ? "bg-amber-500" : "bg-red-500")}
-                              style={{ width: `${rate}%` }}
-                            />
+                            {rate !== null && (
+                              <div
+                                className={cn("h-full", rate >= 80 ? "bg-green-500" : rate >= 50 ? "bg-amber-500" : "bg-red-500")}
+                                style={{ width: `${rate}%` }}
+                              />
+                            )}
                           </div>
-                          <span className="text-xs text-muted-foreground">{rate}%</span>
+                          <span className="text-xs text-muted-foreground">
+                            {rate === null ? "—" : `${rate}%`}
+                          </span>
                         </div>
                       </TableCell>
                     </TableRow>

@@ -217,3 +217,31 @@ describe("Dashboard 取消与失败分列", () => {
     expect(screen.getByText("60%")).toBeTruthy();
   });
 });
+
+// 零执行时成功率不得显示 0%:0% 读作"全失败",而事实是"还没有数据"。
+describe("Dashboard 成功率无数据显示", () => {
+  it("零执行的工作流成功率显示 — 而不是 0%", async () => {
+    m.stats.mockResolvedValue([
+      { workflow_id: "wf-a", name: "A", total: 0, completed: 0, failed: 0, cancelled: 0, waiting: 0 },
+      { workflow_id: "wf-b", name: "B", total: 4, completed: 2, failed: 1, cancelled: 1, waiting: 0 },
+    ]);
+    renderDashboard();
+    await settle();
+    const rowA = screen.getByText("A").closest("tr");
+    expect(rowA?.textContent).toContain("—");
+    expect(rowA?.textContent).not.toContain("0%");
+    // 有落定执行(cancelled 不进分母:4-1=3,2/3≈67%)的行仍是百分比
+    const rowB = screen.getByText("B").closest("tr");
+    expect(rowB?.textContent).toContain("67%");
+  });
+
+  it("只有被取消的执行时同样显示 —(取消不算失败)", async () => {
+    m.stats.mockResolvedValue([
+      { workflow_id: "wf-c", name: "C", total: 2, completed: 0, failed: 0, cancelled: 2, waiting: 0 },
+    ]);
+    renderDashboard();
+    await settle();
+    const row = screen.getByText("C").closest("tr");
+    expect(row?.textContent).toContain("—");
+  });
+});
