@@ -121,7 +121,7 @@ export default function EventsAudit() {
           ))}
           <Input
             className="w-48 font-mono text-xs"
-            placeholder="自定义前缀…"
+            placeholder="自定义前缀(回车应用)…"
             value={draft}
             // 输入**不发请求**(此前每次按键都发一次,见上面的说明);
             // 回车才提交。

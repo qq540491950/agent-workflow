@@ -146,7 +146,7 @@ describe("EventsAudit 请求竞态", () => {
     renderAudit();
     await settle();
     expect(m.allEvents).toHaveBeenCalledTimes(1);
-    const input = screen.getByPlaceholderText("自定义前缀…");
+    const input = screen.getByPlaceholderText("自定义前缀(回车应用)…");
     fireEvent.change(input, { target: { value: "node." } });
     fireEvent.change(input, { target: { value: "node.x" } });
     await settle();
