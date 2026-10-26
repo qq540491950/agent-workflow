@@ -419,10 +419,18 @@ export default function Workflows() {
             <DialogTitle>新建工作流</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
+            {/* 名称框回车 = 创建:输入完名称直接回车是最自然的路径,
+                此前回车没有任何反应,必须伸手去点右下角的按钮 */}
             <Input
               placeholder="工作流名称"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  create();
+                }
+              }}
             />
             <Input
               placeholder="描述(可选)"

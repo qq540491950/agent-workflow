@@ -23,6 +23,7 @@ const m = vi.hoisted(() => ({
   exportYAML: vi.fn(),
   copyYAML: vi.fn(),
   importYAML: vi.fn(),
+  saveWorkflow: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -39,6 +40,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       exportYAML: m.exportYAML,
       copyYAML: m.copyYAML,
       importYAML: m.importYAML,
+      saveWorkflow: m.saveWorkflow,
     },
   };
 });
@@ -64,6 +66,7 @@ beforeEach(() => {
   m.exportYAML.mockReset().mockResolvedValue("workflow:\n  id: wf-1\n");
   m.copyYAML.mockReset().mockResolvedValue("workflow:\n  id: wf-1\n");
   m.importYAML.mockReset().mockResolvedValue({ ...wf, id: "wf-2", name: "导入的流程" });
+  m.saveWorkflow.mockReset().mockResolvedValue(wf);
   vi.mocked(toast.error).mockClear();
   vi.mocked(toast.success).mockClear();
   vi.mocked(toast.warning).mockClear();
@@ -246,5 +249,21 @@ describe("Workflows 过滤空态", () => {
     fireEvent.change(box, { target: { value: "" } });
     await settle();
     expect(screen.queryByText(/没有匹配/)).toBeNull();
+  });
+});
+
+// 名称框回车 = 创建(输入完直接回车是最自然的路径,此前毫无反应)。
+describe("Workflows 新建对话框回车提交", () => {
+  it("名称框按 Enter 调用创建接口", async () => {
+    renderWorkflows();
+    await settle();
+    fireEvent.click(screen.getByText("新建工作流"));
+    await settle();
+    const box = screen.getByPlaceholderText("工作流名称");
+    fireEvent.change(box, { target: { value: "回车创建的工作流" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await settle();
+    expect(m.saveWorkflow).toHaveBeenCalledTimes(1);
+    expect(m.saveWorkflow.mock.calls[0][0].name).toBe("回车创建的工作流");
   });
 });
