@@ -59,6 +59,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { useUnsavedGuard } from "@/lib/unsaved-guard";
 
 export const nodeMeta: Record<
   string,
@@ -245,6 +246,20 @@ function DesignerInner() {
   // 控件不留空(空下拉框 = 用户以为"这个节点不能设 mode")。
   const [modes, setModes] = useState<string[]>(FALLBACK_MODES);
   const [saving, setSaving] = useState(false);
+  // 未保存守卫:savedFp 是"最后一次与画布一致的模型指纹"。
+  // 加载完成 / 保存成功后通过 fpTick 触发 effect 重打指纹(直接在
+  // hydrate 后取 toModel() 会读到未刷新的旧 state);dirty = 当前画布
+  // 模型 ≠ 指纹。此前画布编辑只存在内存里,误点侧边栏 = 半小时编排
+  // 静默蒸发 —— 这不是"提示不友好",是数据丢失。
+  const [savedFp, setSavedFp] = useState<string | null>(null);
+  const [fpTick, setFpTick] = useState(0);
+  useEffect(() => {
+    if (!wf) return;
+    setSavedFp(JSON.stringify(toModel()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fpTick 是刻意的重打指纹信号
+  }, [fpTick]);
+  const dirty = wf != null && savedFp != null && JSON.stringify(toModel()) !== savedFp;
+  useUnsavedGuard(dirty, "画布上有未保存的更改,离开将丢失。确定离开?");
   const wrapRef = useRef<HTMLDivElement>(null);
   const { fitView } = useReactFlow();
 
@@ -295,6 +310,7 @@ function DesignerInner() {
     api.getWorkflow(id).then((w) => {
       setWf(w);
       hydrate(w);
+      setFpTick((t) => t + 1); // 画布就绪后打"已保存"指纹
       setTimeout(() => fitView({ padding: 0.15 }), 60);
       // 打开即静默校验一次:导入/保存时带回的警告(如 SUBWORKFLOW_NOT_FOUND
       // "运行时将失败")此前只在用户点「校验」或保存时可见 —— 带着已知问题
@@ -473,6 +489,7 @@ function DesignerInner() {
       const saved = await api.saveWorkflow(toModel());
       setWf(saved);
       hydrate(saved);
+      setFpTick((t) => t + 1); // 保存即新基线,守卫不再拦截
       toast.success(`已保存 (v${saved.version})`);
       // 校验警告必须让用户看到:此前只进后端日志,用户以为"已废弃的
       // 配置键"仍然生效(两种模式现在都带回 warnings)。

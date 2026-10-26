@@ -9,7 +9,7 @@
 // 空着 —— 空下拉框会让用户以为"这个节点不能设 mode"。
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import type { Node as RFNode } from "@xyflow/react";
 import Designer, { FALLBACK_MODES, NodePropertyPanel, resolveModeList } from "./Designer";
 
@@ -215,13 +215,19 @@ describe("Designer 页面:mode 清单来自后端", () => {
   };
 
   function renderDesigner() {
-    return render(
-      <MemoryRouter initialEntries={["/workflows/wf-1"]}>
-        <Routes>
-          <Route path="/workflows/:id" element={<Designer />} />
-        </Routes>
-      </MemoryRouter>,
+    // 生产 App 已迁移到 data router(设计器的未保存守卫依赖 useBlocker,
+    // 它只在 data router 下可用)—— 夹具用同一形态族的 createMemoryRouter,
+    // 否则 useBlocker 直接抛 invariant。
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/workflows/:id",
+          element: <Designer />,
+        },
+      ],
+      { initialEntries: ["/workflows/wf-1"] },
     );
+    return render(<RouterProvider router={router} />);
   }
 
   it("挂载时向后端拉取 mode 清单", async () => {

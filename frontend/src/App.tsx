@@ -1,4 +1,4 @@
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import { lazy, Suspense, useEffect } from "react";
 import { initNotifications } from "@/lib/notify";
 import { Toaster } from "@/components/ui/sonner";
@@ -17,50 +17,58 @@ const Designer = lazy(() => import("@/pages/Designer"));
 const WorkflowHistory = lazy(() => import("@/pages/WorkflowHistory"));
 const ExecutionMonitor = lazy(() => import("@/pages/ExecutionMonitor"));
 
+// createBrowserRouter(data router):设计器的未保存守卫(unsaved-guard)
+// 依赖 useBlocker,而 useBlocker 只在 data router 下可用 —— BrowserRouter +
+// <Routes> 会直接抛错。路由形状与原来一一对应,只是搬进了 children。
+const router = createBrowserRouter([
+  {
+    element: <Layout />,
+    children: [
+      { path: "/", element: <Dashboard /> },
+      { path: "/workflows", element: <Workflows /> },
+      {
+        path: "/workflows/:id/design",
+        element: (
+          <Suspense fallback={<PageLoading />}>
+            <Designer />
+          </Suspense>
+        ),
+      },
+      {
+        path: "/workflows/:id/history",
+        element: (
+          <Suspense fallback={<PageLoading />}>
+            <WorkflowHistory />
+          </Suspense>
+        ),
+      },
+      { path: "/executions", element: <Executions /> },
+      {
+        path: "/executions/:id",
+        element: (
+          <Suspense fallback={<PageLoading />}>
+            <ExecutionMonitor />
+          </Suspense>
+        ),
+      },
+      { path: "/agents", element: <Agents /> },
+      { path: "/skills", element: <Skills /> },
+      { path: "/git", element: <GitPanel /> },
+      { path: "/settings", element: <Settings /> },
+      { path: "/events", element: <EventsAudit /> },
+    ],
+  },
+]);
+
 export default function App() {
   useEffect(() => {
     initNotifications();
   }, []);
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/workflows" element={<Workflows />} />
-          <Route
-            path="/workflows/:id/design"
-            element={
-              <Suspense fallback={<PageLoading />}>
-                <Designer />
-              </Suspense>
-            }
-          />
-          <Route
-            path="/workflows/:id/history"
-            element={
-              <Suspense fallback={<PageLoading />}>
-                <WorkflowHistory />
-              </Suspense>
-            }
-          />
-          <Route path="/executions" element={<Executions />} />
-          <Route
-            path="/executions/:id"
-            element={
-              <Suspense fallback={<PageLoading />}>
-                <ExecutionMonitor />
-              </Suspense>
-            }
-          />
-          <Route path="/agents" element={<Agents />} />
-          <Route path="/skills" element={<Skills />} />
-          <Route path="/git" element={<GitPanel />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/events" element={<EventsAudit />} />
-        </Route>
-      </Routes>
+    <>
+      <RouterProvider router={router} />
       <Toaster position="top-center" richColors />
-    </BrowserRouter>
+    </>
   );
 }
 
