@@ -1,6 +1,6 @@
 #!/bin/bash
-# 端到端冒烟测试:启动 server 模式 → 种子检查 → 校验 → 运行闭环 → 循环保护
-#                 → HITL 恢复 → 导出 → 负路径 → 失败重试/跳过
+# 端到端冒烟测试:启动 server 模式 → 种子检查 → limit 截断头 → 校验 → 运行闭环
+#                 → 循环保护 → HITL 恢复 → 导出 → 负路径 → 失败重试/跳过
 # 用法: ./scripts/smoke.sh
 #
 # ---- 可靠性要点(本轮加固)--------------------------------------------
@@ -111,6 +111,15 @@ curl -sf "$BASE/api/health" | grep -q '"ok"' || fail "health"
 count=$(curl -sf "$BASE/api/workflows" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 [ "$count" -ge 2 ] || fail "seeded workflows = $count"
 
+# 2b. limit 截断头:显式 limit 超上限 → 必须打截断标记(静默截断会让消费方
+# 把"返回了 1000 条"误读成"总共 1000 条");未截断不得带头(存在即截断)。
+hdrs=$(curl -sf -D - -o /dev/null "$BASE/api/executions?limit=999999")
+echo "$hdrs" | grep -qi '^X-Limit-Truncated: true' || fail "limit=999999 缺 X-Limit-Truncated 头"
+echo "$hdrs" | grep -qi '^X-Limit-Applied: 1000' || fail "limit=999999 缺 X-Limit-Applied: 1000 头"
+hdrs2=$(curl -sf -D - -o /dev/null "$BASE/api/executions?limit=50")
+echo "$hdrs2" | grep -qi '^X-Limit-Truncated:' && fail "limit=50 不应带截断头"
+echo "OK: limit 截断头(超限打标 / 未超限无标)"
+
 # 3. 正常闭环:plan→execute→review(REJ)→fix→review(APP)→submit
 exec_id=$(curl -sf -X POST "$BASE/api/workflows/coding-task/run" -H 'Content-Type: application/json' -d '{"task":"smoke 正常闭环"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 state=""
@@ -180,4 +189,4 @@ done
 [ "$STATE3" = "COMPLETED" ] || fail "跳过重试后 state=$STATE3"
 curl -sf -X POST "$BASE/api/skills/submit/enable" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
 
-echo "✅ SMOKE OK(9 项全部通过)"
+echo "✅ SMOKE OK(10 项全部通过)"
