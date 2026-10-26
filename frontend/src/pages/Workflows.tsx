@@ -187,6 +187,23 @@ export default function Workflows() {
                 </TableCell>
               </TableRow>
             )}
+            {workflows.length > 0 && (
+              // 过滤无结果与"没有工作流"是两种空态:后者引导新建,前者提示
+              // 换个关键字(此前过滤无结果只剩一张空表头,像加载坏了)。
+              !workflows.some(
+                (w) =>
+                  !filter ||
+                  w.name.toLowerCase().includes(filter.toLowerCase()) ||
+                  w.id.toLowerCase().includes(filter.toLowerCase()) ||
+                  (w.description ?? "").toLowerCase().includes(filter.toLowerCase()),
+              ) && (
+                <TableRow>
+                  <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
+                    没有匹配"{filter}"的工作流,换个关键字试试
+                  </TableCell>
+                </TableRow>
+              )
+            )}
             {workflows
               .filter(
                 (w) =>

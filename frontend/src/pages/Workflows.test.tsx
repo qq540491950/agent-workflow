@@ -230,3 +230,21 @@ describe("Workflows 校验警告必须可见", () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 });
+
+// ---- 迭代 35:过滤无结果是另一种空态 --------------------------------------
+// 有工作流但过滤无匹配时,此前只剩一张空表头,像加载坏了;
+// 与"暂无工作流"(引导新建)是两种语义,提示要分开。
+describe("Workflows 过滤空态", () => {
+  it("过滤无匹配时提示换关键字(而不是空表头)", async () => {
+    renderWorkflows();
+    await settle();
+    const box = screen.getByPlaceholderText("按名称 / ID / 描述过滤…");
+    fireEvent.change(box, { target: { value: "不存在的关键字xyz" } });
+    await settle();
+    expect(screen.getByText(/没有匹配"不存在的关键字xyz"的工作流/)).toBeTruthy();
+    // 清空过滤后列表恢复
+    fireEvent.change(box, { target: { value: "" } });
+    await settle();
+    expect(screen.queryByText(/没有匹配/)).toBeNull();
+  });
+});
