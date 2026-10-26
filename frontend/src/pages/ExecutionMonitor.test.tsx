@@ -267,3 +267,155 @@ describe("ExecutionMonitor 脱敏输出", () => {
     expect(screen.queryByText(/含脱敏内容/)).toBeNull();
   });
 });
+
+// ---- 迭代 35:结构化节点结果(result_json)必须可见 ----------------------
+//
+// 此前节点输出只展示 output/error 两个字段,而 agent 节点的价值几乎全在
+// result_json 的结构化决策里(Summary / Decision):mock 跑完整条工作流,
+// 用户在"节点输出"里看到的却全是"(无输出)",左侧列表对"代码评审 ×2"
+// 也看不出第几次判了 APPROVED / REJECTED —— 要去 State 页签翻 JSON。
+describe("ExecutionMonitor 结构化节点结果", () => {
+  const nodeWithResult = {
+    id: "n1",
+    node_id: "review",
+    node_type: "agent",
+    node_name: "代码评审",
+    state: "SUCCESS",
+    attempt: 2,
+    output: "",
+    result_json: JSON.stringify({
+      Data: {},
+      Decision: "REJECTED",
+      Error: "",
+      Output: "",
+      State: "SUCCESS",
+      Summary: "Review 第 1 次:发现问题",
+    }),
+  };
+
+  function switchToNodes() {
+    // Radix Tabs 触发器在 mousedown 时激活(不是 click)
+    const tab = screen.getByText("节点输出");
+    fireEvent.mouseDown(tab);
+    fireEvent.click(tab);
+  }
+
+  it("Summary 在展开区直接可见(不再是一律(无输出))", async () => {
+    m.executionNodes.mockResolvedValue([nodeWithResult]);
+    renderMonitor();
+    await settle();
+    switchToNodes();
+    await settle();
+    expect(screen.getByText("Review 第 1 次:发现问题")).toBeTruthy();
+  });
+
+  it("非 DONE 的 Decision 在折叠行上就有徽标(评审结果一眼可见)", async () => {
+    m.executionNodes.mockResolvedValue([nodeWithResult]);
+    renderMonitor();
+    await settle();
+    // 不展开,徽标就在 summary 行上
+    expect(screen.getByText("REJECTED")).toBeTruthy();
+  });
+
+  it("DONE 不显示徽标(普通完成没有信息量)", async () => {
+    m.executionNodes.mockResolvedValue([
+      {
+        ...nodeWithResult,
+        node_name: "制定方案",
+        result_json: JSON.stringify({
+          Data: {},
+          Decision: "DONE",
+          Error: "",
+          Output: "",
+          State: "SUCCESS",
+          Summary: "制定三步实施方案",
+        }),
+      },
+    ]);
+    renderMonitor();
+    await settle();
+    switchToNodes();
+    await settle();
+    expect(screen.queryByText("DONE")).toBeNull();
+    expect(screen.getByText("制定三步实施方案")).toBeTruthy();
+  });
+
+  it("非对象 / 非法 result_json 不影响 output 展示(skill 等节点)", async () => {
+    m.executionNodes.mockResolvedValue([
+      {
+        id: "n2",
+        node_id: "submit",
+        node_type: "skill",
+        node_name: "提交",
+        state: "SUCCESS",
+        attempt: 1,
+        output: "submitted: feat: x",
+        result_json: "not-json{",
+      },
+    ]);
+    renderMonitor();
+    await settle();
+    switchToNodes();
+    await settle();
+    expect(screen.getByText("submitted: feat: x")).toBeTruthy();
+  });
+
+  it("全空结果仍然显示(无输出)(不静默空白)", async () => {
+    m.executionNodes.mockResolvedValue([
+      {
+        id: "n3",
+        node_id: "plan",
+        node_type: "agent",
+        node_name: "计划",
+        state: "SUCCESS",
+        attempt: 1,
+        output: "",
+        result_json: JSON.stringify({ Data: {}, Decision: "DONE", Error: "", Output: "", State: "SUCCESS", Summary: "" }),
+      },
+    ]);
+    renderMonitor();
+    await settle();
+    switchToNodes();
+    await settle();
+    expect(screen.getByText("(无输出)")).toBeTruthy();
+  });
+});
+
+// ---- 迭代 35:审批面板不得挂在已完成的执行上 ------------------------------
+//
+// Resume 之后人工节点有两行(attempt 1 WAITING / attempt 2 SUCCESS):
+// 旧行是历史。此前 waiting 判定是 nodes.some(state === "WAITING"),
+// 被历史行骗中 —— 执行已 COMPLETED,"Workflow requires your input"
+// 面板与 Approve/Reject 按钮仍然显示,再点只会吃一个错误 toast。
+describe("ExecutionMonitor 审批面板与执行状态一致", () => {
+  const twoRows = [
+    { id: "r1", node_id: "approve", node_type: "human", node_name: "人工审批", state: "WAITING", attempt: 1 },
+    { id: "r2", node_id: "approve", node_type: "human", node_name: "人工审批", state: "SUCCESS", attempt: 2 },
+  ];
+
+  it("执行 COMPLETED + 同节点有更高 attempt 的新行 → 不显示审批面板", async () => {
+    m.getExecution.mockResolvedValue(exec({ state: "COMPLETED" }));
+    m.executionNodes.mockResolvedValue(twoRows);
+    renderMonitor();
+    await settle();
+    expect(screen.queryByText(/Workflow requires your input/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+
+  it("执行 WAITING_USER 时面板照常显示(旧行为不回退)", async () => {
+    m.getExecution.mockResolvedValue(exec({ state: "WAITING_USER" }));
+    m.executionNodes.mockResolvedValue([twoRows[0]]);
+    renderMonitor();
+    await settle();
+    expect(screen.getByText(/Workflow requires your input/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+  });
+
+  it("仅节点行 WAITING(执行态刷新前的竞态窗口)→ 面板仍显示(兜底不丢)", async () => {
+    m.getExecution.mockResolvedValue(exec({ state: "RUNNING" }));
+    m.executionNodes.mockResolvedValue([twoRows[0]]);
+    renderMonitor();
+    await settle();
+    expect(screen.getByText(/Workflow requires your input/)).toBeTruthy();
+  });
+});

@@ -238,9 +238,18 @@ export default function ExecutionMonitor() {
     return <div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>;
   }
 
-  const waiting =
-    exec.state === "WAITING_USER" || nodes.some((n) => n.state === "WAITING");
-  const waitingNode = nodes.find((n) => n.state === "WAITING");
+  // 人工节点的"等待"判定:同一节点可能有多行(attempt 递增)——
+  // Resume 之后旧行保持 WAITING(历史),新行才是现状。只看
+  // nodes.some(WAITING) 会让"执行已完成、审批面板却还挂着" ——
+  // 以执行状态为准,节点行兜底时排除已被更高 attempt 取代的旧行。
+  const isStaleWaitRow = (n: ExecutionNode) =>
+    nodes.some(
+      (m) => m.node_id === n.node_id && m.attempt > n.attempt,
+    );
+  const waitingNode = nodes.find(
+    (n) => n.state === "WAITING" && !isStaleWaitRow(n),
+  );
+  const waiting = exec.state === "WAITING_USER" || !!waitingNode;
   const prompt =
     (events.find((e) => e.type === "human.input_required")?.data?.prompt as string) ??
     waitingNode?.error ??
