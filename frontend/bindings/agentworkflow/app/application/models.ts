@@ -69,6 +69,20 @@ export interface SettingsInfo {
      * 不影响既有消费方。
      */
     "git_working_dir_read_failed"?: boolean;
+
+    /**
+     * LogLevelReadFailed / AllowScriptNodesReadFailed 与上面的
+     * GitWorkingDirReadFailed 同一口径,对应 log_level / allow_script_nodes
+     * 两行:为 true 时响应里的值是**内存态生效值**,不是库里的值 ——
+     * 库里那一行读不出来(损坏 / DB 故障),启动时已回落到默认值。
+     * 
+     * 为什么是"另加字段"而不是改现有字段的含义:log_level /
+     * allow_script_nodes 平时本来就是"当前生效值"语义,直接改语义会破坏
+     * 既有消费方;标记字段是可选读取的附加语义(#287,三段式里的
+     * "是否读失败"段;生效值 / 库值的区分靠本标记表达)。
+     */
+    "log_level_read_failed"?: boolean;
+    "allow_script_nodes_read_failed"?: boolean;
 }
 
 /**
