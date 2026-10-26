@@ -59,6 +59,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { usePageTitle } from "@/lib/use-page-title";
 import { useUnsavedGuard } from "@/lib/unsaved-guard";
 
 export const nodeMeta: Record<
@@ -233,6 +234,8 @@ function DesignerInner() {
   const { id = "" } = useParams();
   const nav = useNavigate();
   const [wf, setWf] = useState<Workflow | null>(null);
+  // 窗口标题跟随工作流名(Wails 桌面窗口标题 = document.title)
+  usePageTitle(wf ? `设计器:${wf.name}` : "设计器");
   const [nodes, setNodes, onNodesChange] = useNodesState<RFNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<RFEdge>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);

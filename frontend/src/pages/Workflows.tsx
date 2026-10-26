@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
@@ -44,6 +45,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { MoreHorizontal } from "lucide-react";
 
 export default function Workflows() {
+  usePageTitle("工作流");
   const nav = useNavigate();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [creating, setCreating] = useState(false);

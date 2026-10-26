@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { Trash2 } from "lucide-react";
@@ -20,6 +21,7 @@ import {
 const stateOptions = ["", "RUNNING", "WAITING_USER", "COMPLETED", "FAILED", "CANCELLED"] as const;
 
 export default function Executions() {
+  usePageTitle("执行记录");
   const [execs, setExecs] = useState<Execution[]>([]);
   const [stateFilter, setStateFilter] = useState<string>("");
 

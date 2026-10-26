@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { toast } from "sonner";
 import { api, type SettingsInfo } from "@/lib/api";
 import { reportError } from "@/lib/errors";
@@ -36,6 +37,7 @@ const READ_FAILED_LABELS: Partial<Record<keyof SettingsInfo, string>> = {
 export const LOG_LEVELS = ["debug", "info", "warn", "error"];
 
 export default function Settings() {
+  usePageTitle("设置");
   const [info, setInfo] = useState<SettingsInfo | null>(null);
   const [ver, setVer] = useState<Record<string, string>>({});
   const [gitDir, setGitDir] = useState("");

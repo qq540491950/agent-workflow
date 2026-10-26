@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { api, asArray, subscribeEvents } from "@/lib/api";
@@ -31,6 +32,7 @@ const categories = [
 ];
 
 export default function EventsAudit() {
+  usePageTitle("事件审计");
   const [events, setEvents] = useState<AuditEvent[]>([]);
   // draft = 输入框里**正在编辑**的前缀;filter = **已生效**的前缀。
   //

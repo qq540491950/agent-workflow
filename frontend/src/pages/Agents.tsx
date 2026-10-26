@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { toast } from "sonner";
 import { Settings2 } from "lucide-react";
 import { api, asArray, formatExtraArgs, parseExtraArgs } from "@/lib/api";
@@ -27,6 +28,7 @@ import {
 } from "@/components/ui/table";
 
 export default function Agents() {
+  usePageTitle("Agent 注册表");
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [configTarget, setConfigTarget] = useState<AgentInfo | null>(null);
   const [cfg, setCfg] = useState<AgentConfig | null>(null);

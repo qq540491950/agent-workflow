@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { toast } from "sonner";
 import { RefreshCw, GitCommitHorizontal } from "lucide-react";
 import { api, asArray } from "@/lib/api";
@@ -37,6 +38,7 @@ interface LogEntry {
 }
 
 export default function GitPanel() {
+  usePageTitle("Git 面板");
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [diff, setDiff] = useState("");
   const [log, setLog] = useState<LogEntry[]>([]);

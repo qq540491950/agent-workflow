@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { toast } from "sonner";
 import { api, asArray } from "@/lib/api";
 import { reportError } from "@/lib/errors";
@@ -16,6 +17,7 @@ import {
 } from "@/components/ui/table";
 
 export default function Skills() {
+  usePageTitle("技能");
   const [skills, setSkills] = useState<SkillDTO[]>([]);
   // 启用开关的 in-flight 锁:此前开关无锁,连点会并发打多次
   // /api/skills/{id}/enable —— 后到的一次覆盖先到的一次,最终状态

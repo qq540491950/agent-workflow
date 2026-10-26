@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { usePageTitle } from "@/lib/use-page-title";
 
 // Timeline 把各节点执行区间画成水平条,直观展示并行与循环。
 function Timeline({
@@ -209,6 +210,7 @@ export function decisionTone(decision: string): string {
 export default function ExecutionMonitor() {
   const { id = "" } = useParams();
   const [exec, setExec] = useState<Execution | null>(null);
+  usePageTitle(exec ? `执行:${exec.workflow_name}` : "执行详情");
   const [nodes, setNodes] = useState<ExecutionNode[]>([]);
   const [events, setEvents] = useState<UIEvent[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);

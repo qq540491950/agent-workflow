@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { Link, useParams } from "react-router-dom";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
@@ -37,6 +38,7 @@ function dur(e: Execution): string {
 export default function WorkflowHistory() {
   const { id = "" } = useParams();
   const [wf, setWf] = useState<Workflow | null>(null);
+  usePageTitle(wf ? `历史:${wf.name}` : "执行历史");
   const [execs, setExecs] = useState<Execution[]>([]);
   const [versions, setVersions] = useState<number[]>([]);
   const [viewDSL, setViewDSL] = useState<{ version: number; text: string } | null>(null);

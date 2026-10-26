@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { usePageTitle } from "@/lib/use-page-title";
 import { Link } from "react-router-dom";
 import {
   Activity,
@@ -40,6 +41,7 @@ interface WfStats {
 }
 
 export default function Dashboard() {
+  usePageTitle("总览");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [stats, setStats] = useState<WfStats[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
