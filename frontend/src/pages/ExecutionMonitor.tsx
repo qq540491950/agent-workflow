@@ -407,7 +407,9 @@ export default function ExecutionMonitor() {
                 setRecoveryBusy(true);
                 try {
                   await api.retryExecution(exec.id, false);
-                  toast.success("重试失败节点");
+                  // 此前成功提示就是按钮文案"重试失败节点" —— 读起来像报错。
+                  // 说清"已提交、会发生什么"(恢复执行,结果刷新见页面)。
+                  toast.success("已提交重试,执行恢复中");
                   setTimeout(refresh, 300);
                 } catch (e) {
                   reportError(e, "重试失败节点");
