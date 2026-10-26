@@ -394,7 +394,7 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 		// permissions 段写进节点 config = 权限收紧无声失效,与 DSL 解析层
 		// (workflow:/settings: 段错放)同一原则:fail closed,硬失败。
 		// 泛化的 UNKNOWN_NODE_CONFIG 只警告,压不住这种安全语义的静默丢失。
-		// 错误码与解析层同一个(dsl.MisplacedSection),两条保存入口
+		// 错误码与解析层同一个(model.CodeMisplacedSection),两条保存入口
 		// (YAML 导入 / JSON 保存)都经此处,天然同 code。
 		if misplacedSectionKeys[key] {
 			addErr(model.CodeMisplacedSection, n.ID,
