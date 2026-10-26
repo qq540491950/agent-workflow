@@ -1810,6 +1810,17 @@ type SettingsInfo struct {
 	// 用 omitempty:正常情况(false)下响应体形状与此前完全一致,
 	// 不影响既有消费方。
 	GitWorkingDirReadFailed bool `json:"git_working_dir_read_failed,omitempty"`
+	// LogLevelReadFailed / AllowScriptNodesReadFailed 与上面的
+	// GitWorkingDirReadFailed 同一口径,对应 log_level / allow_script_nodes
+	// 两行:为 true 时响应里的值是**内存态生效值**,不是库里的值 ——
+	// 库里那一行读不出来(损坏 / DB 故障),启动时已回落到默认值。
+	//
+	// 为什么是"另加字段"而不是改现有字段的含义:log_level /
+	// allow_script_nodes 平时本来就是"当前生效值"语义,直接改语义会破坏
+	// 既有消费方;标记字段是可选读取的附加语义(#287,三段式里的
+	// "是否读失败"段;生效值 / 库值的区分靠本标记表达)。
+	LogLevelReadFailed         bool `json:"log_level_read_failed,omitempty"`
+	AllowScriptNodesReadFailed bool `json:"allow_script_nodes_read_failed,omitempty"`
 }
 
 // isSettingNotFound 判断 err 是否表示"这个设置项从未设置过"。
@@ -1854,6 +1865,22 @@ func (s *SettingsService) Info() *SettingsInfo {
 		info.GitWorkingDir = s.app.GitSvc.WorkingDir()
 		info.GitWorkingDirReadFailed = true
 		logx.Error("读取 git_working_dir 设置失败:显示的是内存态目录,不是库里的值",
+			"error", err.Error())
+	}
+	// log_level / allow_script_nodes 的库值体检(#287):响应里的两个字段
+	// 本来就是"当前生效值",但生效值可能来自"启动时读失败回落默认" ——
+	// 库里那行坏了这件事在响应里完全不可见。这里补一次读,读失败与
+	// "从未设置"分开:前者标注,后者是正常初始状态。
+	var lv string
+	if err := s.app.Repo.GetSetting("log_level", &lv); err != nil && !isSettingNotFound(err) {
+		info.LogLevelReadFailed = true
+		logx.Error("读取 log_level 设置失败:log_level 显示的是内存态生效值,不是库里的值",
+			"error", err.Error())
+	}
+	var allowScript bool
+	if err := s.app.Repo.GetSetting("allow_script_nodes", &allowScript); err != nil && !isSettingNotFound(err) {
+		info.AllowScriptNodesReadFailed = true
+		logx.Error("读取 allow_script_nodes 设置失败:allow_script_nodes 显示的是内存态生效值,不是库里的值",
 			"error", err.Error())
 	}
 	return info

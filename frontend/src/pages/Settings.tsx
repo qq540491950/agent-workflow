@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, type SettingsInfo } from "@/lib/api";
 import { reportError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,12 +21,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-interface SettingsInfo {
-  data_dir: string;
-  git_working_dir: string;
-  log_level: string;
-  allow_script_nodes: boolean;
-}
+// 设置行读失败的展示文案(与后端 *_read_failed 标记一一对应):
+// 该行读不出来时,输入框里显示的是内存态生效值,不是库里的值 ——
+// 直接保存会用当前值覆盖损坏行,损坏事实消失。用户必须先知道这一点。
+const READ_FAILED_LABELS: Partial<Record<keyof SettingsInfo, string>> = {
+  git_working_dir_read_failed: "Git 工作目录",
+  log_level_read_failed: "日志级别",
+  allow_script_nodes_read_failed: "script 节点放行开关",
+};
 
 // 后端可接受的日志级别(app/application validateLogLevel)。
 // 非法值后端现在直接 400 拒绝(此前静默回落 info,界面显示与实际生效不一致),
@@ -167,6 +169,21 @@ export default function Settings() {
       </div>
 
       <div className="max-w-2xl space-y-4">
+        {info &&
+          (Object.keys(READ_FAILED_LABELS) as (keyof SettingsInfo)[])
+            .filter((k) => !!info[k])
+            .map((k) => (
+              <div
+                key={k}
+                role="alert"
+                data-testid="settings-read-failed"
+                className="rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-400"
+              >
+                设置行「{READ_FAILED_LABELS[k]}」读不出来(内容损坏或存储故障)。
+                页面上显示的是<b>当前生效值</b>,不是数据库里保存的值 ——
+                直接保存会用当前显示值覆盖损坏的行。
+              </div>
+            ))}
         <Card>
           <CardHeader className="py-3">
             <CardTitle className="text-base">常规</CardTitle>

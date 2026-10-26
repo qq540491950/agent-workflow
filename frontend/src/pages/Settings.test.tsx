@@ -282,3 +282,40 @@ describe("Settings 备份内容与版本校验文案", () => {
     expect(text).toContain("仍能恢复");
   });
 });
+
+// 设置行读失败(*_read_failed)必须**上屏**:输入框里显示的是内存态
+// 生效值,不是库里的值 —— 用户不知道这一点就会直接保存,用当前值覆盖
+// 损坏行,损坏事实消失(#287,与后端 git_working_dir_read_failed 同族)。
+describe("Settings 设置行读失败警示", () => {
+  it("log_level 行读失败时显示警示条,写明显示的不是库值", async () => {
+    m.getSettings.mockResolvedValue({ ...info, log_level_read_failed: true });
+    renderSettings();
+    await settle();
+    const alert = screen.getAllByTestId("settings-read-failed");
+    expect(alert.length).toBe(1);
+    expect(alert[0].textContent).toContain("日志级别");
+    expect(alert[0].textContent).toContain("不是数据库里保存的值");
+  });
+
+  it("多个设置行同时读失败时逐行提示", async () => {
+    m.getSettings.mockResolvedValue({
+      ...info,
+      log_level_read_failed: true,
+      allow_script_nodes_read_failed: true,
+      git_working_dir_read_failed: true,
+    });
+    renderSettings();
+    await settle();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("日志级别");
+    expect(text).toContain("script 节点放行开关");
+    expect(text).toContain("Git 工作目录");
+    expect(screen.getAllByTestId("settings-read-failed").length).toBe(3);
+  });
+
+  it("行正常时不显示警示条(误报同样是 bug)", async () => {
+    renderSettings();
+    await settle();
+    expect(screen.queryByTestId("settings-read-failed")).toBeNull();
+  });
+});

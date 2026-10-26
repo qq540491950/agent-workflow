@@ -529,6 +529,24 @@ function normalizeExecution(ex: Execution | null): Execution {
   return { ...ex, warnings: ex.warnings ?? [] };
 }
 
+/**
+ * 设置页信息(后端 SettingsInfo,app/application)。
+ *
+ * 三个 `*_read_failed` 标记(omitempty,正常情况不出现):对应设置行
+ * **读不出来**(内容损坏 / DB 故障)时为 true —— 此时响应里的值是
+ * **内存态生效值**,不是库里的值。消费方必须把它标给用户,不能当
+ * "库里那个"展示或回存(回存即覆盖,损坏事实消失)。
+ */
+export interface SettingsInfo {
+  data_dir: string;
+  git_working_dir: string;
+  log_level: string;
+  allow_script_nodes: boolean;
+  git_working_dir_read_failed?: boolean;
+  log_level_read_failed?: boolean;
+  allow_script_nodes_read_failed?: boolean;
+}
+
 export const api = {
   
   // ---- Workflows ----
@@ -825,12 +843,7 @@ export const api = {
   async isDesktopMode(): Promise<boolean> {
     return (await detectMode()) === "desktop";
   },
-  async getSettings(): Promise<{
-    data_dir: string;
-    git_working_dir: string;
-    log_level: string;
-    allow_script_nodes: boolean;
-  }> {
+  async getSettings(): Promise<SettingsInfo> {
     if ((await detectMode()) === "desktop") {
       return nn(await (await wailsBindings()).st.Info());
     }
@@ -841,12 +854,7 @@ export const api = {
     log_level?: string;
     /** script 节点放行开关;缺省表示不修改(后端保持既有值) */
     allow_script_nodes?: boolean;
-  }): Promise<{
-    data_dir: string;
-    git_working_dir: string;
-    log_level: string;
-    allow_script_nodes: boolean;
-  }> {
+  }): Promise<SettingsInfo> {
     if ((await detectMode()) === "desktop") {
       // 省略 git_working_dir = **不修改**(后端契约:body 里是 *string,
       // nil 表示不改;显式 "" 才表示清除)。

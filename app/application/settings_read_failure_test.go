@@ -175,3 +175,74 @@ func TestNewAppLogsErrorWhenGitWorkingDirUnreadable(t *testing.T) {
 		t.Errorf("启动读失败必须记 ERROR,实际日志: %q", out)
 	}
 }
+
+// ---- log_level / allow_script_nodes 的库值体检(#287)----
+//
+// 与 git_working_dir 同一族:Info() 响应里的 log_level / allow_script_nodes
+// 是"当前生效值",但生效值可能来自"启动时读失败回落默认" —— 库里那行
+// 坏了这件事此前在响应里完全不可见。现在读失败必须在响应里标注。
+
+// TestSettingsInfoMarksLogLevelReadFailure log_level 行损坏必须标注。
+func TestSettingsInfoMarksLogLevelReadFailure(t *testing.T) {
+	a := newTestApp(t)
+	// 走公开 API 写入数字:GetSetting 把它解进 string → 解码失败 → 读失败。
+	if err := a.Repo.SaveSetting("log_level", 12345); err != nil {
+		t.Fatalf("写入损坏的 log_level 行: %v", err)
+	}
+
+	buf, restore := captureLogx(t)
+	defer restore()
+
+	info := a.Settings.Info()
+	if !info.LogLevelReadFailed {
+		t.Error("log_level 行读不出来时必须在返回结构里标注读失败")
+	}
+	if out := buf.String(); !strings.Contains(out, "log_level") || !strings.Contains(out, "ERROR") {
+		t.Errorf("log_level 读失败必须留 ERROR 日志,实际日志: %q", out)
+	}
+}
+
+// TestSettingsInfoMarksAllowScriptNodesReadFailure allow_script_nodes 行损坏必须标注。
+func TestSettingsInfoMarksAllowScriptNodesReadFailure(t *testing.T) {
+	a := newTestApp(t)
+	// 写入字符串:GetSetting 把它解进 bool → 解码失败 → 读失败。
+	if err := a.Repo.SaveSetting("allow_script_nodes", "yes"); err != nil {
+		t.Fatalf("写入损坏的 allow_script_nodes 行: %v", err)
+	}
+
+	buf, restore := captureLogx(t)
+	defer restore()
+
+	info := a.Settings.Info()
+	if !info.AllowScriptNodesReadFailed {
+		t.Error("allow_script_nodes 行读不出来时必须在返回结构里标注读失败")
+	}
+	if out := buf.String(); !strings.Contains(out, "allow_script_nodes") || !strings.Contains(out, "ERROR") {
+		t.Errorf("allow_script_nodes 读失败必须留 ERROR 日志,实际日志: %q", out)
+	}
+}
+
+// TestSettingsInfoHealthyRowsCarryNoMarkers 行正常时三个读失败标记都不得出现
+// (误报同样是 bug;omitempty 正常情况下保持响应形状不变)。
+func TestSettingsInfoHealthyRowsCarryNoMarkers(t *testing.T) {
+	a := newTestApp(t)
+	// 走公开 Set(库值 + 内存态一起更新,与真实保存路径同源;直接写库
+	// 不会更新内存态,而 Info() 显示的就是内存态生效值)。
+	if err := a.Settings.Set("log_level", "debug"); err != nil {
+		t.Fatalf("设置 log_level: %v", err)
+	}
+	if err := a.Settings.Set("allow_script_nodes", true); err != nil {
+		t.Fatalf("设置 allow_script_nodes: %v", err)
+	}
+
+	info := a.Settings.Info()
+	if info.GitWorkingDirReadFailed || info.LogLevelReadFailed || info.AllowScriptNodesReadFailed {
+		t.Errorf("行全部可读时不得标注读失败: %+v", info)
+	}
+	if info.LogLevel != "debug" {
+		t.Errorf("生效值应与库值一致: %q, want debug", info.LogLevel)
+	}
+	if !info.AllowScriptNodes {
+		t.Errorf("生效值应与库值一致: %v, want true", info.AllowScriptNodes)
+	}
+}

@@ -576,6 +576,42 @@ describe("desktop 模式读接口契约(迭代 14B)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("设置:读失败标记原样透传(两种模式同一契约)", async () => {
+    // 后端 omitempty:设置行损坏时才出现 *_read_failed。透传不得丢字段,
+    // 否则设置页的警示条在桌面或服务器某一侧永远不亮。
+    const marked = {
+      data_dir: "/tmp",
+      git_working_dir: "/tmp/repo",
+      log_level: "info",
+      allow_script_nodes: false,
+      git_working_dir_read_failed: true,
+      log_level_read_failed: true,
+      allow_script_nodes_read_failed: true,
+    };
+    callByID.mockResolvedValue([]); // desktop
+    stInfo.mockResolvedValue(marked);
+    const { api } = await freshApi();
+    await expect(api.getSettings()).resolves.toMatchObject({
+      git_working_dir_read_failed: true,
+      log_level_read_failed: true,
+      allow_script_nodes_read_failed: true,
+    });
+
+    callByID.mockRejectedValue(new Error("not in wails")); // web
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({ ...marked, git_working_dir_read_failed: undefined }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { api: web } = await freshApi();
+    const webInfo = await web.getSettings();
+    expect(webInfo.log_level_read_failed).toBe(true);
+    expect(webInfo.allow_script_nodes_read_failed).toBe(true);
+    expect(webInfo.git_working_dir_read_failed).toBeUndefined();
+  });
+
   it("备份:exportBackupText 走 st.ExportBackup() 并序列化成 JSON 文本", async () => {
     stExportBackup.mockResolvedValue({ workflows: [], agent_configs: {} });
     const { api, fetchMock } = await desktopApi();

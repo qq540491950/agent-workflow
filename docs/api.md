@@ -114,7 +114,7 @@ getToken();` 逐字保留")。在本包再叠一层键名规则会与制品出�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关。**读不出来时多一个 `git_working_dir_read_failed: true`**(仅在读失败时出现):此刻 `git_working_dir` 是**内存态**(Git 服务当前目录),**不是库里的值** —— 消费方必须把它标出来,不能当"库里那个"展示或回存(回存即覆盖,损坏行就此消失) |
+| GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关。**对应设置行读不出来时多一个 `*_read_failed: true` 标记**(仅在读失败时出现,三个标记:`git_working_dir_read_failed` / `log_level_read_failed` / `allow_script_nodes_read_failed`):此刻该字段的值是**内存态生效值**,**不是库里的值** —— 消费方必须把它标给用户,不能当"库里那个"展示或回存(回存即覆盖,损坏行就此消失) |
 | POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改)。**`log_level` 只接受 `debug`/`info`/`warn`/`error`**(大小写不敏感,落库归一为小写),非法值返回 400 —— 不再静默回落 info(界面显示的级别与实际生效的级别会不一致)。**`git_working_dir` 的"缺省"与"空串"是两种语义**:请求体里**没有该字段** = 保持原值不变;**显式传空串** = **清除**(落库空串 + 回到启动默认目录)。**先全量校验、后统一落库** —— 任一项非法则一项都不改 |
 | GET | `/api/backup` | 导出备份(工作流 + Agent 配置 + **技能启用状态**)。**含明文,范围是三类**:`agent_configs` 整份原样(`env` / `behavior` / `extra_args`)+ **工作流定义本体**(含工作流 `variables`)。约定 8 允许备份导出含明文(它是唯一例外),但**请按"整个文件都是敏感的"对待**。响应头 `Cache-Control: no-store`,避免明文 API Key 留在浏览器/代理的磁盘缓存里。`skill_configs` 段(id → enabled)是轮次 85 补上的:此前备份里根本没有它 → 换机器恢复后,此前**禁用**的技能又全部可用了 |
 | POST | `/api/backup/restore` | 恢复备份。**先校验 `version`**(轮次 85):缺失或不认识 → **400 `BAD_REQUEST`**(此前 `version` 只写不读,任何 JSON 都被当备份照单全收,用户看到"恢复成功"却什么也没恢复);`version: 1` 是现有备份的版本号 → 正常路径(向后兼容)。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝;**本机不存在的 Agent 也计入 `agent_configs_invalid` 且不落库**(此前计入"已恢复"是假成功:配置永远不会被应用)。**技能启用状态**按 `skill_configs` 段恢复(只对本机确实存在的 Skill 写回,其余跳过并计入 `skill_configs_unknown_ids`);**老备份没有这一段 → 不恢复技能状态、不报错**。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` / **`agent_configs_unknown_ids`** / `agent_configs_apply_failed_ids` / **`skill_configs_restored`** / **`skill_configs_unknown_ids`** |
@@ -496,7 +496,7 @@ net/http 的主动中止信号,按官方要求放行)。
 | 项 | 语义 |
 | --- | --- |
 | `git_working_dir` **空串** | = **清除**(落库空串 + 回到启动默认目录)。与"**没传该字段**"严格区分 —— 后者保持原值不变 |
-| `git_working_dir` **读失败** | 库里那一行损坏或 DB 读失败时,`GET /api/settings` 额外返回 **`git_working_dir_read_failed: true`**,且 `git_working_dir` 是**内存态**而不是库值(此前读错误被吞掉,界面显示的不是库里那个,用户一保存就把损坏行覆盖了)。**"从未设置过"不算失败**:库里没有这一行是正常初始状态,响应形状与此前完全一致 |
+| 设置行**读失败** | 库里那一行损坏或 DB 读失败时,`GET /api/settings` 额外返回对应的 **`*_read_failed: true`**(`git_working_dir_read_failed` / `log_level_read_failed` / `allow_script_nodes_read_failed`),且该字段的值是**内存态生效值**而不是库值(此前读错误被吞掉,界面显示的不是库里那个,用户一保存就把损坏行覆盖了)。**"从未设置过"不算失败**:库里没有这一行是正常初始状态,响应形状与此前完全一致 |
 | `Settings.Update` | **先全量校验、后统一落库** —— 任一项非法(如 `log_level`)则**一项都不改**(此前先落库后校验,返回 400 但目录已经改了) |
 | `Settings.Set`(仅 Wails IPC) | **白名单键**:`git_working_dir` / `log_level` / `allow_script_nodes`;其余键**一律拒绝**(400 `BAD_REQUEST`)。**复用 `Update` 的同一套校验**(目录存在性、级别合法性),并做**值类型校验** —— 不能成为绕过校验的后门。`agent_policies` **刻意不在白名单里**:它由 `AgentService` 在 `permMu` 下"读整表→改一项→写整表",绕过去直写会丢并发更新 |
 | `default_working_dir` | **死设置**,运行期从不读取 → 后端**拒绝新值**(`UNSUPPORTED_AGENT_SETTING`);**已存的老值仍可原样回存** |
