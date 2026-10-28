@@ -1,0 +1,73 @@
+version: "1"
+
+workflow:
+  id: parameterized-build
+  name: Parameterized Build
+  description: 声明式入参(inputs)+ 脚本重试 + 每工作流并发上限示例(迭代 36)
+
+# 声明式运行入参:启动时校验类型与必填,缺省项兜 default。
+# 运行对话框会把它们渲染成类型化字段(字符串/数字输入框、布尔开关);
+# REST 调用则通过 POST /api/workflows/{id}/run 的 variables 传入。
+# 在 Prompt 里用 {{variables.<name>}} 引用,条件表达式里用 variables.<name>。
+inputs:
+  - name: repo
+    type: string
+    required: true
+    description: 目标仓库路径
+  - name: min_coverage
+    type: number
+    default: 80
+    description: 测试覆盖率阈值(%)
+  - name: dry_run
+    type: boolean
+    default: false
+    description: true 时只做静态检查,不跑测试
+
+settings:
+  # 同一工作流同时只允许一个执行;达到上限后的新启动被拒(WORKFLOW_BUSY,
+  # 409),不排队 —— 由调用方决定重试或放弃。
+  max_concurrent: 1
+
+nodes:
+  - id: plan
+    type: agent
+    agent: claude-code
+    mode: plan
+    prompt: >-
+      阅读仓库的最近改动,产出构建与测试方案。
+      覆盖率阈值:{{variables.min_coverage}};dry_run={{variables.dry_run}}
+      时方案只需覆盖静态检查。
+
+  # script 节点支持节点级重试(与 agent 节点同语义):首次失败按
+  # exponential 退避(首次重试等 1s,此后翻倍,上限 max_backoff_seconds)。
+  # 命令是否幂等由作者判断 —— 这里的 go vet 是只读的。
+  - id: vet
+    type: script
+    command: go vet ./...
+    retry:
+      max_attempts: 2
+      backoff: exponential
+      initial_backoff_seconds: 1
+      max_backoff_seconds: 10
+
+  - id: test
+    type: agent
+    agent: claude-code
+    mode: test
+    prompt: >-
+      运行测试并统计覆盖率,阈值 {{variables.min_coverage}};
+      dry_run={{variables.dry_run}} 时跳过测试,直接输出"演练模式"。
+
+  - id: review
+    type: agent
+    agent: claude-code
+    mode: review
+    prompt: "审查以上构建与测试结果,输出 APPROVED 或 REJECTED 及原因"
+
+edges:
+  - from: plan
+    to: vet
+  - from: vet
+    to: test
+  - from: test
+    to: review
