@@ -2923,7 +2923,16 @@ Go 源码)→ 单独编译成一个二进制 → 造 4 个绕过包 → 用同�
   设计器保存(升 v2)后声明原样保留。
 - 8 个页面加载健康检查:无 ErrorBoundary 触发(重构后回归)。
 
-### 5. 本轮明确不做(登记在案)
+### 5. 本轮走查与回归中发现的既有边界(登记,不在本轮修)
+
+- **同一实例"删除工作流 → 备份恢复"会失败**:`DeleteWorkflow` 刻意保留
+  `workflow_versions` 行(审计需要),而恢复走 `INSERT version 1` → 撞
+  UNIQUE(workflow_id, version) → DB_ERROR。真实场景(备份搬到新机器/
+  新库)不受影响(TestBackupRoundTripKeepsInputs 用第二个独立实例锁住
+  inputs 往返);同实例恢复已删除过的 ID 这条路径,要等"恢复语义是否
+  应绕开/重建版本历史"的设计轮再定。
+
+### 6. 本轮明确不做(登记在案)
 
 - **非重试错误分类**(Temporal `NonRetryableErrorTypes`):本项目的节点错误
   是自由文本(CLI stderr),没有稳定的错误类型可枚举;硬上会引入"字符串

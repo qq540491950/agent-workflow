@@ -88,3 +88,53 @@ func TestRestoreBackupCountsSuccessfulApply(t *testing.T) {
 		t.Errorf("应用成功时失败列表应为空,实际: %v", ids)
 	}
 }
+
+// 回归(迭代 36):备份往返必须保留工作流的声明式入参(inputs)。
+// 导出走 ListWorkflows(模型级 JSON),恢复走 SaveWorkflow —— 任何一侧
+// 漏掉 inputs 字段,用户"备份→恢复"后入参声明就静默消失
+// (约定 14:静默丢弃 = 用户以为设置还在)。
+func TestBackupRoundTripKeepsInputs(t *testing.T) {
+	a := newTestApp(t)
+	seed := `{"id":"wf-bk-inputs","name":"BK Inputs",
+		"inputs":[
+			{"name":"repo","type":"string","required":true,"description":"目标仓库"},
+			{"name":"limit","type":"number","default":3}
+		],
+		"nodes":[{"id":"a","name":"A","type":"agent","config":{"agent":"mock-claude","mode":"plan"}}],
+		"edges":[],"enabled":true}`
+	if _, err := a.Workflows.SavePayload(seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	bk, err := a.Settings.ExportBackup()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	// 恢复的语义是"只补缺失的工作流"(已存在的跳过并计数),且恢复目标是
+	// 另一个实例(真实场景是"备份 → 搬到新机器")—— 用第二个独立 App
+	// 承接恢复。注:同一实例"删除后恢复"会撞 workflow_versions 的
+	// UNIQUE(workflow_id, version):DeleteWorkflow 刻意保留版本历史
+	// (审计需要),同 ID 重插 version 1 必撞 —— 既有边界,与本特性无关,
+	// 登记在 docs/OPTIMIZATION.md 第十七节 5.2。
+	b := newTestApp(t)
+	res, err := b.Settings.RestoreBackup(bk)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if n, _ := res["workflows_restored"].(int); n != 1 {
+		t.Fatalf("workflows_restored = %v, want 1", res["workflows_restored"])
+	}
+	got, err := b.Repo.GetWorkflow("wf-bk-inputs")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.Inputs) != 2 {
+		t.Fatalf("恢复后应保留 2 条入参声明,实际 %d", len(got.Inputs))
+	}
+	if got.Inputs[0].Name != "repo" || !got.Inputs[0].Required {
+		t.Errorf("repo 声明不符: %+v", got.Inputs[0])
+	}
+	if n, ok := got.Inputs[1].Default.(int); !ok || n != 3 {
+		t.Errorf("limit 默认值应归一为 int 3,实际 %T(%v)", got.Inputs[1].Default, got.Inputs[1].Default)
+	}
+}
