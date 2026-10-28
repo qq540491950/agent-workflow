@@ -2925,6 +2925,11 @@ Go 源码)→ 单独编译成一个二进制 → 造 4 个绕过包 → 用同�
 - **inputs 编辑器复测通过**:设置面板「+ 添加」→ 填名称/描述/勾必填 →
   保存(升 v2)→ API 核验声明逐字段精确落库;8 个页面加载健康检查
   (无 ErrorBoundary 触发)。
+- **第二轮走查(备份/间接影响面)**:备份 → **跨真实 server 实例**恢复,
+  inputs 声明精确往返(与 TestBackupRoundTripKeepsInputs 互为印证);
+  设置页备份卡/安全开关/关于信息、Git/Skills/Agents 页全部健康;
+  桌面打包(`wails3 task package`)通过 —— bindings 重生成后桌面路径完整;
+  runtime/compiler/validator/dsl/api 五包 `-count=2 -race` 复跑无 flake。
 - 8 个页面加载健康检查:无 ErrorBoundary 触发(重构后回归)。
 
 ### 5. 本轮走查与回归中发现的既有边界(登记,不在本轮修)
