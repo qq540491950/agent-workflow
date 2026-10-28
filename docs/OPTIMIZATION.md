@@ -2874,6 +2874,7 @@ Go 源码)→ 单独编译成一个二进制 → 造 4 个绕过包 → 用同�
 | `settings.max_concurrent` 每工作流并发上限(`WORKFLOW_BUSY` 409,fail fast 不排队) | n8n / Windmill per-workflow 并发限制 | 独立提交 |
 | retry 退避参数可配(`initial_backoff_seconds` / `max_backoff_seconds`,缺省行为逐位不变) | Temporal InitialInterval / MaximumInterval | 独立提交 |
 | 运行对话框渲染声明式入参类型化字段(`RunDialog` 抽组件,aria-label 全覆盖) | n8n/Windmill 的"声明 → 表单"映射 | 独立提交 |
+| inputs 编辑器(工作流设置面板 `InputsEditor`:增删改行,required↔default 互斥在 UI 层提前保证) | 同上 | 独立提交 |
 
 ### 2. 新的语义决定(勿当 Bug "修复")
 
@@ -2921,6 +2922,9 @@ Go 源码)→ 单独编译成一个二进制 → 造 4 个绕过包 → 用同�
   dry_run 开关带描述)→ 必填缺失的人话 toast → 填写+拨开关+启动 →
   监控页执行变量 `{repo, limit:3(默认), dry_run:true(开关)}` 逐项正确 →
   设计器保存(升 v2)后声明原样保留。
+- **inputs 编辑器复测通过**:设置面板「+ 添加」→ 填名称/描述/勾必填 →
+  保存(升 v2)→ API 核验声明逐字段精确落库;8 个页面加载健康检查
+  (无 ErrorBoundary 触发)。
 - 8 个页面加载健康检查:无 ErrorBoundary 触发(重构后回归)。
 
 ### 5. 本轮走查与回归中发现的既有边界(登记,不在本轮修)
