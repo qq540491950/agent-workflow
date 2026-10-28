@@ -32,7 +32,8 @@ wails3 task package   # 产物 build/bin/agent-workflow.app
 - **Human-in-the-loop**:执行暂停等待输入(Approve / Reject / Continue / Instruction),指令注入后续上下文;**Reject 会中止工作流**(落库 FAILED),同链多个闸门互不串扰;失败执行可重试或跳过
 - **并行编排**:parallel → merge 分支并行,汇合后继续
 - **持久化与恢复**:执行实时写 SQLite,重启后可恢复;Execution 绑定工作流版本;数据一键备份/恢复
-- **可靠性**:工作流级超时、节点级重试(次数+退避)、循环上限与停滞检测、失败节点重试/跳过
+- **可靠性**:工作流级超时、节点级重试(agent/script 节点,次数+退避+可配初始间隔与上限)、循环上限与停滞检测、失败节点重试/跳过、每工作流并发上限(超限 409,fail fast)
+- **声明式入参**:工作流 `inputs` 段声明运行入参(类型/必填/默认值),启动时校验与兜底;运行对话框渲染成类型化字段,REST 走 `variables` 传入
 - **可观测**:实时事件流(SSE/IPC)、跨执行审计页、节点输出、会话 State 查看器、Artifacts(git diff)、系统原生通知(完成/失败/等待输入,点击直达执行)
 - **Git 集成**:status/diff/log/branch/checkout/commit 节点 + Git 面板,权限策略约束
 - **配置即代码**:YAML 导入导出;Mock Agent 决策脚本可配置,无需真实模型即可演示完整闭环
@@ -62,8 +63,8 @@ cd frontend && npm run build && npx vitest run
 
 # 一键完整门禁(上述全部 + gofmt/vet)
 ./scripts/verify.sh
-# 或单独跑端到端冒烟(服务器模式:REST+SSE+HITL+导出+负路径语义+失败重试/跳过,9 项断言)
+# 或单独跑端到端冒烟(服务器模式:REST+SSE+HITL+导出+负路径语义+失败重试/跳过+入参校验+并发上限,12 项断言)
 ./scripts/smoke.sh
-# SSE 实时流端到端(连接即达 + 执行事件经流送达 + keepalive,4 项断言)
+# SSE 实时流端到端(连接即达 + 执行事件经流送达 + keepalive + 断连释放,6 项断言)
 ./scripts/smoke_sse.sh
 ```
