@@ -8,7 +8,10 @@
 //  3. 启动时字段值合并进 variables,且**覆盖** JSON 文本框里的同名键
 //     (字段是声明入参的主控件);数字字段转不出数值时原样传字符串,
 //     让后端报可读的 INPUT_TYPE_MISMATCH;
-//  4. 变量文本框不是合法 JSON → 不启动。
+//  4. 变量文本框不是合法 JSON → 不启动;
+//  5. onLaunch 抛错 → reportError 上报 + 按钮复位 + 对话框保持打开
+//     (该用例同时是 unhandled rejection 的守卫:vitest 会把
+//     "launch() 的 promise 拒绝没人接"判成 Error,门禁即红)。
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { RunDialog } from "./Designer";
@@ -118,8 +121,8 @@ describe("RunDialog 声明式入参", () => {
     fireEvent.click(launchBtn());
     // 请求在途:按钮禁用(本仓库未装 jest-dom,用 disabled 属性断言)
     await waitFor(() => expect(launchBtn().disabled).toBe(true));
-    // 失败后:按钮恢复(浏览器走查实测:此前 onLaunch 抛错无人接,
-    // 既无提示也留白 —— 错误上报是页面层 onLaunch 的职责)
+    // 失败后:按钮恢复(浏览器走查实测:此前 launch() 的 promise 拒绝
+    // 没人接 —— 既无提示又是 unhandled rejection;上报归属在 RunDialog)
     await waitFor(() => expect(launchBtn().disabled).toBe(false));
     // 对话框保持打开(用户可修正入参重试)
     expect(screen.getByText("运行工作流")).toBeTruthy();

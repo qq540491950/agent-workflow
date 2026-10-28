@@ -737,17 +737,10 @@ function DesignerInner() {
         onOpenChange={setRunOpen}
         wf={wf}
         onLaunch={async (t, variables) => {
-          // 错误必须在页面层接住并上报:RunDialog 只负责重置按钮状态,
-          // 不认识报告出口 —— 此前重构时把旧 run() 的 try/catch 弄丢,
-          // 启动失败(如必填入参缺失)静默无提示(浏览器走查实测抓到)。
-          try {
-            const exec = await api.runWorkflow(wf.id, t, variables);
-            toast.success("执行已启动");
-            setRunOpen(false);
-            nav(`/executions/${exec.id}`);
-          } catch (e) {
-            reportError(e, "运行工作流");
-          }
+          const exec = await api.runWorkflow(wf.id, t, variables);
+          toast.success("执行已启动");
+          setRunOpen(false);
+          nav(`/executions/${exec.id}`);
         }}
       />
     </div>
@@ -827,6 +820,11 @@ export function RunDialog({
     setLaunching(true);
     try {
       await onLaunch(task || "默认任务", variables);
+    } catch (e) {
+      // 错误上报在本组件内(它是"运行"这个动作的归属):此前重构把旧
+      // run() 的 try/catch 弄丢,onLaunch 抛错(如必填入参缺失的 400)
+      // 既无提示又成为 unhandled rejection(浏览器走查实测抓到)。
+      reportError(e, "运行工作流");
     } finally {
       setLaunching(false);
     }
