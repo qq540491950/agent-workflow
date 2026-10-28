@@ -55,9 +55,8 @@ export interface Workflow {
   variables?: Record<string, unknown>;
   /**
    * 声明式运行入参(后端 model.Workflow.Inputs;DSL 根级 inputs 段)。
-   *
-   * 与 permission 同类:设计器**不提供**编辑入口,但保存时必须原样带回 ——
-   * 保存路径会重建整个工作流对象,漏掉这个字段等于把入参声明静默抹掉。
+   * 设计器的工作流设置面板提供编辑器(InputsEditor);toWorkflowModel
+   * 的原样带回逻辑保留 —— 面板没触碰过的字段仍不得在保存时静默抹掉。
    */
   inputs?: InputDecl[];
   /**

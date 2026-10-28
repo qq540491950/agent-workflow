@@ -183,7 +183,8 @@ function sublabelOf(n: WFNode): string {
 //   - permission:工作流级权限覆盖。设计器**不提供**编辑入口(UI 不呈现),
 //     但服务端返回的工作流里带着它(YAML 导入 / 备份恢复都会写进去),
 //     漏掉就等于把用户没碰过的权限收紧抹掉。
-//   - inputs:声明式运行入参(迭代 36)。同上,设计器不提供编辑入口。
+//   - inputs:声明式运行入参(迭代 36)。工作流设置面板有编辑器
+//     (InputsEditor);面板未触碰的声明仍靠这里原样带回。
 //
 // 导出以便单测锁定该行为(见 designer.test.ts)。
 export function toWorkflowModel(
@@ -1247,6 +1248,141 @@ function EdgePropertyPanel({
   );
 }
 
+// InputsEditor 是声明式运行入参(inputs)的编辑器(迭代 36)。
+//
+// 两条互斥约束在 UI 层就保证(后端校验同口径,这里提前一步):
+//   - required 与 default 不能并存(勾必填 → 清默认值;填默认值 → 取消必填);
+//   - 切换 type → 清 default(旧默认值很可能与新类型不符)。
+// 名称为空保存时由后端报 INVALID_NODE(与画布校验同一出口)。
+export function InputsEditor({
+  inputs,
+  onChange,
+}: {
+  inputs: InputDecl[];
+  onChange: (inputs: InputDecl[]) => void;
+}) {
+  const update = (i: number, patch: Partial<InputDecl>) =>
+    onChange(inputs.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">
+          共 {inputs.length} 个;模板 {`{{variables.<名称>}}`} 引用
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          aria-label="添加入参"
+          onClick={() => onChange([...inputs, { name: "", type: "string" }])}
+        >
+          + 添加
+        </Button>
+      </div>
+      {inputs.length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          暂无声明。入参在启动时校验类型与必填,缺省项自动兜 default。
+        </p>
+      )}
+      {inputs.map((d, i) => (
+        <div key={i} className="space-y-1.5 rounded-md border p-2">
+          <div className="flex items-center gap-2">
+            <Input
+              aria-label={`入参 ${i + 1} 名称`}
+              placeholder="名称(如 repo)"
+              value={d.name}
+              onChange={(e) => update(i, { name: e.target.value.trim() })}
+              className="h-8 text-xs"
+            />
+            <Select
+              value={d.type}
+              onValueChange={(v) =>
+                // 切类型即清默认值:旧默认值很可能与新类型不符
+                update(i, { type: v, ...(d.default !== undefined ? { default: undefined } : {}) })
+              }
+            >
+              <SelectTrigger aria-label={`入参 ${i + 1} 类型`} className="h-8 w-28 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="string">string</SelectItem>
+                <SelectItem value="number">number</SelectItem>
+                <SelectItem value="boolean">boolean</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label={`删除入参 ${d.name || i + 1}`}
+              onClick={() => onChange(inputs.filter((_, idx) => idx !== i))}
+            >
+              删除
+            </Button>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                aria-label={`入参 ${i + 1} 必填`}
+                checked={d.required ?? false}
+                onChange={(e) =>
+                  // 必填与默认值互斥:勾必填 → 清默认值
+                  update(i, { required: e.target.checked, ...(e.target.checked ? { default: undefined } : {}) })
+                }
+              />
+              必填
+            </label>
+            {d.type === "boolean" ? (
+              <Select
+                value={d.default === undefined ? "none" : d.default === true ? "true" : "false"}
+                onValueChange={(v) =>
+                  update(i, { default: v === "none" ? undefined : v === "true", ...(v !== "none" ? { required: false } : {}) })
+                }
+              >
+                <SelectTrigger aria-label={`入参 ${i + 1} 默认值`} className="h-8 w-32 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">无默认值</SelectItem>
+                  <SelectItem value="true">默认 true</SelectItem>
+                  <SelectItem value="false">默认 false</SelectItem>
+                </SelectContent>
+              </Select>
+            ) : (
+              <Input
+                type={d.type === "number" ? "number" : "text"}
+                aria-label={`入参 ${i + 1} 默认值`}
+                placeholder="默认值(可空)"
+                value={d.default == null ? "" : String(d.default)}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  if (raw === "") {
+                    update(i, { default: undefined });
+                    return;
+                  }
+                  // number 用 Number 转换(浏览器会把非法输入清洗成空串,
+                  // 这里是兜底);string 原样
+                  update(i, {
+                    default: d.type === "number" ? (Number.isNaN(Number(raw)) ? undefined : Number(raw)) : raw,
+                    required: false,
+                  });
+                }}
+                className="h-8 text-xs"
+              />
+            )}
+            <Input
+              aria-label={`入参 ${i + 1} 描述`}
+              placeholder="描述(可选,运行对话框的占位符)"
+              value={d.description ?? ""}
+              onChange={(e) => update(i, { description: e.target.value })}
+              className="h-8 text-xs"
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function WorkflowPropertyPanel({
   wf,
   onChange,
@@ -1283,6 +1419,12 @@ function WorkflowPropertyPanel({
               // 输入过程中允许暂不合法的 JSON
             }
           }}
+        />
+      </Row>
+      <Row label="运行入参(inputs,启动时校验;运行对话框按此渲染字段)">
+        <InputsEditor
+          inputs={wf.inputs ?? []}
+          onChange={(inputs) => onChange({ inputs })}
         />
       </Row>
       <Row label="Max Iterations(循环上限)">
