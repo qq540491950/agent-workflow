@@ -3,6 +3,7 @@
 
 export {
     ExecutionState,
+    InputType,
     NodeState,
     NodeType
 } from "./models.js";
@@ -12,6 +13,7 @@ export type {
     Edge,
     Execution,
     ExecutionNode,
+    InputDecl,
     Node,
     Position,
     Workflow,

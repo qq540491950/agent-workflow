@@ -108,6 +108,18 @@ export interface WorkflowResult {
     "variables"?: { [_ in string]?: any } | null;
 
     /**
+     * Inputs 声明工作流的运行入参(DSL inputs 段,迭代 36)。
+     * 
+     * 与 Variables 的分工:Variables 是**静态**变量(DSL 里写死的值),
+     * Inputs 声明的是**每次运行可由调用方提供**的入参(类型/必填/默认值)。
+     * 入参在 Engine.Start 时落到 variables map(合并顺序:wf.Variables
+     * 为底 → input default → 请求 variables 覆盖),模板 {{variables.xxx}}
+     * 与条件 `variables.xxx == ...` 无需改动即可使用 —— 变量宇宙不变,
+     * 条件变量的可用集合仍只有 conditionenv 一份定义(约定 13)。
+     */
+    "inputs"?: model$0.InputDecl[] | null;
+
+    /**
      * Permission 工作流级权限覆盖(需求:DSL permissions 段)。
      */
     "permission"?: { [_ in string]?: any } | null;

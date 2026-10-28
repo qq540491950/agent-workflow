@@ -100,6 +100,32 @@ export enum ExecutionState {
 };
 
 /**
+ * InputDecl 声明工作流的一个运行入参(对标 Temporal/n8n/Windmill 的
+ * declared inputs:类型 + 必填 + 默认值,启动时校验、缺省时兜底)。
+ */
+export interface InputDecl {
+    "name": string;
+    "type": InputType;
+    "required"?: boolean;
+    "default"?: any;
+    "description"?: string;
+}
+
+/**
+ * InputType 声明工作流入参的取值类型。
+ */
+export enum InputType {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    InputTypeString = "string",
+    InputTypeNumber = "number",
+    InputTypeBoolean = "boolean",
+};
+
+/**
  * Node 是 Workflow 图中的一个节点。
  */
 export interface Node {
@@ -167,6 +193,18 @@ export interface Workflow {
     "variables"?: { [_ in string]?: any } | null;
 
     /**
+     * Inputs 声明工作流的运行入参(DSL inputs 段,迭代 36)。
+     * 
+     * 与 Variables 的分工:Variables 是**静态**变量(DSL 里写死的值),
+     * Inputs 声明的是**每次运行可由调用方提供**的入参(类型/必填/默认值)。
+     * 入参在 Engine.Start 时落到 variables map(合并顺序:wf.Variables
+     * 为底 → input default → 请求 variables 覆盖),模板 {{variables.xxx}}
+     * 与条件 `variables.xxx == ...` 无需改动即可使用 —— 变量宇宙不变,
+     * 条件变量的可用集合仍只有 conditionenv 一份定义(约定 13)。
+     */
+    "inputs"?: InputDecl[] | null;
+
+    /**
      * Permission 工作流级权限覆盖(需求:DSL permissions 段)。
      */
     "permission"?: { [_ in string]?: any } | null;
@@ -195,4 +233,14 @@ export interface WorkflowSettings {
      * TimeoutSeconds 单轮执行超时(秒);0 = 不限。
      */
     "timeout_seconds"?: number;
+
+    /**
+     * MaxConcurrent 同一工作流允许的最大并发执行数;0 = 不限(迭代 36)。
+     * 
+     * 达到上限后再启动 → 拒绝(WORKFLOW_BUSY),**不排队**:排队需要引入
+     * 新的执行状态(QUEUED)并波及状态机/CAS/前端徽标,fail fast 让调用方
+     * 立刻看到明确原因。计数口径是"非终态执行"(CREATED/RUNNING/
+     * WAITING_USER),终态(COMPLETED/FAILED/CANCELLED)不占额度。
+     */
+    "max_concurrent"?: number;
 }
