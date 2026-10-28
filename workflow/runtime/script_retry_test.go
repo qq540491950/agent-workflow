@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agentworkflow/event"
 	"agentworkflow/workflow/compiler"
@@ -207,4 +208,59 @@ func TestScriptNodeGateFailureNotRetried(t *testing.T) {
 	if n := retryEventCount(t, history, "sh"); n != 0 {
 		t.Fatalf("门禁拒绝不应产生 node.retry 事件,实际 %d", n)
 	}
+}
+
+// TestScriptNodeCancelDuringBackoff 退避等待期间取消 → 立即生效(不吞取消)。
+//
+// initial_backoff_seconds=30 让"第二次尝试前的等待"足够长:取消必然落在
+// 退避窗口内,时序确定 —— withNodeRetries 的 select 必须先于 30s 响应取消。
+func TestScriptNodeCancelDuringBackoff(t *testing.T) {
+	eng := startScriptEngine(t)
+	yml := `
+version: "1"
+workflow:
+  id: script-cancel-backoff
+  name: Script Cancel Backoff
+nodes:
+  - id: sh
+    type: script
+    command: exit 1
+    retry:
+      max_attempts: 3
+      backoff: fixed
+      initial_backoff_seconds: 30
+edges: []
+`
+	doc, err := dsl.Parse([]byte(yml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wf := doc.ToModel()
+	exec, err := eng.Start(context.Background(), wf, "t", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// 等节点真的跑起来(第一次尝试快速失败,随后进入 30s 退避 ——
+	// 重试期间节点状态保持 RUNNING,结果要等循环结束才落,所以等事件;
+	// startScriptEngine 已开总线历史)
+	deadline := time.Now().Add(3 * time.Second)
+	started := false
+	for time.Now().Before(deadline) && !started {
+		for _, ev := range eng.Bus.History() {
+			if ev.Type == "node.started" && ev.NodeID == "sh" {
+				started = true
+				break
+			}
+		}
+		if !started {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if !started {
+		t.Fatal("3s 内未等到 node.started(第一次尝试未执行)")
+	}
+	if err := eng.Cancel(context.Background(), exec.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	exec = waitForState(t, eng, exec.ID, model.ExecutionCancelled)
 }
