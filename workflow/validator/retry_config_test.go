@@ -181,3 +181,52 @@ func TestScriptRetrySubKeysSameAsAgent(t *testing.T) {
 		})
 	}
 }
+
+// TestRetryBackoffSecondsValidation 退避秒数(迭代 36,Temporal 对齐)的
+// 校验期口径:数值、非负、上界 RetryBackoffSecondsMax;max < initial 报错。
+func TestRetryBackoffSecondsValidation(t *testing.T) {
+	t.Run("字符串 initial 拒绝", func(t *testing.T) {
+		res := Validate(retryWorkflow(map[string]any{"initial_backoff_seconds": "3"}), nil, nil)
+		if res.Valid || !errHas(res, "INVALID_NODE") {
+			t.Fatalf("字符串必须报 INVALID_NODE,实际: %+v", res.Errors)
+		}
+	})
+	t.Run("负数 max 拒绝", func(t *testing.T) {
+		res := Validate(retryWorkflow(map[string]any{"max_backoff_seconds": -1}), nil, nil)
+		if res.Valid || !errHas(res, "INVALID_NODE") {
+			t.Fatalf("负数必须报 INVALID_NODE,实际: %+v", res.Errors)
+		}
+	})
+	t.Run("max < initial 拒绝", func(t *testing.T) {
+		res := Validate(retryWorkflow(map[string]any{
+			"initial_backoff_seconds": 10,
+			"max_backoff_seconds":     5,
+		}), nil, nil)
+		if res.Valid || !errHas(res, "INVALID_NODE") {
+			t.Fatalf("max<initial 必须报 INVALID_NODE,实际: %+v", res.Errors)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		val  any
+	}{
+		{"int", 3},
+		{"float64(JSON 往返)", 0.5},
+		{"json.Number", json.Number("1.5")},
+		{"0(立即重试)", 0},
+	} {
+		t.Run("合法形态 "+tc.name, func(t *testing.T) {
+			res := Validate(retryWorkflow(map[string]any{"initial_backoff_seconds": tc.val}), nil, nil)
+			if !res.Valid {
+				t.Errorf("initial = %#v 应放行,实际: %+v", tc.val, res.Errors)
+			}
+		})
+	}
+	t.Run("script 节点同口径", func(t *testing.T) {
+		wf := scriptRetryWorkflow(map[string]any{"initial_backoff_seconds": "3"})
+		res := Validate(wf, nil, nil)
+		if res.Valid || !errHas(res, "INVALID_NODE") {
+			t.Fatalf("script 的退避键同样要查,实际: %+v", res.Errors)
+		}
+	})
+}

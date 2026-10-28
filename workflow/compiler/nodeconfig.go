@@ -110,7 +110,7 @@ var nodeConfigSpecs = map[model.NodeType]NodeConfigSpec{
 		SubKeys: map[string][]string{
 			// prompt 有两种写法:纯字符串,或 {template: ...}(运行期读 map 里的 template)。
 			"prompt": {"template"},
-			"retry":  {"max_attempts", "backoff"},
+			"retry":  RetrySubKeys(),
 		},
 	},
 	model.NodeTypeSkill: {
@@ -135,7 +135,7 @@ var nodeConfigSpecs = map[model.NodeType]NodeConfigSpec{
 			// 由工作流作者判断 —— Temporal 的 RetryPolicy 同样把幂等性留给
 			// 活动实现者。子键类型校验与 agent 侧同源(validateRetrySubKeys
 			// 只认契约表里声明了 retry 的节点类型)。
-			"retry": {"max_attempts", "backoff"},
+			"retry": RetrySubKeys(),
 		},
 	},
 	model.NodeTypeGit: {
@@ -270,6 +270,17 @@ const (
 
 // MaxConcurrentRange 返回 max_concurrent 的取值范围(min, max)。
 func MaxConcurrentRange() (int, int) { return MaxConcurrentMin, MaxConcurrentMax }
+
+// RetryBackoffSecondsMax 是 retry 退避秒数(initial_backoff_seconds /
+// max_backoff_seconds)的上界(与 timeout_seconds 同界,防 time.Duration
+// 溢出;唯一来源,约定 #13:校验期与运行期都从这里取)。
+const RetryBackoffSecondsMax = 86400
+
+// RetrySubKeys 是 retry 配置的子键集合(agent 与 script 共用同一份语义,
+// 唯一来源,约定 #13:校验期的子键类型校验与运行期的读取都对着这份清单)。
+func RetrySubKeys() []string {
+	return []string{"max_attempts", "backoff", "initial_backoff_seconds", "max_backoff_seconds"}
+}
 
 // HasTimeoutSecondsKey 报告该节点类型的契约里是否声明了 timeout_seconds。
 //

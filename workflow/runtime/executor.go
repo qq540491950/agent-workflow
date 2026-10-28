@@ -773,7 +773,7 @@ func normalizeAgentStatus(s coreagent.AgentStatus) string {
 // 事件名统一为 node.retry(历史执行里的 agent.retry 行原样保留,审计页
 // 按原文展示)。
 func (e *Engine) withNodeRetries(ctx context.Context, env *compiler.RunEnv, node *model.Node, run func(ctx context.Context) compiler.NodeOutcome) compiler.NodeOutcome {
-	maxAttempts, backoff, rerr := retryPolicyOf(node)
+	policy, rerr := retryPolicyOf(node)
 	if rerr != nil {
 		return compiler.NodeOutcome{
 			State: model.NodeFailed,
@@ -781,9 +781,9 @@ func (e *Engine) withNodeRetries(ctx context.Context, env *compiler.RunEnv, node
 		}
 	}
 	var outcome compiler.NodeOutcome
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
 		if attempt > 1 {
-			delay := retryBackoffDelay(attempt, backoff)
+			delay := policy.delayFor(attempt)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -794,14 +794,49 @@ func (e *Engine) withNodeRetries(ctx context.Context, env *compiler.RunEnv, node
 		if outcome.State != model.NodeFailed || ctx.Err() != nil {
 			break
 		}
-		if attempt < maxAttempts {
+		if attempt < policy.MaxAttempts {
 			e.Bus.Emit(event.New("node.retry", env.Exec.ID, node.ID, map[string]any{
-				"node_type": string(node.Type), "attempt": attempt, "max_attempts": maxAttempts,
+				"node_type": string(node.Type), "attempt": attempt, "max_attempts": policy.MaxAttempts,
 				"error": outcome.Error,
 			}))
 		}
 	}
 	return outcome
+}
+
+// retryPolicy 是节点级重试策略的解析结果(可执行形态)。
+type retryPolicy struct {
+	MaxAttempts int
+	Backoff     string // fixed | exponential
+	// InitialSeconds 首次重试前的等待秒数。缺省 2(与历史行为一致:
+	// fixed 恒 2s;exponential 首次重试 2s 起步);0 = 立即重试。
+	InitialSeconds float64
+	// MaxSeconds 退避增长的上限秒数;<=0 = 不封顶。缺省:fixed 不封顶
+	// (无增长,封顶会违背用户显式设置的 initial),exponential 30
+	// (历史行为)。
+	MaxSeconds float64
+}
+
+// delayFor 计算第 attempt 次尝试失败后、下一次重试前的等待时长。
+//
+// fixed:恒为 initial;exponential:initial * 2^(attempt-2)(首次重试即
+// initial,此后翻倍),受 MaxSeconds 封顶。缺省值与历史行为逐位一致:
+// fixed 2s;exponential 2s/4s/8s…封顶 30s(历史公式 1s<<(attempt-1) 的
+// 可观察序列与此相同)。
+func (p retryPolicy) delayFor(attempt int) time.Duration {
+	delay := p.InitialSeconds
+	if p.Backoff == "exponential" {
+		delay *= math.Pow(2, float64(attempt-2))
+	}
+	if p.MaxSeconds > 0 && delay > p.MaxSeconds {
+		delay = p.MaxSeconds
+	}
+	if delay < 0 || math.IsNaN(delay) {
+		return 0
+	}
+	// attempt ≤ 10(钳制)且秒数 ≤ 86400 → 2^8*86400 ≈ 2.2e7s,换算成
+	// time.Duration 不会溢出。
+	return time.Duration(delay * float64(time.Second))
 }
 
 // retryPolicyOf 读取节点 retry 配置。
@@ -819,40 +854,98 @@ func (e *Engine) withNodeRetries(ctx context.Context, env *compiler.RunEnv, node
 //
 // 校验期同口径(workflow/validator/validator.go 的 retry 子键校验),
 // 两边结论一致(约定 13)。
-func retryPolicyOf(node *model.Node) (maxAttempts int, backoff string, err error) {
-	maxAttempts = 1
-	backoff = "fixed"
+func retryPolicyOf(node *model.Node) (retryPolicy, error) {
+	p := retryPolicy{MaxAttempts: 1, Backoff: "fixed"}
 	raw, ok := node.Config["retry"].(map[string]any)
 	if !ok {
 		// retry 存在但不是对象:同样不能静默按"不重试"处理。
 		if _, present := node.Config["retry"]; present {
-			return 0, "", fmt.Errorf("retry 必须是对象(如 {max_attempts: 3, backoff: fixed})")
+			return retryPolicy{}, fmt.Errorf("retry 必须是对象(如 {max_attempts: 3, backoff: fixed})")
 		}
-		return
+		return p, nil
 	}
 	if v, ok := raw["max_attempts"]; ok {
 		n, cerr := retryMaxAttempts(v)
 		if cerr != nil {
-			return 0, "", cerr
+			return retryPolicy{}, cerr
 		}
-		maxAttempts = n
+		p.MaxAttempts = n
 	}
 	if v, ok := raw["backoff"]; ok {
 		s, isStr := v.(string)
 		if !isStr {
-			return 0, "", fmt.Errorf("retry.backoff 必须是字符串(fixed 或 exponential),实际是 %T", v)
+			return retryPolicy{}, fmt.Errorf("retry.backoff 必须是字符串(fixed 或 exponential),实际是 %T", v)
 		}
 		if s != "" {
-			backoff = s
+			p.Backoff = s
 		}
 	}
-	if maxAttempts < 1 {
-		maxAttempts = 1
+	// 退避参数缺省(迭代 36):与历史行为一致 —— fixed 恒 2s 不封顶;
+	// exponential 首次重试 2s、翻倍增长、封顶 30s。
+	p.InitialSeconds = 2
+	p.MaxSeconds = 0
+	if p.Backoff == "exponential" {
+		p.MaxSeconds = 30
 	}
-	if maxAttempts > 10 {
-		maxAttempts = 10
+	if v, ok := raw["initial_backoff_seconds"]; ok {
+		f, cerr := retrySecondsOf(v, "initial_backoff_seconds")
+		if cerr != nil {
+			return retryPolicy{}, cerr
+		}
+		p.InitialSeconds = f
 	}
-	return
+	if v, ok := raw["max_backoff_seconds"]; ok {
+		f, cerr := retrySecondsOf(v, "max_backoff_seconds")
+		if cerr != nil {
+			return retryPolicy{}, cerr
+		}
+		p.MaxSeconds = f
+	}
+	if p.MaxAttempts < 1 {
+		p.MaxAttempts = 1
+	}
+	if p.MaxAttempts > 10 {
+		p.MaxAttempts = 10
+	}
+	return p, nil
+}
+
+// retrySecondsOf 解析 retry 的退避秒数(initial_backoff_seconds /
+// max_backoff_seconds)。
+//
+// 合法形态:数值(整数 / 浮点 / json.Number);字符串 / 布尔不合法
+// (fail closed,与 max_attempts 同口径)。必须非负;上界
+// compiler.RetryBackoffSecondsMax(与 timeout_seconds 同界,防
+// time.Duration 溢出)。
+func retrySecondsOf(v any, key string) (float64, error) {
+	var f float64
+	switch n := v.(type) {
+	case int:
+		f = float64(n)
+	case int64:
+		f = float64(n)
+	case uint64:
+		f = float64(n)
+	case float32:
+		f = float64(n)
+	case float64:
+		f = n
+	case json.Number:
+		parsed, err := n.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("retry.%s 必须是数字(实际是 %q)", key, n.String())
+		}
+		f = parsed
+	default:
+		return 0, fmt.Errorf("retry.%s 必须是数字(实际是 %T)", key, v)
+	}
+	if f < 0 || math.IsNaN(f) {
+		return 0, fmt.Errorf("retry.%s 必须是非负数(实际是 %v)", key, f)
+	}
+	if f > compiler.RetryBackoffSecondsMax {
+		f = compiler.RetryBackoffSecondsMax
+	}
+	return f, nil
 }
 
 // retryMaxAttempts 解析 retry.max_attempts,返回可判定的尝试次数。
@@ -924,19 +1017,6 @@ func retryAttemptsFromFloat(f float64) (int, error) {
 		return 10, nil
 	}
 	return int(f), nil
-}
-
-// retryBackoffDelay 计算第 attempt 次重试前的等待时间。
-func retryBackoffDelay(attempt int, backoff string) time.Duration {
-	if backoff == "exponential" {
-		// 1s, 2s, 4s... 上限 30s
-		d := time.Second << (attempt - 1)
-		if d > 30*time.Second {
-			d = 30 * time.Second
-		}
-		return d
-	}
-	return 2 * time.Second
 }
 
 // runSkillNode 执行 Skill 节点。

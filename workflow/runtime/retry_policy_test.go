@@ -43,7 +43,7 @@ func TestRetryPolicyRejectsUnparsableMaxAttempts(t *testing.T) {
 			node := &model.Node{ID: "n1", Config: map[string]any{
 				"retry": map[string]any{"max_attempts": tc.val},
 			}}
-			_, _, err := retryPolicyOf(node)
+			_, err := retryPolicyOf(node)
 			if err == nil {
 				t.Fatalf("max_attempts = %#v(%T): 必须报错(不得静默当成 0/1)", tc.val, tc.val)
 			}
@@ -60,7 +60,7 @@ func TestRetryPolicyRejectsUnparsableMaxAttempts(t *testing.T) {
 // (不重试)—— 用户写了 retry 却什么都没发生。
 func TestRetryPolicyRejectsNonObjectRetry(t *testing.T) {
 	node := &model.Node{ID: "n1", Config: map[string]any{"retry": "3"}}
-	if _, _, err := retryPolicyOf(node); err == nil {
+	if _, err := retryPolicyOf(node); err == nil {
 		t.Fatal("retry 不是对象时必须报错(不得静默按默认不重试)")
 	}
 }
@@ -84,15 +84,15 @@ func TestRetryPolicyAcceptsIntegerForms(t *testing.T) {
 			node := &model.Node{ID: "n1", Config: map[string]any{
 				"retry": map[string]any{"max_attempts": tc.val},
 			}}
-			got, backoff, err := retryPolicyOf(node)
+			p, err := retryPolicyOf(node)
 			if err != nil {
 				t.Fatalf("max_attempts = %#v: 不该报错,实际 %v", tc.val, err)
 			}
-			if got != tc.want {
-				t.Errorf("max_attempts = %d,want %d", got, tc.want)
+			if p.MaxAttempts != tc.want {
+				t.Errorf("max_attempts = %d,want %d", p.MaxAttempts, tc.want)
 			}
-			if backoff != "fixed" {
-				t.Errorf("backoff = %q,want fixed", backoff)
+			if p.Backoff != "fixed" {
+				t.Errorf("backoff = %q,want fixed", p.Backoff)
 			}
 		})
 	}
@@ -105,15 +105,15 @@ func TestRetryPolicyDefaults(t *testing.T) {
 		{"retry": map[string]any{}},
 	} {
 		node := &model.Node{ID: "n1", Config: cfg}
-		got, backoff, err := retryPolicyOf(node)
+		p, err := retryPolicyOf(node)
 		if err != nil {
 			t.Fatalf("config %v: 不该报错,实际 %v", cfg, err)
 		}
-		if got != 1 {
-			t.Errorf("config %v: max_attempts = %d,want 1", cfg, got)
+		if p.MaxAttempts != 1 {
+			t.Errorf("config %v: max_attempts = %d,want 1", cfg, p.MaxAttempts)
 		}
-		if backoff != "fixed" {
-			t.Errorf("config %v: backoff = %q,want fixed", cfg, backoff)
+		if p.Backoff != "fixed" {
+			t.Errorf("config %v: backoff = %q,want fixed", cfg, p.Backoff)
 		}
 	}
 }

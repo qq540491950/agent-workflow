@@ -573,6 +573,58 @@ func validateRetrySubKeys(n model.Node, spec compiler.NodeConfigSpec,
 				"节点 %q 的 retry.backoff 必须是字符串(fixed 或 exponential,实际是 %T)", n.ID, v)
 		}
 	}
+	// 退避秒数(迭代 36,Temporal 对齐):数值、非负、上界
+	// compiler.RetryBackoffSecondsMax(运行期同口径,retrySecondsOf)。
+	// max < initial 只在两者都显式声明时报 —— 缺省的 max(不限 / 30)不参与。
+	var initialSet, maxSet bool
+	var initialVal, maxVal float64
+	if v, ok := m["initial_backoff_seconds"]; ok {
+		f, num := nonNegativeNumber(v)
+		if !num {
+			addErr("INVALID_NODE", n.ID,
+				"节点 %q 的 retry.initial_backoff_seconds 必须是非负数(实际是 %T)", n.ID, v)
+		} else {
+			initialSet, initialVal = true, f
+		}
+	}
+	if v, ok := m["max_backoff_seconds"]; ok {
+		f, num := nonNegativeNumber(v)
+		if !num {
+			addErr("INVALID_NODE", n.ID,
+				"节点 %q 的 retry.max_backoff_seconds 必须是非负数(实际是 %T)", n.ID, v)
+		} else {
+			maxSet, maxVal = true, f
+		}
+	}
+	if initialSet && maxSet && maxVal < initialVal {
+		addErr("INVALID_NODE", n.ID,
+			"节点 %q 的 retry.max_backoff_seconds(%v)不能小于 initial_backoff_seconds(%v)(退避只会被压回下限,两者至少要相等)", n.ID, maxVal, initialVal)
+	}
+}
+
+// nonNegativeNumber 判断值是否为合法的非负数形态(整数 int 家族 /
+// float / json.Number;字符串与布尔不合法 —— 与运行期 retrySecondsOf
+// 的接受集合一致,约定 13)。返回(数值, 是否合法)。
+func nonNegativeNumber(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), n >= 0
+	case int64:
+		return float64(n), n >= 0
+	case uint64:
+		return float64(n), true
+	case float32:
+		return float64(n), n >= 0
+	case float64:
+		return n, n >= 0
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return f, f >= 0
+	}
+	return 0, false
 }
 
 // validateTimeoutSeconds 校验 timeout_seconds 的取值范围(约定 13)。

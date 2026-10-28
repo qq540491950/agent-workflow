@@ -67,15 +67,15 @@ func TestRetryPolicyAcceptsUint64(t *testing.T) {
 	node := &model.Node{ID: "n1", Config: map[string]any{
 		"retry": map[string]any{"max_attempts": uint64(3), "backoff": "exponential"},
 	}}
-	max, backoff, err := retryPolicyOf(node)
+	p, err := retryPolicyOf(node)
 	if err != nil {
 		t.Fatalf("retryPolicyOf: %v", err)
 	}
-	if max != 3 {
-		t.Errorf("max_attempts = %d,want 3(uint64 未被识别)", max)
+	if p.MaxAttempts != 3 {
+		t.Errorf("max_attempts = %d,want 3(uint64 未被识别)", p.MaxAttempts)
 	}
-	if backoff != "exponential" {
-		t.Errorf("backoff = %q,want exponential", backoff)
+	if p.Backoff != "exponential" {
+		t.Errorf("backoff = %q,want exponential", p.Backoff)
 	}
 }
 
