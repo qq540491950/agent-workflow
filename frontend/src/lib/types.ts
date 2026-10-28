@@ -110,6 +110,11 @@ export interface Execution {
   workflow_name: string;
   state: ExecutionState;
   task: string;
+  /**
+   * 执行变量(DSL variables 与声明式入参 inputs 合并后的生效值,已脱敏)。
+   * 监控页据此展示"这次运行带了什么入参"。
+   */
+  variables?: Record<string, unknown>;
   current_node_id?: string;
   iterations?: Record<string, number>;
   created_at: string;

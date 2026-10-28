@@ -156,6 +156,9 @@ export default function EventsAudit() {
                   e.type.includes("approved") && "text-green-400",
                   e.type.includes("rejected") && "text-amber-400",
                   e.type.includes("input_required") && "text-amber-300",
+                  // 重试是"正在自愈"的信号(迭代 36):给个青色让它一眼可辨,
+                  // 又不至于像 failed 那样报警
+                  e.type.endsWith(".retry") && "text-cyan-300",
                   e.type.startsWith("workflow.") && "text-violet-300",
                 )}
               >

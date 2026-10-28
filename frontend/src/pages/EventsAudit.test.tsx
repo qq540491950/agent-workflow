@@ -158,3 +158,36 @@ describe("EventsAudit 请求竞态", () => {
     expect(m.allEvents).toHaveBeenLastCalledWith("?type=node.x&limit=300");
   });
 });
+
+// 迭代 36:node.retry(节点级重试)在审计流里有专属着色("正在自愈"的信号,
+// 与 failed 的红、workflow. 的紫区分开)。
+describe("EventsAudit 重试事件着色", () => {
+  function row(seq: number, type: string) {
+    return {
+      seq,
+      execution_id: "ex-1",
+      node_id: "n1",
+      type,
+      data: {},
+      created_at: "2026-01-01T00:00:00Z",
+    };
+  }
+
+  it("node.retry 与 agent.retry 都带 retry 着色类", async () => {
+    m.allEvents.mockResolvedValue([row(1, "node.retry"), row(2, "agent.retry"), row(3, "node.failed")]);
+    renderAudit();
+    await settle();
+    const spans = Array.from(document.querySelectorAll("span")).filter(
+      (s) => s.textContent === "node.retry" || s.textContent === "agent.retry",
+    );
+    expect(spans.length).toBe(2);
+    for (const sp of spans) {
+      expect(sp.className).toContain("text-cyan-300");
+    }
+    const failed = Array.from(document.querySelectorAll("span")).find(
+      (s) => s.textContent === "node.failed",
+    );
+    expect(failed?.className).not.toContain("text-cyan-300");
+    expect(failed?.className).toContain("text-red-400");
+  });
+});

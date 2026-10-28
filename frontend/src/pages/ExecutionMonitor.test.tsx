@@ -523,3 +523,27 @@ describe("ExecutionMonitor 加载失败态", () => {
     expect(screen.queryByText(/执行不存在,或已被删除/)).toBeNull();
   });
 });
+
+// 迭代 36:执行变量(声明式入参 + DSL variables 合并后的生效值)在监控页
+// 头部可见 —— 藏进 State JSON 等于看不见;无变量时不渲染该行。
+describe("执行变量展示", () => {
+  it("有变量 → 头部渲染 k=v 徽标(布尔/数字用 JSON 形态)", async () => {
+    m.getExecution.mockResolvedValue(exec({
+      state: "COMPLETED",
+      variables: { repo: "/tmp/x", limit: 3, dry_run: true },
+    }));
+    renderMonitor();
+    await settle();
+    expect(screen.getByText(/变量:/)).toBeTruthy();
+    expect(screen.getByText(/repo=\/tmp\/x/)).toBeTruthy();
+    expect(screen.getByText(/limit=3/)).toBeTruthy();
+    expect(screen.getByText(/dry_run=true/)).toBeTruthy();
+  });
+
+  it("无变量(或未带该字段)→ 不渲染变量行", async () => {
+    m.getExecution.mockResolvedValue(exec({ state: "COMPLETED" }));
+    renderMonitor();
+    await settle();
+    expect(screen.queryByText(/变量:/)).toBeNull();
+  });
+});

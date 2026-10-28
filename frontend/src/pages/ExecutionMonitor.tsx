@@ -365,6 +365,19 @@ export default function ExecutionMonitor() {
               </span>
             )}
           </p>
+          {/* 执行变量(声明式入参 + DSL variables 合并后的生效值):迭代 36 起
+              inputs 的值只有这里能一眼看到,藏进 State JSON 等于看不见。
+              值以等宽短徽标展示,过长截断 —— 详情在导出与 State 标签。 */}
+          {Object.keys(exec.variables ?? {}).length > 0 && (
+            <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+              <span>变量:</span>
+              {Object.entries(exec.variables ?? {}).map(([k, v]) => (
+                <span key={k} className="rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px]">
+                  {k}={typeof v === "string" ? v : JSON.stringify(v)}
+                </span>
+              ))}
+            </p>
+          )}
         </div>
         <div className="ml-auto flex gap-2">
           <a
