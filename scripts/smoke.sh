@@ -1,6 +1,7 @@
 #!/bin/bash
 # 端到端冒烟测试:启动 server 模式 → 种子检查 → limit 截断头 → 校验 → 运行闭环
 #                 → 循环保护 → HITL 恢复 → 导出 → 负路径 → 失败重试/跳过
+#                 → 声明式入参 inputs → 每工作流并发上限
 # 用法: ./scripts/smoke.sh
 #
 # ---- 可靠性要点(本轮加固)--------------------------------------------
@@ -189,4 +190,61 @@ done
 [ "$STATE3" = "COMPLETED" ] || fail "跳过重试后 state=$STATE3"
 curl -sf -X POST "$BASE/api/skills/submit/enable" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
 
-echo "✅ SMOKE OK(10 项全部通过)"
+# 10. 声明式入参 inputs:必填缺失 → 400 INPUT_REQUIRED;类型不符 → 400
+#     INPUT_TYPE_MISMATCH;提供后 → 200 且缺省项兜 default(启动校验经真实
+#     server 的整条链路,与 api 层 mock 测试互补)。
+IN_WF='{"id":"smoke-inputs","name":"Smoke Inputs",
+	"inputs":[
+		{"name":"repo","type":"string","required":true,"description":"目标仓库"},
+		{"name":"limit","type":"number","default":3}
+	],
+	"nodes":[{"id":"a","name":"A","type":"agent","config":{"agent":"mock-claude","mode":"plan"}}],
+	"edges":[],"enabled":true}'
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/workflows" -H 'Content-Type: application/json' -d "$IN_WF")
+[ "$code" = "200" ] || fail "smoke-inputs 种子 → $code, want 200"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/workflows/smoke-inputs/run" -H 'Content-Type: application/json' -d '{"variables":{"limit":1}}')
+[ "$code" = "400" ] || fail "必填缺失 run → $code, want 400"
+curl -s -X POST "$BASE/api/workflows/smoke-inputs/run" -H 'Content-Type: application/json' -d '{"variables":{"limit":1}}' | grep -q 'INPUT_REQUIRED' || fail "缺 INPUT_REQUIRED"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/workflows/smoke-inputs/run" -H 'Content-Type: application/json' -d '{"variables":{"repo":"x","limit":"3"}}')
+[ "$code" = "400" ] || fail "类型不符 run → $code, want 400"
+curl -s -X POST "$BASE/api/workflows/smoke-inputs/run" -H 'Content-Type: application/json' -d '{"variables":{"repo":"x","limit":"3"}}' | grep -q 'INPUT_TYPE_MISMATCH' || fail "缺 INPUT_TYPE_MISMATCH"
+resp=$(curl -sf -X POST "$BASE/api/workflows/smoke-inputs/run" -H 'Content-Type: application/json' -d '{"variables":{"repo":"smoke-repo"}}')
+echo "$resp" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["variables"]["repo"]=="smoke-repo" and d["variables"]["limit"]==3, d["variables"]' || fail "缺省项未兜 default"
+SMOKE_INPUT_EXEC=$(echo "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+for i in $(seq 1 60); do
+	state=$(curl -sf "$BASE/api/executions/$SMOKE_INPUT_EXEC" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+	case "$state" in COMPLETED|FAILED|CANCELLED) break;; esac
+	sleep 0.2
+done
+[ "$state" = "COMPLETED" ] || fail "inputs 执行 state=$state"
+echo "OK: 声明式入参(必填 400 / 类型 400 / 缺省兜底 / 执行 COMPLETED)"
+
+# 11. 每工作流并发上限:max_concurrent=1 + human 节点占住 WAITING_USER →
+#     第二次启动 409 WORKFLOW_BUSY(请求合法但现在不能跑)。
+MC_WF='{"id":"smoke-mc","name":"Smoke MC","settings":{"max_concurrent":1},
+	"nodes":[{"id":"gate","name":"G","type":"human","config":{"prompt":"等待审批"}}],
+	"edges":[],"enabled":true}'
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/workflows" -H 'Content-Type: application/json' -d "$MC_WF")
+[ "$code" = "200" ] || fail "smoke-mc 种子 → $code, want 200"
+MC_EXEC=$(curl -sf -X POST "$BASE/api/workflows/smoke-mc/run" -H 'Content-Type: application/json' -d '{"task":"first"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+for i in $(seq 1 60); do
+	state=$(curl -sf "$BASE/api/executions/$MC_EXEC" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+	[ "$state" = "WAITING_USER" ] && break
+	sleep 0.2
+done
+[ "$state" = "WAITING_USER" ] || fail "首个执行未到 WAITING_USER state=$state"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/workflows/smoke-mc/run" -H 'Content-Type: application/json' -d '{"task":"second"}')
+[ "$code" = "409" ] || fail "并发上限 run → $code, want 409"
+curl -s -X POST "$BASE/api/workflows/smoke-mc/run" -H 'Content-Type: application/json' -d '{"task":"second"}' | grep -q 'WORKFLOW_BUSY' || fail "缺 WORKFLOW_BUSY"
+# 释放额度(取消占位执行)→ 再次启动成功
+curl -sf -X POST "$BASE/api/executions/$MC_EXEC/cancel" >/dev/null
+for i in $(seq 1 60); do
+	state=$(curl -sf "$BASE/api/executions/$MC_EXEC" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+	case "$state" in CANCELLED|FAILED|COMPLETED) break;; esac
+	sleep 0.2
+done
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/workflows/smoke-mc/run" -H 'Content-Type: application/json' -d '{"task":"third"}')
+[ "$code" = "200" ] || fail "释放后 run → $code, want 200"
+echo "OK: 每工作流并发上限(占位 409 / 释放后 200)"
+
+echo "✅ SMOKE OK(12 项全部通过)"

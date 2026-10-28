@@ -24,7 +24,7 @@ npx vitest run       # 单测(含 jsdom 组件测试)
 # 一键完整门禁(vet + race + 前端 + 双冒烟)
 ./scripts/verify.sh
 # 或单独跑端到端冒烟(起真实 server 进程)
-./scripts/smoke.sh       # REST+SSE+HITL+导出+负路径+重试跳过,9 项
+./scripts/smoke.sh       # REST+SSE+HITL+导出+负路径+重试跳过+入参校验+并发上限,12 项
 ./scripts/smoke_sse.sh   # SSE 实时流,6 项(含断连释放)
 
 # 桌面打包(wails3 CLI 需在 ~/go/bin)
