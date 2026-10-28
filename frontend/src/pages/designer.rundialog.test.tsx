@@ -107,6 +107,24 @@ describe("RunDialog 声明式入参", () => {
     expect(onLaunch.mock.calls[0][1]).toEqual({ staticVar: "s", dry_run: false });
   });
 
+  it("onLaunch 失败 → 按钮恢复可点(错误上报在页面层,对话框不卡死)", async () => {
+    const onLaunch = vi.fn().mockRejectedValue(new Error("INPUT_REQUIRED"));
+    const onOpenChange = vi.fn();
+    render(
+      <RunDialog open onOpenChange={onOpenChange} wf={wfWithInputs} onLaunch={onLaunch} />,
+    );
+    fireEvent.change(screen.getByLabelText("入参 repo"), { target: { value: "/tmp/x" } });
+    const launchBtn = () => screen.getByText("启动执行") as HTMLButtonElement;
+    fireEvent.click(launchBtn());
+    // 请求在途:按钮禁用(本仓库未装 jest-dom,用 disabled 属性断言)
+    await waitFor(() => expect(launchBtn().disabled).toBe(true));
+    // 失败后:按钮恢复(浏览器走查实测:此前 onLaunch 抛错无人接,
+    // 既无提示也留白 —— 错误上报是页面层 onLaunch 的职责)
+    await waitFor(() => expect(launchBtn().disabled).toBe(false));
+    // 对话框保持打开(用户可修正入参重试)
+    expect(screen.getByText("运行工作流")).toBeTruthy();
+  });
+
   it("变量文本框不是合法 JSON → 不启动", () => {
     const { onLaunch } = renderDialog();
     fireEvent.change(screen.getByPlaceholderText(/未声明入参的变量/), { target: { value: "{bad" } });

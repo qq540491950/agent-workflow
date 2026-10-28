@@ -737,10 +737,17 @@ function DesignerInner() {
         onOpenChange={setRunOpen}
         wf={wf}
         onLaunch={async (t, variables) => {
-          const exec = await api.runWorkflow(wf.id, t, variables);
-          toast.success("执行已启动");
-          setRunOpen(false);
-          nav(`/executions/${exec.id}`);
+          // 错误必须在页面层接住并上报:RunDialog 只负责重置按钮状态,
+          // 不认识报告出口 —— 此前重构时把旧 run() 的 try/catch 弄丢,
+          // 启动失败(如必填入参缺失)静默无提示(浏览器走查实测抓到)。
+          try {
+            const exec = await api.runWorkflow(wf.id, t, variables);
+            toast.success("执行已启动");
+            setRunOpen(false);
+            nav(`/executions/${exec.id}`);
+          } catch (e) {
+            reportError(e, "运行工作流");
+          }
         }}
       />
     </div>
