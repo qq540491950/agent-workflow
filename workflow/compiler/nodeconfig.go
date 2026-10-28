@@ -259,6 +259,18 @@ const (
 // TimeoutSecondsRange 返回 timeout_seconds 的取值范围(min, max)。
 func TimeoutSecondsRange() (int, int) { return TimeoutSecondsMin, TimeoutSecondsMax }
 
+// settings.max_concurrent 的取值范围(唯一来源,约定 #13:校验期与运行期
+// 同源)。0 = 不限;上界 100 对桌面/单机场景绰绰有余,挡住"手滑多打一个 0"。
+const (
+	// MaxConcurrentMin 是 max_concurrent 的最小值(0 = 不限)。
+	MaxConcurrentMin = 0
+	// MaxConcurrentMax 是 max_concurrent 的最大值。
+	MaxConcurrentMax = 100
+)
+
+// MaxConcurrentRange 返回 max_concurrent 的取值范围(min, max)。
+func MaxConcurrentRange() (int, int) { return MaxConcurrentMin, MaxConcurrentMax }
+
 // HasTimeoutSecondsKey 报告该节点类型的契约里是否声明了 timeout_seconds。
 //
 // 唯一来源:nodeConfigSpecs(约定 #13)。校验期只对**声明了这个键**的节点

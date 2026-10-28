@@ -80,6 +80,10 @@ type Engine struct {
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+	// startMu 串行化"每工作流并发上限"的检查-插入(settings.max_concurrent):
+	// 查数与首次落库是两条语句,不串行的话并发 Start 会同时通过检查。
+	// 只在设置了上限的启动路径上加锁,不设限的路径零开销。
+	startMu sync.Mutex
 	// cancelProbe 是**测试接缝**:Cancel 在"读到库里状态"之后、"动手取消"
 	// 之前调用它(默认 nil = 不调用,生产路径零开销)。
 	//
@@ -359,6 +363,23 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 	}
 	for k, v := range variables {
 		vars[k] = v
+	}
+	// 每工作流并发上限(fail fast,迭代 36):检查与首次插入在同一临界区,
+	// 两个并发 Start 不会同时通过。达到上限 → WORKFLOW_BUSY,**不排队**
+	// (排队需要新执行状态并波及状态机/CAS/前端徽标,fail fast 让调用方
+	// 立刻看到原因)。放在 Agent 重置之前:启动失败不得产生副作用。
+	if wf.Settings.MaxConcurrent > 0 {
+		e.startMu.Lock()
+		defer e.startMu.Unlock()
+		n, err := e.Repo.CountActiveExecutions(wf.ID)
+		if err != nil {
+			return nil, err
+		}
+		if n >= wf.Settings.MaxConcurrent {
+			return nil, model.NewError(model.KindStateError, "WORKFLOW_BUSY",
+				fmt.Sprintf("工作流并发已达上限 %d(当前 %d 个未结束的执行),请等待已有执行结束或调大 settings.max_concurrent",
+					wf.Settings.MaxConcurrent, n))
+		}
 	}
 	execID, err := newID("exec")
 	if err != nil {

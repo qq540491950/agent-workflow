@@ -93,6 +93,14 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 			lv, strings.Join(compiler.LoopLimitStrategies(), "|"))
 	}
 
+	// settings.max_concurrent 的取值范围(唯一来源:compiler.MaxConcurrentRange,
+	// 约定 13)。0 = 不限;负数在运行期与"不限"同义,但那几乎必然是手滑
+	// —— 想限 3 个却写了 -3 会静默变成不限,校验期必须报出来。
+	if lo, hi := compiler.MaxConcurrentRange(); wf.Settings.MaxConcurrent < lo || wf.Settings.MaxConcurrent > hi {
+		addErr("INVALID_MAX_CONCURRENT", "", "settings.max_concurrent 必须在 %d..%d(0 = 不限),实际是 %d",
+			lo, hi, wf.Settings.MaxConcurrent)
+	}
+
 	// inputs 段(声明式运行入参)的结构校验(迭代 36)。
 	//
 	// 这些问题必须在保存时拦住而不是等到启动:

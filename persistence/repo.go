@@ -544,6 +544,23 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 	return &e, nil
 }
 
+// CountActiveExecutions 统计某工作流处于**非终态**的执行数
+// (CREATED / RUNNING / WAITING_USER —— 终态 COMPLETED/FAILED/CANCELLED
+// 不占额度;遗留的 PAUSED 行已在读出口归一为 CANCELLED,不在此列)。
+//
+// 唯一调用方是 Engine.Start 的每工作流并发上限(settings.max_concurrent):
+// "查数 → 插入执行行"这两个动作在引擎侧用互斥量串行,保证并发 Start
+// 不会同时通过检查(库本身只有一条写连接,但 check-then-insert 是两条
+// 语句,必须由调用方保证原子性)。
+func (d *DB) CountActiveExecutions(workflowID string) (int, error) {
+	var n int
+	err := d.sql.QueryRow(
+		`SELECT COUNT(1) FROM executions WHERE workflow_id=? AND state IN ('CREATED','RUNNING','WAITING_USER')`,
+		workflowID,
+	).Scan(&n)
+	return n, wrap(err)
+}
+
 // ListExecutions 返回执行列表(可按 workflow 过滤,limit<=0 表示全部)。
 func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, error) {
 	q := `SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json FROM executions`

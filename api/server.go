@@ -599,6 +599,11 @@ func statusForError(se *model.Error) int {
 		return http.StatusRequestEntityTooLarge
 	case "DB_ERROR", "INTERNAL":
 		return http.StatusInternalServerError
+	case "WORKFLOW_BUSY":
+		// 每工作流并发上限(settings.max_concurrent):请求本身合法,
+		// 只是"现在不能跑" —— 409 Conflict 语义正确(与既有的
+		// INVALID_TRANSITION=400 无关,那是历史契约,不动)。
+		return http.StatusConflict
 	}
 	switch se.Kind {
 	case model.KindPermissionError:

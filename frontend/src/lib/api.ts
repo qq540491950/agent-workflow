@@ -224,6 +224,7 @@ const CODE_HINTS: Record<string, string> = {
   SUBWORKFLOW_CANCELLED: "父执行取消,子工作流已中止",
   INPUT_REQUIRED: "有必填的运行入参没有提供(在工作流声明的 inputs 里)",
   INPUT_TYPE_MISMATCH: "运行入参的类型与声明不符(检查 variables 里的值)",
+  WORKFLOW_BUSY: "工作流并发已达上限(settings.max_concurrent),等已有执行结束再试",
   // ---- Agent / 子进程 ----
   AGENT_CANCELLED: "Agent 执行被取消",
   AGENT_CONFIG_CORRUPT: "Agent 配置已损坏,无法解析",

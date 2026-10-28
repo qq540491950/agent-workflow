@@ -51,6 +51,8 @@ type Settings struct {
 	OnLoopLimit   string `yaml:"on_loop_limit" json:"on_loop_limit,omitempty"`
 	// TimeoutSeconds 单轮执行超时(秒);0 = 不限。
 	TimeoutSeconds int `yaml:"timeout_seconds" json:"timeout_seconds,omitempty"`
+	// MaxConcurrent 同一工作流的最大并发执行数;0 = 不限(迭代 36)。
+	MaxConcurrent int `yaml:"max_concurrent" json:"max_concurrent,omitempty"`
 }
 
 // Node 是 DSL 中的节点定义。

@@ -73,6 +73,7 @@ func (d *Document) ToModel() *model.Workflow {
 			MaxIterations:  d.Settings.MaxIterations,
 			OnLoopLimit:    d.Settings.OnLoopLimit,
 			TimeoutSeconds: d.Settings.TimeoutSeconds,
+			MaxConcurrent:  d.Settings.MaxConcurrent,
 		},
 		Nodes: make([]model.Node, 0, len(d.Nodes)),
 		Edges: make([]model.Edge, 0, len(d.Edges)),
@@ -179,6 +180,7 @@ func FromModel(wf *model.Workflow) *Document {
 			MaxIterations:  wf.Settings.MaxIterations,
 			OnLoopLimit:    wf.Settings.OnLoopLimit,
 			TimeoutSeconds: wf.Settings.TimeoutSeconds,
+			MaxConcurrent:  wf.Settings.MaxConcurrent,
 		},
 	}
 	for _, n := range wf.Nodes {

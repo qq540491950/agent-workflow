@@ -228,6 +228,13 @@ type WorkflowSettings struct {
 	OnLoopLimit string `json:"on_loop_limit,omitempty" yaml:"on_loop_limit,omitempty"`
 	// TimeoutSeconds 单轮执行超时(秒);0 = 不限。
 	TimeoutSeconds int `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	// MaxConcurrent 同一工作流允许的最大并发执行数;0 = 不限(迭代 36)。
+	//
+	// 达到上限后再启动 → 拒绝(WORKFLOW_BUSY),**不排队**:排队需要引入
+	// 新的执行状态(QUEUED)并波及状态机/CAS/前端徽标,fail fast 让调用方
+	// 立刻看到明确原因。计数口径是"非终态执行"(CREATED/RUNNING/
+	// WAITING_USER),终态(COMPLETED/FAILED/CANCELLED)不占额度。
+	MaxConcurrent int `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty"`
 }
 
 // Workflow 是用户可配置的编排定义。
