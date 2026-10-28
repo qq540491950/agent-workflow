@@ -275,8 +275,6 @@ func (e *Engine) Validate(wf *model.Workflow) *validator.Result {
 	return res
 }
 
-// Start 创建并异步执行一个 Execution。
-// 返回创建好的 Execution(状态 RUNNING),执行在后台进行。
 // applyInputs 校验声明式入参并把默认值写进 vars(请求传入值由调用方随后
 // 覆盖 —— defaults 先落、显式传入最后落,优先级才正确)。
 //
@@ -311,6 +309,8 @@ func applyInputs(wf *model.Workflow, vars, provided map[string]any) error {
 	return nil
 }
 
+// Start 创建并异步执行一个 Execution。
+// 返回创建好的 Execution(状态 RUNNING),执行在后台进行。
 func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, variables map[string]any) (*model.Execution, error) {
 	if res := e.Validate(wf); !res.Valid {
 		// 错误消息里带上**具体**的校验原因:此前只有"工作流校验失败",
