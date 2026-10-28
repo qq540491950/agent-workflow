@@ -93,6 +93,17 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 			lv, strings.Join(compiler.LoopLimitStrategies(), "|"))
 	}
 
+	// inputs 段(声明式运行入参)的结构校验(迭代 36)。
+	//
+	// 这些问题必须在保存时拦住而不是等到启动:
+	//   - 类型拼错(type: str)→ 运行期把该入参当未知类型,任何传入值都
+	//     不匹配 → 必填入参永远过不了启动校验;
+	//   - required 与 default 同时声明 → 语义矛盾(default 已让参数可缺省);
+	//   - default 类型与声明不符 → "默认值"自己都过不了类型检查;
+	//   - 与 variables 键 / 条件顶层变量同名 → 用户以为条件里的 status 是
+	//     自己声明的入参,实际读到的是节点状态(静默走错分支,约定 14 同族)。
+	validateInputs(wf, addErr)
+
 	// 落库前的数值必须是**有限**的(第二轮 P1-1)。
 	//
 	// 实测缺陷:导入一份带 `.nan` 的 DSL(goccy/go-yaml 按 YAML 1.1 合法
@@ -456,6 +467,59 @@ func validateNodeConfig(n model.Node, agents AgentResolver, skills SkillResolver
 			addErr("INVALID_GIT_OPERATION", n.ID, "git 节点 %q 的 operation %q 非法(允许: %s)", n.ID, op, strings.Join(compiler.GitOperations(), "|"))
 		}
 	}
+}
+
+// validateInputs 校验 inputs 段(声明式运行入参)。
+//
+// 类型合法性与值匹配的唯一来源是 model(InputTypes / InputValueMatchesType,
+// 约定 13:校验期查 default、运行期查启动传入值,走同一个函数)。
+// 条件顶层变量名的唯一来源是 compiler.ConditionEnvKeys(同上)。
+//
+// 错误码复用 INVALID_NODE(前端 CODE_HINTS 已有该码,不必同步前端)。
+func validateInputs(wf *model.Workflow, addErr func(code, node, format string, args ...any)) {
+	if len(wf.Inputs) == 0 {
+		return
+	}
+	seen := make(map[string]bool, len(wf.Inputs))
+	condNames := compiler.ConditionEnvKeys()
+	for _, in := range wf.Inputs {
+		if in.Name == "" {
+			addErr("INVALID_NODE", "", "inputs 条目缺少 name")
+			continue
+		}
+		if seen[in.Name] {
+			addErr("INVALID_NODE", "", "inputs 条目 %q 重复声明", in.Name)
+			continue
+		}
+		seen[in.Name] = true
+		if !model.IsValidInputType(in.Type) {
+			addErr("INVALID_NODE", "", "inputs 条目 %q 的 type %q 非法(允许: %s)",
+				in.Name, in.Type, inputTypeNames())
+			continue
+		}
+		if in.Required && in.Default != nil {
+			addErr("INVALID_NODE", "", "inputs 条目 %q 同时声明 required 与 default(required 意味着必须提供,default 意味着可缺省)", in.Name)
+		}
+		if in.Default != nil && !model.InputValueMatchesType(in, in.Default) {
+			addErr("INVALID_NODE", "", "inputs 条目 %q 的 default 类型(%s)与声明的 type %q 不符",
+				in.Name, model.InputTypeNameOf(in.Default), in.Type)
+		}
+		if _, conflict := wf.Variables[in.Name]; conflict {
+			addErr("INVALID_NODE", "", "inputs 条目 %q 与 variables 键 %q 同名(入参缺省值会覆盖静态变量,语义不清)", in.Name, in.Name)
+		}
+		if slices.Contains(condNames, in.Name) {
+			addErr("INVALID_NODE", "", "inputs 条目 %q 与条件表达式顶层变量同名(条件里读到的永远是运行时状态,不是这个入参)", in.Name)
+		}
+	}
+}
+
+// inputTypeNames 返回类型取值域的可读清单(错误信息用)。
+func inputTypeNames() string {
+	names := make([]string, 0, 3)
+	for _, t := range model.InputTypes() {
+		names = append(names, string(t))
+	}
+	return strings.Join(names, "|")
 }
 
 // validateRetrySubKeys 校验 retry 的子键类型(约定 13:校验期与运行期同源)。

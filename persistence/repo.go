@@ -50,6 +50,16 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 	if err != nil {
 		return wrap(err)
 	}
+	// inputs_json 用 '[]' 而不是 null:decodeJSONColumn 对 'null' 会把切片
+	// 留成 nil,读出口难以区分"没声明"与"列损坏"。
+	inputs := wf.Inputs
+	if inputs == nil {
+		inputs = []model.InputDecl{}
+	}
+	inputsJSON, err := marshalJSON(inputs)
+	if err != nil {
+		return wrap(err)
+	}
 	enabled := 0
 	if wf.Enabled {
 		enabled = 1
@@ -82,10 +92,10 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 		wf.Version = 1
 		wf.CreatedAt = now
 		_, err = tx.Exec(`INSERT INTO workflows
-			(id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			(id,name,description,version,enabled,variables_json,inputs_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			wf.ID, wf.Name, wf.Description, wf.Version, enabled,
-			string(variables), string(nodes), string(edges), string(settings), string(permData), now, now)
+			string(variables), string(inputsJSON), string(nodes), string(edges), string(settings), string(permData), now, now)
 	} else {
 		if bumpVersion {
 			current++
@@ -95,9 +105,9 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 			// 也不允许在非 bump 路径被改小(否则快照表撞唯一约束)。
 			wf.Version = current
 		}
-		_, err = tx.Exec(`UPDATE workflows SET name=?,description=?,version=?,enabled=?,variables_json=?,nodes_json=?,edges_json=?,settings_json=?,permission_json=?,updated_at=? WHERE id=?`,
+		_, err = tx.Exec(`UPDATE workflows SET name=?,description=?,version=?,enabled=?,variables_json=?,inputs_json=?,nodes_json=?,edges_json=?,settings_json=?,permission_json=?,updated_at=? WHERE id=?`,
 			wf.Name, wf.Description, wf.Version, enabled,
-			string(variables), string(nodes), string(edges), string(settings), string(permData), now, wf.ID)
+			string(variables), string(inputsJSON), string(nodes), string(edges), string(settings), string(permData), now, wf.ID)
 	}
 	if err != nil {
 		return wrap(err)
@@ -124,7 +134,7 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 
 // GetWorkflow 按 ID 读取 Workflow。
 func (d *DB) GetWorkflow(id string) (*model.Workflow, error) {
-	row := d.sql.QueryRow(`SELECT id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows WHERE id=?`, id)
+	row := d.sql.QueryRow(`SELECT id,name,description,version,enabled,variables_json,inputs_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows WHERE id=?`, id)
 	wf, err := scanWorkflow(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -137,7 +147,7 @@ func (d *DB) GetWorkflow(id string) (*model.Workflow, error) {
 
 // ListWorkflows 返回全部 Workflow。
 func (d *DB) ListWorkflows() ([]*model.Workflow, error) {
-	rows, err := d.sql.Query(`SELECT id,name,description,version,enabled,variables_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows ORDER BY updated_at DESC`)
+	rows, err := d.sql.Query(`SELECT id,name,description,version,enabled,variables_json,inputs_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -275,10 +285,10 @@ func decodeJSONColumn(column, raw string, out any) error {
 
 func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 	var wf model.Workflow
-	var variables, nodes, edges, settings, permData string
+	var variables, inputsData, nodes, edges, settings, permData string
 	var enabled int
 	if err := r.Scan(&wf.ID, &wf.Name, &wf.Description, &wf.Version, &enabled,
-		&variables, &nodes, &edges, &settings, &permData, &wf.CreatedAt, &wf.UpdatedAt); err != nil {
+		&variables, &inputsData, &nodes, &edges, &settings, &permData, &wf.CreatedAt, &wf.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, err // 由调用方转换为 NOT_FOUND
 		}
@@ -297,6 +307,7 @@ func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 		out  any
 	}{
 		{"variables_json", variables, &wf.Variables},
+		{"inputs_json", inputsData, &wf.Inputs},
 		{"permission_json", permData, &wf.Permission},
 		{"nodes_json", nodes, &wf.Nodes},
 		{"edges_json", edges, &wf.Edges},
@@ -311,6 +322,15 @@ func scanWorkflow(r rowScanner) (*model.Workflow, error) {
 	wf.Variables = model.NormalizeStateJSON(wf.Variables)
 	if wf.Variables == nil {
 		wf.Variables = map[string]any{}
+	}
+	// 入参默认值走同一套归一(整型 default 读回保持 int,运行期数值判定
+	// 只认 int/float64 —— 与 variables 同口径)。
+	for i := range wf.Inputs {
+		if wf.Inputs[i].Default == nil {
+			continue
+		}
+		box := map[string]any{"d": wf.Inputs[i].Default}
+		wf.Inputs[i].Default = model.NormalizeStateJSON(box)["d"]
 	}
 	return &wf, nil
 }

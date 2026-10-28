@@ -73,24 +73,27 @@ func structKeys(t reflect.Type, tagName string) map[string]bool {
 
 // keySets 是一组闭合结构的合法键集合。
 type keySets struct {
-	top      map[string]bool
-	workflow map[string]bool
-	settings map[string]bool
-	edge     map[string]bool
+	top       map[string]bool
+	workflow  map[string]bool
+	settings  map[string]bool
+	edge      map[string]bool
+	inputItem map[string]bool
 }
 
 var (
 	yamlKeys = keySets{
-		top:      structKeys(reflect.TypeOf(Document{}), "yaml"),
-		workflow: structKeys(reflect.TypeOf(WorkflowMeta{}), "yaml"),
-		settings: structKeys(reflect.TypeOf(Settings{}), "yaml"),
-		edge:     structKeys(reflect.TypeOf(Edge{}), "yaml"),
+		top:       structKeys(reflect.TypeOf(Document{}), "yaml"),
+		workflow:  structKeys(reflect.TypeOf(WorkflowMeta{}), "yaml"),
+		settings:  structKeys(reflect.TypeOf(Settings{}), "yaml"),
+		edge:      structKeys(reflect.TypeOf(Edge{}), "yaml"),
+		inputItem: structKeys(reflect.TypeOf(model.InputDecl{}), "yaml"),
 	}
 	jsonKeys = keySets{
-		top:      structKeys(reflect.TypeOf(Document{}), "json"),
-		workflow: structKeys(reflect.TypeOf(WorkflowMeta{}), "json"),
-		settings: structKeys(reflect.TypeOf(Settings{}), "json"),
-		edge:     structKeys(reflect.TypeOf(Edge{}), "json"),
+		top:       structKeys(reflect.TypeOf(Document{}), "json"),
+		workflow:  structKeys(reflect.TypeOf(WorkflowMeta{}), "json"),
+		settings:  structKeys(reflect.TypeOf(Settings{}), "json"),
+		edge:      structKeys(reflect.TypeOf(Edge{}), "json"),
+		inputItem: structKeys(reflect.TypeOf(model.InputDecl{}), "json"),
 	}
 )
 
@@ -140,6 +143,15 @@ func checkDocumentKeys(doc *Document, raw map[string]any, keys keySets) error {
 		return err
 	}
 	ignored = append(ignored, ignored3...)
+
+	// 4) inputs 每个条目:键集合封闭(name/type/required/default/description),
+	//    未知键丢弃但必须可观测(与 edges 同口径)。`required` 拼成
+	//    `reqired` 会让必填入参悄悄变可选 —— "设置没生效"同族,必须 WARN。
+	ignored4, err := checkInputKeys(raw, keys.inputItem)
+	if err != nil {
+		return err
+	}
+	ignored = append(ignored, ignored4...)
 
 	sort.Strings(ignored)
 	doc.IgnoredKeys = ignored
@@ -191,6 +203,29 @@ func checkEdgeKeys(raw map[string]any, allowed map[string]bool) ([]string, error
 				continue
 			}
 			ignored = append(ignored, sectionPath("edges", fmt.Sprintf("%d", i), name))
+		}
+	}
+	return ignored, nil
+}
+
+// checkInputKeys 校验 inputs 段每个条目的键集合(与 edges 同口径:未知键
+// 丢弃但记入 IgnoredKeys + WARN)。
+func checkInputKeys(raw map[string]any, allowed map[string]bool) ([]string, error) {
+	items, ok := raw["inputs"].([]any)
+	if !ok {
+		return nil, nil
+	}
+	var ignored []string
+	for i, item := range items {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for name := range itemMap {
+			if allowed[name] {
+				continue
+			}
+			ignored = append(ignored, sectionPath("inputs", fmt.Sprintf("%d", i), name))
 		}
 	}
 	return ignored, nil

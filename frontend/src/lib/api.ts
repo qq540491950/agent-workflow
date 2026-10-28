@@ -222,6 +222,8 @@ const CODE_HINTS: Record<string, string> = {
   INVALID_TRANSITION: "执行状态迁移非法",
   NO_FAILED_NODE: "没有失败的节点可重试",
   SUBWORKFLOW_CANCELLED: "父执行取消,子工作流已中止",
+  INPUT_REQUIRED: "有必填的运行入参没有提供(在工作流声明的 inputs 里)",
+  INPUT_TYPE_MISMATCH: "运行入参的类型与声明不符(检查 variables 里的值)",
   // ---- Agent / 子进程 ----
   AGENT_CANCELLED: "Agent 执行被取消",
   AGENT_CONFIG_CORRUPT: "Agent 配置已损坏,无法解析",

@@ -36,6 +36,16 @@ export interface WorkflowSettings {
   timeout_seconds?: number;
 }
 
+/** 声明式运行入参(后端 model.InputDecl;DSL 根级 inputs 段)。 */
+export interface InputDecl {
+  name: string;
+  /** string | number | boolean(后端 InputType) */
+  type: string;
+  required?: boolean;
+  default?: unknown;
+  description?: string;
+}
+
 export interface Workflow {
   id: string;
   name: string;
@@ -43,6 +53,13 @@ export interface Workflow {
   version: number;
   enabled: boolean;
   variables?: Record<string, unknown>;
+  /**
+   * 声明式运行入参(后端 model.Workflow.Inputs;DSL 根级 inputs 段)。
+   *
+   * 与 permission 同类:设计器**不提供**编辑入口,但保存时必须原样带回 ——
+   * 保存路径会重建整个工作流对象,漏掉这个字段等于把入参声明静默抹掉。
+   */
+  inputs?: InputDecl[];
   /**
    * 工作流级权限覆盖(后端 model.Workflow.Permission;DSL 里写作根级
    * permissions 段)。

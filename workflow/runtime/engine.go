@@ -273,6 +273,40 @@ func (e *Engine) Validate(wf *model.Workflow) *validator.Result {
 
 // Start 创建并异步执行一个 Execution。
 // 返回创建好的 Execution(状态 RUNNING),执行在后台进行。
+// applyInputs 校验声明式入参并把默认值写进 vars(请求传入值由调用方随后
+// 覆盖 —— defaults 先落、显式传入最后落,优先级才正确)。
+//
+// 口径:
+//   - 传入值存在且非 nil → 类型不符报 INPUT_TYPE_MISMATCH,相符则由调用方
+//     覆盖 vars(JSON body 里的 null 视为"未提供");
+//   - 未提供 → 必填报 INPUT_REQUIRED,否则兜 default(无 default 不写键,
+//     与"变量没值"的现状一致 —— 空槽位告警走既有的 empty_context_slots);
+//   - 未声明的传入键不受影响(向后兼容:既有调用方传任意 variables 照常)。
+//
+// 类型判定唯一来源 model.InputValueMatchesType(约定 13:校验期查 default
+// 与这里查传入值必须同源)。
+func applyInputs(wf *model.Workflow, vars, provided map[string]any) error {
+	for _, in := range wf.Inputs {
+		v, ok := provided[in.Name]
+		if ok && v != nil {
+			if !model.InputValueMatchesType(in, v) {
+				return model.NewError(model.KindValidationError, "INPUT_TYPE_MISMATCH",
+					fmt.Sprintf("入参 %q 需要 %s 类型,实际是 %s",
+						in.Name, in.Type, model.InputTypeNameOf(v)))
+			}
+			continue
+		}
+		if in.Required {
+			return model.NewError(model.KindValidationError, "INPUT_REQUIRED",
+				fmt.Sprintf("入参 %q 为必填,未在请求中提供", in.Name))
+		}
+		if in.Default != nil {
+			vars[in.Name] = in.Default
+		}
+	}
+	return nil
+}
+
 func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, variables map[string]any) (*model.Execution, error) {
 	if res := e.Validate(wf); !res.Valid {
 		// 错误消息里带上**具体**的校验原因:此前只有"工作流校验失败",
@@ -307,13 +341,21 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 	}
 
 	now := time.Now().Format(time.RFC3339Nano)
-	// 变量合并:DSL variables: 段为底,运行请求传入的 variables 覆盖。
+	// 变量合并:DSL variables: 段为底,声明式入参 default 次之,运行请求
+	// 传入的 variables 最后覆盖(显式传入的优先级最高)。
 	// 此前只取请求参数,DSL 里声明的 variables 完全不生效 ——
 	// {{variable.xxx}} 渲染空串、`variables.xxx == ...` 条件恒假,
 	// 而 DSL 解析与导出都保留了这段(需求 §12 示例即用它)。
 	vars := map[string]any{}
 	for k, v := range wf.Variables {
 		vars[k] = v
+	}
+	// 声明式入参:类型校验 + 必填检查 + 默认值兜底(迭代 36)。
+	//
+	// 必须放在引用 Agent 重置**之前**:启动失败不得产生副作用(重置会
+	// 清掉共享 Mock 的决策序列,并发场景下影响别人的执行)。
+	if err := applyInputs(wf, vars, variables); err != nil {
+		return nil, err
 	}
 	for k, v := range variables {
 		vars[k] = v

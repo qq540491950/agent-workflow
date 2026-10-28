@@ -3,17 +3,26 @@
 // validator 校验、compiler 编译为 ADK 运行时。
 package dsl
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"agentworkflow/workflow/model"
+)
 
 // Document 是 DSL 文档的顶层结构。
 type Document struct {
-	Version    string         `yaml:"version" json:"version"`
-	Workflow   WorkflowMeta   `yaml:"workflow" json:"workflow"`
-	Variables  map[string]any `yaml:"variables" json:"variables,omitempty"`
-	Nodes      []Node         `yaml:"nodes" json:"nodes"`
-	Edges      []Edge         `yaml:"edges" json:"edges,omitempty"`
-	Settings   Settings       `yaml:"settings" json:"settings,omitempty"`
-	Permission map[string]any `yaml:"permissions" json:"permissions,omitempty"`
+	Version   string         `yaml:"version" json:"version"`
+	Workflow  WorkflowMeta   `yaml:"workflow" json:"workflow"`
+	Variables map[string]any `yaml:"variables" json:"variables,omitempty"`
+	// Inputs 声明运行入参(类型/必填/默认值):启动时由 Engine 校验与兜底,
+	// 声明本身在 ToModel 时原样带入 model.Workflow.Inputs。段内每个条目的
+	// 键集合是封闭的(name/type/required/default/description),未知键由
+	// schema.go 的条目级检查记入 IgnoredKeys(WARN)。
+	Inputs     []model.InputDecl `yaml:"inputs" json:"inputs,omitempty"`
+	Nodes      []Node            `yaml:"nodes" json:"nodes"`
+	Edges      []Edge            `yaml:"edges" json:"edges,omitempty"`
+	Settings   Settings          `yaml:"settings" json:"settings,omitempty"`
+	Permission map[string]any    `yaml:"permissions" json:"permissions,omitempty"`
 
 	// IgnoredKeys 记录"出现在文档里但被解析器丢弃"的键(路径形如
 	// "workflow.settings" / "settings.max_iteration")。

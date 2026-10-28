@@ -238,6 +238,15 @@ type Workflow struct {
 	Version     int            `json:"version"`
 	Enabled     bool           `json:"enabled"`
 	Variables   map[string]any `json:"variables,omitempty"`
+	// Inputs 声明工作流的运行入参(DSL inputs 段,迭代 36)。
+	//
+	// 与 Variables 的分工:Variables 是**静态**变量(DSL 里写死的值),
+	// Inputs 声明的是**每次运行可由调用方提供**的入参(类型/必填/默认值)。
+	// 入参在 Engine.Start 时落到 variables map(合并顺序:wf.Variables
+	// 为底 → input default → 请求 variables 覆盖),模板 {{variables.xxx}}
+	// 与条件 `variables.xxx == ...` 无需改动即可使用 —— 变量宇宙不变,
+	// 条件变量的可用集合仍只有 conditionenv 一份定义(约定 13)。
+	Inputs []InputDecl `json:"inputs,omitempty"`
 	// Permission 工作流级权限覆盖(需求:DSL permissions 段)。
 	Permission map[string]any   `json:"permission,omitempty"`
 	Nodes      []Node           `json:"nodes"`
@@ -245,6 +254,85 @@ type Workflow struct {
 	Settings   WorkflowSettings `json:"settings"`
 	CreatedAt  string           `json:"created_at,omitempty"`
 	UpdatedAt  string           `json:"updated_at,omitempty"`
+}
+
+// InputType 声明工作流入参的取值类型。
+type InputType string
+
+const (
+	InputTypeString  InputType = "string"
+	InputTypeNumber  InputType = "number"
+	InputTypeBoolean InputType = "boolean"
+)
+
+// InputDecl 声明工作流的一个运行入参(对标 Temporal/n8n/Windmill 的
+// declared inputs:类型 + 必填 + 默认值,启动时校验、缺省时兜底)。
+type InputDecl struct {
+	Name        string    `json:"name" yaml:"name"`
+	Type        InputType `json:"type" yaml:"type"`
+	Required    bool      `json:"required,omitempty" yaml:"required,omitempty"`
+	Default     any       `json:"default,omitempty" yaml:"default,omitempty"`
+	Description string    `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+// InputTypes 返回 inputs.type 的合法取值(唯一来源,约定 13:校验期与
+// 运行期都从这里取)。
+func InputTypes() []InputType {
+	return []InputType{InputTypeString, InputTypeNumber, InputTypeBoolean}
+}
+
+// IsValidInputType 判断类型声明是否合法。
+func IsValidInputType(t InputType) bool {
+	for _, v := range InputTypes() {
+		if v == t {
+			return true
+		}
+	}
+	return false
+}
+
+// InputTypeNameOf 返回值在 inputs 类型体系里的形态名;不认识的形态返回
+// Go 类型名(错误信息里可读)。JSON 往返的 float64 与 YAML 的 uint64 /
+// int 都算 number(与 NormalizeStateJSON 的数值归一口径一致)。
+func InputTypeNameOf(v any) string {
+	switch v.(type) {
+	case string:
+		return "string"
+	case bool:
+		return "boolean"
+	case int, int64, uint64, float64, json.Number:
+		return "number"
+	default:
+		return fmt.Sprintf("%T", v)
+	}
+}
+
+// InputValueMatchesType 校验入参值与声明的类型相符。
+//
+// 约定 13 的同源点:校验期查 default 的类型、运行期查请求传入值的类型,
+// 都必须走这一个函数 —— 两份实现各自演化,就会出现"校验期放行、启动报错"
+// 或反过来。
+func InputValueMatchesType(decl InputDecl, v any) bool {
+	switch decl.Type {
+	case InputTypeString:
+		_, ok := v.(string)
+		return ok
+	case InputTypeBoolean:
+		_, ok := v.(bool)
+		return ok
+	case InputTypeNumber:
+		switch n := v.(type) {
+		case int, int64, uint64, float64:
+			return true
+		case json.Number:
+			_, err := n.Float64()
+			return err == nil
+		}
+		return false
+	default:
+		// 未知类型声明:任何值都不匹配(校验期会把类型本身报为非法)。
+		return false
+	}
 }
 
 // UnmarshalJSON 解析工作流定义,兼容两种权限段写法。

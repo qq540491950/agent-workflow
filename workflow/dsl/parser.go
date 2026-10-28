@@ -67,6 +67,7 @@ func (d *Document) ToModel() *model.Workflow {
 		Description: d.Workflow.Description,
 		Enabled:     d.Workflow.Enabled == nil || *d.Workflow.Enabled,
 		Variables:   copyMap(d.Variables),
+		Inputs:      copyInputs(d.Inputs),
 		Permission:  copyMap(d.Permission),
 		Settings: model.WorkflowSettings{
 			MaxIterations:  d.Settings.MaxIterations,
@@ -146,6 +147,25 @@ func copyValue(v any) any {
 	}
 }
 
+// copyInputs 复制入参声明,并把默认值的数值类型钉死一次(YAML 整数是
+// uint64、JSON 整数是 float64 —— 与 variables 的归一口径一致,运行期的
+// 数值判定只认 int/float64)。
+func copyInputs(src []model.InputDecl) []model.InputDecl {
+	if src == nil {
+		return nil
+	}
+	out := make([]model.InputDecl, len(src))
+	for i, in := range src {
+		if in.Default != nil {
+			box := map[string]any{"d": in.Default}
+			model.NormalizeStateJSON(box)
+			in.Default = box["d"]
+		}
+		out[i] = in
+	}
+	return out
+}
+
 // FromModel 将领域模型 Workflow 序列化回 DSL Document(用于导出 YAML)。
 func FromModel(wf *model.Workflow) *Document {
 	enabled := wf.Enabled
@@ -153,6 +173,7 @@ func FromModel(wf *model.Workflow) *Document {
 		Version:    "1",
 		Workflow:   WorkflowMeta{ID: wf.ID, Name: wf.Name, Description: wf.Description, Enabled: &enabled},
 		Variables:  copyMap(wf.Variables),
+		Inputs:     append([]model.InputDecl(nil), wf.Inputs...),
 		Permission: copyMap(wf.Permission),
 		Settings: Settings{
 			MaxIterations:  wf.Settings.MaxIterations,

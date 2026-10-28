@@ -128,3 +128,37 @@ describe("工作流级权限覆盖不被保存丢掉", () => {
     expect(JSON.stringify(model)).not.toContain("permission");
   });
 });
+
+// 声明式运行入参(后端 model.Workflow.Inputs,JSON 键 "inputs";DSL 根级
+// inputs 段)—— 与 permission 同口径:设计器不提供编辑入口,保存路径重建
+// 整个工作流对象,漏掉这个字段等于把入参声明静默抹掉(迭代 36)。
+describe("声明式入参不被保存丢掉", () => {
+  const base: Workflow = {
+    id: "wf-2",
+    name: "W2",
+    description: "",
+    version: 1,
+    enabled: true,
+    variables: {},
+    nodes: [],
+    edges: [],
+    settings: { max_iterations: 5, on_loop_limit: "wait_user" },
+  };
+
+  it("保存时保留从服务端读到的 inputs", () => {
+    const inputs = [
+      { name: "repo", type: "string", required: true, description: "目标仓库" },
+      { name: "limit", type: "number", default: 3 },
+    ];
+    const model = toWorkflowModel({ ...base, inputs }, [], []);
+    expect(model.inputs).toEqual(inputs);
+    const payload = JSON.parse(JSON.stringify(model)) as Workflow;
+    expect(payload.inputs).toEqual(inputs);
+  });
+
+  it("没有声明时 payload 不带这个键", () => {
+    const model = toWorkflowModel(base, [], []);
+    expect(model.inputs).toBeUndefined();
+    expect(JSON.stringify(model)).not.toContain("inputs");
+  });
+});

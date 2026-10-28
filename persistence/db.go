@@ -69,6 +69,7 @@ func (d *DB) migrate() error {
 			version INTEGER NOT NULL DEFAULT 1,
 			enabled INTEGER NOT NULL DEFAULT 1,
 			variables_json TEXT DEFAULT '{}',
+			inputs_json TEXT DEFAULT '[]',
 			nodes_json TEXT DEFAULT '[]',
 			edges_json TEXT DEFAULT '[]',
 			settings_json TEXT DEFAULT '{}',
@@ -193,6 +194,7 @@ func (d *DB) migrate() error {
 func (d *DB) migrateColumns() error {
 	alters := []string{
 		`ALTER TABLE workflows ADD COLUMN permission_json TEXT DEFAULT '{}'`,
+		`ALTER TABLE workflows ADD COLUMN inputs_json TEXT DEFAULT '[]'`,
 		`ALTER TABLE executions ADD COLUMN state_json TEXT DEFAULT '{}'`,
 	}
 	for _, a := range alters {

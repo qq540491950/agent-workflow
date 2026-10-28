@@ -183,6 +183,7 @@ function sublabelOf(n: WFNode): string {
 //   - permission:工作流级权限覆盖。设计器**不提供**编辑入口(UI 不呈现),
 //     但服务端返回的工作流里带着它(YAML 导入 / 备份恢复都会写进去),
 //     漏掉就等于把用户没碰过的权限收紧抹掉。
+//   - inputs:声明式运行入参(迭代 36)。同上,设计器不提供编辑入口。
 //
 // 导出以便单测锁定该行为(见 designer.test.ts)。
 export function toWorkflowModel(
@@ -216,6 +217,11 @@ export function toWorkflowModel(
   // 放一个 undefined 进去在桌面 IPC 路径上会变成"显式清空"。
   if (wf?.permission !== undefined) {
     model.permission = wf.permission;
+  }
+  // 声明式运行入参:与 permission 同口径(设计器不提供编辑入口,原样带回,
+  // 否则画布上改点别的再保存,入参声明就被静默抹掉)。
+  if (wf?.inputs !== undefined) {
+    model.inputs = wf.inputs;
   }
   return model;
 }
