@@ -3019,11 +3019,103 @@ pi 的输出形态本就是自由文本,仓库自带示例工作流
 `live = 1` → `usage_expect … "yes"` 失败)→ **门禁红**。
 换回新版后同一条自检**绿**。
 
+## 第三十二轮(迭代 36):对照主流工作流引擎的能力补齐(2026-10-28 凌晨)
+
+> 本轮不是审计轮,是**功能轮**:调研了 Temporal(RetryPolicy)/ n8n
+> (retry-on-fail、continue-on-fail、per-workflow 并发)/ Argo
+> (retryStrategy)/ Windmill(typed args)的公开设计,把收敛度最高的
+> 四项能力按本项目的契约风格落地,每项独立提交、回归同 commit。
+
+### 1. script 节点支持节点级 retry(commit `fa6a74a`)
+
+retry 此前只在 agent 节点的契约表里声明 —— 而子进程(script)恰是最常见的
+瞬时失败源。重试循环从 runAgentNode 抽为 `withNodeRetries`(agent/script
+共用),事件名 `agent.retry` → `node.retry`(带 node_type;历史执行里的
+`agent.retry` 行原样保留,前端按原文展示)。门禁拒绝与配置检查在重试循环
+**外**(策略拒绝不是可重试失败);节点级超时额度每次尝试重新计时。
+契约探针 `runtimeNodeFuncs` 改为**多类型归属**(retryPolicyOf 归
+agent+script)。测试:`script_retry_test.go` 4 例(重试后成功/次次失败/
+非法配置 fail closed/门禁拒绝不重试)+ validator `TestScriptRetrySubKeysSameAsAgent`
+(7 子例,钉住契约表)。
+
+### 2. 声明式运行入参 inputs(类型/必填/默认值)
+
+DSL 根级 `inputs:` 段(name/type/required/default/description),对标
+Temporal 活动入参 / n8n 子工作流输入 schema / Windmill typed args:
+
+- **解析层**(dsl):条目键集合封闭,未知键记 `IgnoredKeys` + WARN(与
+  edges 同口径;`required` 拼成 `reqired` 必须可见);默认值数值形态在
+  ToModel 钉死(YAML uint64 → int)。
+- **校验层**(validator):名称空/重复、type 非法、required+default 并存、
+  default 类型不符、与 `variables` 键同名、与条件顶层变量(decision/
+  status/output/iteration/variables)同名 —— 全部 `INVALID_NODE`。
+  同名冲突报错的理由:条件里读到的 `variables.xxx` 是**运行时变量表**,
+  但 `status`/`decision` 这类顶层名读到的是**节点状态** —— 用户以为条件
+  在读自己声明的入参,实际是节点状态(静默走错分支,约定 14 同族)。
+- **运行期**(Engine.Start):必填缺失 → `INPUT_REQUIRED`、类型不符 →
+  `INPUT_TYPE_MISMATCH`(在 Agent 重置**之前**,启动失败零副作用);
+  缺省项兜 default 落入 exec.Variables —— 模板 `{{variables.xxx}}` 与
+  条件变量宇宙**不变**(约定 13:可用变量集合仍只有 conditionenv 一份)。
+  合并顺序:`wf.Variables` 为底 → input default → 请求 variables 覆盖。
+- **持久化**:workflows 表新增 `inputs_json`(建表 + ALTER 迁移),读回走
+  与 variables 同一套数值归一。
+- **API/前端**:run 端点请求体形状不变;Designer 保存路径**原样带回**
+  inputs(与 permission 同口径 —— 保存会重建整个对象,漏掉即静默抹掉);
+  `CODE_HINTS` 补码表。
+- 类型判定的同源点:`model.InputValueMatchesType`(校验期查 default 与
+  运行期查传入值走同一个函数)。
+
+测试:dsl 4 例 / validator 20+ 子例 / runtime 5 例 / persistence 往返 /
+api 契约(400 两种 + 200 兜底 + 详情带声明)/ designer.test.ts 保存透传 2 例。
+
+### 3. settings.max_concurrent 每工作流并发上限(commit 独立)
+
+对照 n8n/Windmill 的 per-workflow 并发限制:`settings.max_concurrent`
+(0 = 不限,范围 0..100,负数报 `INVALID_MAX_CONCURRENT` —— 想限 3 写成
+-3 会静默变成"不限")。达到上限 → **`WORKFLOW_BUSY`(409,不排队)**:
+排队需要新执行状态(QUEUED)并波及状态机/CAS/前端徽标,fail fast 让调用方
+立刻看到原因。计数口径 = 非终态执行(CREATED/RUNNING/WAITING_USER)。
+**检查与首次插入在同一临界区**(`Engine.startMu`):check-then-insert 是
+两条语句,SQLite 单写连接不构成原子性。检查在 Agent 重置之前(失败零副作用)。
+409 的依据:请求本身合法,只是"现在不能跑"(与既有 `INVALID_TRANSITION`
+=400 的历史契约无关,不动)。测试:runtime 3 例 / validator 5 子例 /
+api 409 契约。
+
+### 4. retry 退避参数可配(commit 独立)
+
+Temporal 对齐的两颗旋钮(agent/script 共用):
+`retry.initial_backoff_seconds`(首次重试前等待,缺省 2s,0=立即)、
+`retry.max_backoff_seconds`(增长上限,缺省 exponential 30s / fixed 不封顶
+—— fixed 无增长,封顶会违背用户显式设置的 initial)。**缺省行为逐位不变**
+(延迟序列有逐位断言)。解析 fail closed:字符串/布尔/负数/NaN 一律节点失败
+(与 max_attempts 同口径);上界 `compiler.RetryBackoffSecondsMax`=86400
+(与 timeout_seconds 同界)。校验期同口径,max < initial 只在两者都显式
+声明时报(缺省不参与)。测试:runtime 5 例(含端到端 initial=0 重试不等
+2s)/ validator 9 子例。
+
+### 5. 运行对话框渲染声明式入参(commit 独立)
+
+inputs 的 UI 半边:运行对话框新增「运行入参」区 —— 字符串/数字输入框、
+布尔开关,default 预填、required 打星号,全部控件带 aria-label(走查 #8
+的教训)。**字段是声明入参的主控件**(覆盖 JSON 文本框同名键;文本框只承载
+未声明变量)。对话框抽为导出的 `RunDialog` 组件(单测无需画布与路由)。
+数字字段在 `<input type=number>` 下浏览器会把非法文本清洗成空串(实测
+jsdom 同行为)→ 空值不上送、交给默认值/必填校验,用例按真实行为断言。
+测试 6 例。
+
+### 本轮的门禁联动
+
+- `api.test.ts` 的**错误码全集守卫**(后端有码而前端无提示 → 红)当场
+  抓到 `INVALID_MAX_CONCURRENT` 缺码表 —— 守卫有效。
+- 契约探针(nodeconfig contract)当场抓到"契约表声明了 retry 而探针按
+  单类型归属看不到 script 的读取点" —— 归属表升级为多类型。
+
 ## 汇总
 
 | 轮次 | 类型 | 结果 | 修复的 Bug |
 | --- | --- | --- | --- |
 | 94 | **第三十一轮(迭代 35)**:**真缺陷清零**(limit 截断标记 / permissions 节点级错放同码 / #287 库值标记 / #325 自检注册表 / #286 重分类 / SSE 断连释放冒烟)+ **首次浏览器实测走查**抓出 **15 个体验缺陷** | ✅ 已落地(`7047e14`..`cbc9d57`,38 个独立提交) | 六条真缺陷的逐条处置见 `docs/OPTIMIZATION.md` 第十六节(5 修 + #286 按口径重分类为有意取舍:**残余只剩"断言故意藏进全 skip 闭包"的对抗构造**,修它需要断言→顶层测试体的归属判据,误报面正是历轮修死断言的雷区)。走查 6 项(逐条见第十六节):**节点输出结构化**(agent 的 Summary/Decision 此前完全不可见,"代码评审 ×2"看不出判了什么)/ **执行终态落 finished_at**(此前从未赋值,监控页耗时无限走表)/ **审批面板以执行状态为准**(Resume 后历史 WAITING 行把面板挂在已完成执行上)/ **零执行成功率显示 — 而非 0%** / **画布暗色模式**(MiniMap/缩放控件此前是白色默认样式)/ **WORKFLOW_INVALID 拍平**(校验错误数组直接弹原始 JSON)/ 过滤无匹配空态提示 / 四处图标按钮 a11y / 统计表窄视口横向滚动 + 成功率分母只含已落定 / 两处回车提交(新建工作流、运行对话框)/ 实时日志跟随滚动(上翻不拽人)/ 设计器打开即静默校验(已知警告立现)/ **顶层 ErrorBoundary**(渲染异常此前整窗白屏)。**新增测试**:Go `finished_at_test.go` 4 + validator/app 层 permissions 8 + settings 读失败 3 + sse stats 1 + api 截断头 2;前端 ExecutionMonitor +12(结构化结果 5 / 审批面板一致 3 / 日志跟随滚动 2 / 加载失败态 2)/ Dashboard +4(无数据 2 / 溢出与分母改断言 2)/ errors +5 / Settings +3 / api 契约 +1 / Workflows +2(过滤空态 / 回车创建)/ ErrorBoundary 3 / unsaved-guard 3。SSE 冒烟 4 → **6 项**(归零断言 + ≥1 反向对照防恒真);门禁自检改注册表派生(`scripts/selfcheck_registry.txt`,41 条,红方向已证伪)。**实测**:9 步门禁全绿 / 前端 **27 文件 · 334 用例**全绿 / 桌面打包 `wails3 task package` 通过 / 浏览器实跑:运行 · 审批(Approve/Continue)· 并行 · 导入错误提示 · 暗色画布 · 深链失败态 · 未保存守卫 · 拖拽添加 · 逐类型属性面板 · 掩码三态(API+React 层)逐项目视 |
+| 95 | **第三十二轮(迭代 36)**:**功能轮**(对照 Temporal/n8n/Argo/Windmill 的公开设计):script 节点 retry(`node.retry` 事件)/ 声明式运行入参 inputs(类型·必填·默认值,DSL→校验→运行期→持久化→API→UI 全链路)/ `settings.max_concurrent` 并发上限(WORKFLOW_BUSY 409,fail fast 不排队)/ retry 退避参数可配(initial/max_backoff_seconds,缺省行为逐位不变)/ 运行对话框入参类型化字段(RunDialog 抽组件) | ✅ 已落地(5 个独立提交,回归同 commit) | 新增测试:Go dsl 4 / validator 36+ / runtime 17 / persistence 1 / api 2;前端 designer.test +2、designer.rundialog.test 6。门禁联动:错误码全集守卫当场抓到 INVALID_MAX_CONCURRENT 缺码表;契约探针促成 runtimeNodeFuncs 多类型归属。**实测**:9 步门禁全绿(verify 163s→中途复跑全绿)/ 前端 **28 文件 · 342 用例**全绿 |
 | 93 | **第三十轮(迭代 34 收官)**:**开放清单最终收敛** + **三十三轮总体小结** + **回归史总结** + **8 条对外契约复核** | ✅ 已落地(工作区,待提交) | **不是修复轮,是归档轮** —— 逐条核实第十四节的开放项:关闭 **#279**(门禁对根级 `build/` 的盲区,修法已随 `f7d7f98` 进主干)、**#324 的前提实测不成立**(干净 clone 只装 `frontend/` 就有 eslint v9.39.5 —— 原登记写的"`frontend/package.json` 里没有 eslint"从登记那刻起就是错的);其余**按性质重新归类**(真缺陷 6 / 有意取舍 11 / 环境受限 3 / 仍然暂缓 1),新增"开放项分类总表";补 `docs/OPTIMIZATION.md` 第十五节"三十三轮总体小结"(五个缺陷家族 / 度量 / **六条方法论** / 仍然开放)与本文件末尾"回归史总结"(规模演进 / **六种关键测试手法** / 门禁九步的**实测拦截点**);`docs/api.md` 的 **8 条对外契约逐条对照代码**,**全部成立**,契约正文未改。**实测**:9 步门禁全绿(**111s**)/ 前端 **25 文件 · 302 用例**全绿 / REST+SSE+HITL 冒烟 **9 项** / SSE 冒烟 **4 项**;编号自检 `docs/check-numbering.sh` 全通过(号段 **1..346**,已知历史空号 #25 单列) |
 | 92 | **第二十九轮(迭代 33 收口)**:随机 base64 凭据不被脱敏 / 门禁可被"以值引用"骗过 / CAS 冲突用例去 flake / `logx.Mask` 非幂等 / 双 diff 前缀漏 | ✅ 已落地(commit `f7d7f98`) | **#342-#346 共 5 条,全部关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 92 小节):**#342**(P1)随机 base64 凭据**不被脱敏** —— 裸值高熵规则的"驼峰标识符"护栏("大写后紧跟小写"≥4 次就豁免)对随机字符**几乎必然**满足(实测 16.5%/位)→ 护栏等于"高熵串豁免"→ 随机 base64 **194/200 原样输出**(终审实测 198/200)→ node output / state_json / 事件流 / SSE / git diff 六出口全明文 → **驼峰护栏收窄为五条**(起伏≥4 / 驼峰词序列 / 词长≥2 / 每词含小写 / **数字段≤1 处**),并补"整段就是路径"的路径护栏;**#343**(P1)门禁第 6 步的断言扫描可被 **5 种"以值引用"手法**骗过(整条 9 步门禁全绿放行)→ 可达性改为**真实调用点**(`ast.CallExpr` 的 callee 解析到该 `FuncDecl`;函数值别名按作用域解析,别名链用不动点求解),自检 **36 → 41**;**#344**(P2)`TestCancelCommitConflictIsExpectedRace` 在 CPU 负载下**假红**(实测 10/10 失败)→ 前置从"等 RUNNING"改成"等 **node.started**",断言未改;**#345**(P3)`logx.Mask` **非幂等**(赋值内 PEM:一次 `…-----***`、两次 `…-----******`)→ PEM 正则认得已掩形态;**#346**(P3)`++AKIA…`(**双 diff 前缀**)漏 → 行首 `+`/`-` **逐个**摘除。**红→绿证据**:旧实现 + 新测试 → 360 条断言失败 / 旧扫描器 5 个绕过包 `live == total` / 负载下 10/10 失败 / 一次两次不等 / `++AKIA…` 原样输出;改后全部转绿。**误报 0**:新旧扫描器在真实仓库 22 包 / 171 文件上**逐包 live 计数完全一致**。**新增测试**:`logx/credential_test.go` 5 个用例 + 门禁自检 5 条场景;**修改**:`logx/credential_test.go` 的夹具前提自检改用生产实现的 `camelHumps`、`workflow/runtime/cas_conflict_test.go` 的前置条件(断言未改)。Go 测试文件 **171** 个(不变)/ 顶层 `func Test*` **904 → 909**;门禁 **9 步全绿**(总耗时 **138s**) |
 | 91 | **第二十八轮(迭代 32 收口)**:门禁断言扫描的 4 个新盲区 + 终审复审确认关闭 6 条遗留项 | ✅ 已落地(工作区,待提交) | **#341 共 1 条,已关闭**(逐条见 `docs/OPTIMIZATION.md` 轮次 91 小节):**#341**(P1)门禁第 6 步的断言扫描可被 **4 种手法**骗过(辅助函数**只在恒假分支**里被调用 / 断言在**从未被调用的函数字面量**里 / 辅助函数**只在无匹配 switch 分支**里被调用 / **链式**辅助函数只在恒假分支被调用)→ **整条 9 步门禁全绿放行**;根因:`funcUnreachableReason` 用 `refs[name] > 0` 判"是否被调用",而 `packageRefs` 把**恒假分支里的调用点**也计入,且 `FuncLit` 完全不追踪调用关系 → 修法:**判据从"存在性"升级为"可达性"**(引用点收集时跳过不可达分支里的调用点 + `FuncLit` 内断言要求该字面量确有调用点 + 链式辅助函数用**不动点迭代**传递可达性);自检 **32 → 36** 条(B4/B5/B6/B7 各一条红场景 + 绿方向)。**红→绿证据**(本轮自建"抽出 assertscan 单独编译"的手法):旧扫描器 4 个绕过包全部 `live == total` → 新扫描器全部 `live == 0` 且**原因与形态一一对应**;**误报 0**:新旧扫描器在本仓库 22 个包 / 171 个测试文件上**逐包 live 计数完全一致**(3304 条断言全 live)。**另关闭 6 条**终审复审确认的遗留项(**#270** 跨节点上下文链 / **#321** `submit` 产物 / **#318** AKIA 粘连 / **#323** 权限死入口 / **#306** NaN 连坐 / **#322** SSE 慢客户端阈值),逐条核实方式见"轮次 91"一节。**仍然开着 2 处**(有意边界):函数字面量**作为参数**传给别的函数 / 辅助函数以**函数值**形态传递 —— 静态判不出 → 保守记为 live(#320 残余同族,见 OPTIMIZATION 第 76 条) |

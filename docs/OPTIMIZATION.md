@@ -2852,3 +2852,71 @@ Go 源码)→ 单独编译成一个二进制 → 造 4 个绕过包 → 用同�
 - **自动化环境的启示**:IAB 自动化的 click 偶发卡在可操作性等待(Radix Tabs
   在 mousedown 激活 / 按钮带 transition-all),改用 evaluate 派发事件绕过 ——
   这是**自动化环境**的问题,不是产品缺陷(真人点击不受影响),不做"修复"。
+
+---
+
+## 十七、迭代 36(第三十二轮):对照主流工作流引擎的能力补齐(2026-10-28 凌晨)
+
+> 本轮不是审计轮,是**功能轮**。调研了 Temporal(RetryPolicy:InitialInterval /
+> BackoffCoefficient / MaximumAttempts / MaximumInterval / NonRetryableErrorTypes)、
+> n8n(retry-on-fail 的 maxTries/waitBetweenTries、on-error 三态、per-workflow
+> 并发限制)、Argo Workflows(retryStrategy:limit + backoff duration/factor/
+> maxDuration)、Windmill(JSON Schema typed args)的公开设计与已知坑
+> (n8n 的 retry 与 continue-on-fail 互相打架的 #10763、等待上限 5s),
+> 把收敛度最高的四项能力按本项目的契约风格落地。每项独立提交、回归同 commit。
+
+### 1. 五个提交
+
+| 事项 | 设计来源 | commit |
+| --- | --- | --- |
+| script 节点节点级 retry(重试循环抽为 `withNodeRetries` 共用,事件 `agent.retry` → `node.retry`) | n8n retry-on-fail / Temporal 活动 retry | `fa6a74a` |
+| 声明式运行入参 `inputs`(类型/必填/默认值;DSL → 校验 → 运行期 → 持久化 → API) | Temporal 活动入参 / n8n 子工作流输入 schema / Windmill typed args | 独立提交 |
+| `settings.max_concurrent` 每工作流并发上限(`WORKFLOW_BUSY` 409,fail fast 不排队) | n8n / Windmill per-workflow 并发限制 | 独立提交 |
+| retry 退避参数可配(`initial_backoff_seconds` / `max_backoff_seconds`,缺省行为逐位不变) | Temporal InitialInterval / MaximumInterval | 独立提交 |
+| 运行对话框渲染声明式入参类型化字段(`RunDialog` 抽组件,aria-label 全覆盖) | n8n/Windmill 的"声明 → 表单"映射 | 独立提交 |
+
+### 2. 新的语义决定(勿当 Bug "修复")
+
+- **`WORKFLOW_BUSY` 是 409 不是 400,且不排队** —— 请求本身合法,只是
+  "现在不能跑",Conflict 语义正确;排队需要新执行状态(QUEUED)并波及
+  状态机 / CAS / 前端徽标,fail fast 让调用方立刻看到原因。**不要**把它
+  "统一"成 400(与 `INVALID_TRANSITION`=400 的历史契约是两回事)。
+- **inputs 的 required 与 default 互斥**(校验期 `INVALID_NODE`)——
+  default 已让参数可缺省,两者并存语义矛盾。
+- **inputs 名与 `variables` 键、条件顶层变量(decision/status/output/
+  iteration/variables)同名 → 校验期报错** —— 条件里的 `status`/`decision`
+  读到的是**节点状态**,不是入参;同名 = 用户以为条件在读自己的入参
+  (静默走错分支,约定 14 同族)。
+- **入参合并顺序**:`wf.Variables` 为底 → input default → 请求 variables
+  覆盖(显式传入的优先级最高)。未声明的传入键照常进入变量表(向后兼容)。
+- **并发上限的检查与首次插入在同一临界区**(`Engine.startMu`)——
+  check-then-insert 是两条语句,SQLite 单写连接不构成原子性;两个并发
+  Start 不会同时通过检查。
+- **fixed 退避缺省不封顶** —— fixed 没有增长,封顶会违背用户显式设置的
+  initial(60s 的 fixed 退避被缺省 max=30s 悄悄压回 30s 是惊吓);
+  `max < initial` 只在两者都**显式声明**时报。
+- **运行对话框的数字字段输入非法文本 → 浏览器清洗成空串 → 不上送该键**
+  (`<input type=number>` 的 value sanitization,真实浏览器与 jsdom 同行为)
+  —— 交给引擎的 default 兜底或 `INPUT_REQUIRED`,不在前端猜值。
+
+### 3. 门禁联动的两个实证
+
+- **错误码全集守卫**(后端有码而前端 `CODE_HINTS` 无提示 → 门禁红)当场
+  抓到 `INVALID_MAX_CONCURRENT` 缺码表 —— 双向守卫在功能轮依然有效。
+- **配置契约探针**(nodeconfig contract)当场抓到"契约表给 script 声明了
+  retry 而探针按单类型归属找不到读取点" —— `runtimeNodeFuncs` 升级为
+  **多类型归属**(`retryPolicyOf` 归 agent+script),探针的"人工确认归属"
+  语义保持。
+
+### 4. 本轮明确不做(登记在案)
+
+- **非重试错误分类**(Temporal `NonRetryableErrorTypes`):本项目的节点错误
+  是自由文本(CLI stderr),没有稳定的错误类型可枚举;硬上会引入"字符串
+  猜测"(需求 §36 禁令)。等错误结构化后再评估。
+- **`on_failure` 错误分支边**(n8n error-output / Argo onExit):触及路由
+  语义与"不可达节点判定"(约定 14)的最深处,需要独立的语义设计轮,
+  不适合夹在功能轮里做。
+- **cron/日程触发**:桌面应用的产品决策(与托盘同族,ROADMAP 二.2 暂缓)。
+- **inputs 的子工作流入参联动**(父工作流把 input 传给子工作流时校验子
+  工作流声明):子工作流启动路径已统一走 Engine.Start(子工作流自己的
+  inputs 校验自然生效),父侧的"提前校验"是锦上添花,暂不做。

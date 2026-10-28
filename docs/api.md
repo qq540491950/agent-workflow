@@ -46,7 +46,7 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/workflows/{id}/run` | 启动执行 `{task, variables}`(异步) |
+| POST | `/api/workflows/{id}/run` | 启动执行 `{task, variables}`(异步)。工作流声明了 `inputs` 段时(迭代 36):必填入参缺失 → **400 `INPUT_REQUIRED`**;传入值类型不符 → **400 `INPUT_TYPE_MISMATCH`**;缺省项自动兜 `default` 落入执行变量。同一工作流的未结束执行数达到 `settings.max_concurrent` → **409 `WORKFLOW_BUSY`**(fail fast,不排队) |
 | GET | `/api/executions?workflow_id=&limit=` | 执行列表(最新在前)。`limit` **上限 1000**,超出的数字按 1000 收敛并打 `X-Limit-Truncated` / `X-Limit-Applied` 响应头(不再因整数溢出变成"不限制"而返回全表) |
 | GET | `/api/executions/{id}` | 执行详情(含 state_data 快照) |
 | GET | `/api/executions/{id}/nodes` | 节点执行明细(attempt/duration/output)。**output / error / result_json 已在读出口脱敏**(这些字段直接来自 Agent 的 stdout/stderr,常含凭据) |
@@ -249,6 +249,10 @@ net/http 的主动中止信号,按官方要求放行)。
 | `PERMISSION_OVERRIDE_LOOSENS` | 校验错误 / 运行错误 | `permissions:` 段试图**放宽**全局已禁用的能力。**有效权限 = 全局实时策略 ∧ permissions 段(只收紧)** —— 放宽尝试在**校验期**就报出;运行期遇到历史工作流里的放宽写法同样报出并按拒绝处理 |
 | `INVALID_PERMISSION_OVERRIDE` | 校验错误 | `permissions:` 段的**结构**非法(如未知字段、类型不对)。与 `PERMISSION_OVERRIDE_LOOSENS` 区分:前者是"写错了",后者是"想放开" |
 | `BAD_REQUEST` | 400(更新 Agent 权限) | 权限载荷里的能力位**不是布尔值**(错误信息点名是哪个字段、实际类型是什么)。**静默当作 false 等于吊销该能力**,而客户端以为自己改的是别的能力(约定 14)。注意:此路径**没有**专属错误码,与其它 `BAD_REQUEST` 共用 |
+| `INPUT_REQUIRED` | 400(启动执行) | 工作流声明了必填入参(`inputs[].required: true`)而请求的 `variables` 里没有提供。执行**不创建**(校验发生在任何副作用之前) |
+| `INPUT_TYPE_MISMATCH` | 400(启动执行) | 传入的入参值与声明的 `type`(`string` / `number` / `boolean`)不符。类型判定与校验期查 `default` 走**同一个函数**(`model.InputValueMatchesType`,约定 13) |
+| `WORKFLOW_BUSY` | **409**(启动执行) | 同一工作流的非终态执行数(CREATED / RUNNING / WAITING_USER)达到 `settings.max_concurrent`(0 = 不限,迭代 36)。请求本身合法,只是"现在不能跑"—— 所以是 409 而不是 400;**不排队**,调用方决定重试或放弃 |
+| `INVALID_MAX_CONCURRENT` | 校验错误 | `settings.max_concurrent` 不在 0..100(唯一来源:`compiler.MaxConcurrentRange`)。负数会静默变成"不限",必须报出 |
 | `INVALID_TRANSITION` | 400(取消执行) | **状态迁移非法**。取消一个**已终态**(`COMPLETED` / `FAILED` / `CANCELLED`)的执行时返回 —— 取消一个已经结束的运行是"取消失败",不是幂等删除。**约定 6 的"幂等返回 200"只适用于删除资源**,不适用于状态迁移。详见"第 12 节" |
 
 > **第十轮新增的三个码**(`UNSUPPORTED_AGENT_SETTING` / `INVALID_LOOP_LIMIT` /
