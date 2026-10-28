@@ -34,17 +34,19 @@ import (
 // runtimeNodeFuncs 把运行期的节点执行函数映射到节点类型。
 //
 // 新增/改名了读取配置的函数而这里没同步 → 测试失败(强制人工确认归属:
-// 该函数属于哪种节点类型,还是全局的)。
-var runtimeNodeFuncs = map[string]model.NodeType{
-	"runAgentNode":       model.NodeTypeAgent,
-	"runSkillNode":       model.NodeTypeSkill,
-	"runGitNode":         model.NodeTypeGit,
-	"runScriptNode":      model.NodeTypeScript,
-	"runHumanNode":       model.NodeTypeHuman,
-	"runSubworkflowNode": model.NodeTypeSubWorkflow,
-	"runMergeNode":       model.NodeTypeMerge,
-	// retryPolicyOf 读 agent 节点的 retry 配置(仅 agent 节点使用)。
-	"retryPolicyOf": model.NodeTypeAgent,
+// 该函数属于哪种节点类型,还是全局的)。一个函数可归属多个节点类型
+// (agent 与 script 共用同一个重试循环时,retry 配置的读取点只有一个)。
+var runtimeNodeFuncs = map[string][]model.NodeType{
+	"runAgentNode":       {model.NodeTypeAgent},
+	"runSkillNode":       {model.NodeTypeSkill},
+	"runGitNode":         {model.NodeTypeGit},
+	"runScriptNode":      {model.NodeTypeScript},
+	"runHumanNode":       {model.NodeTypeHuman},
+	"runSubworkflowNode": {model.NodeTypeSubWorkflow},
+	"runMergeNode":       {model.NodeTypeMerge},
+	// retryPolicyOf 读节点级 retry 配置(迭代 36 起 agent 与 script 两类
+	// 节点共用 withNodeRetries 循环,读取点只有这一个)。
+	"retryPolicyOf": {model.NodeTypeAgent, model.NodeTypeScript},
 }
 
 // runtimeGlobalFuncs 是读取配置、但不归属某个节点类型的函数。
@@ -306,8 +308,8 @@ func TestNodeConfigSpecMatchesRuntimeReads(t *testing.T) {
 		got := map[string]bool{}
 		gotSub := map[string][]string{}
 		mapped := 0
-		for fn, owner := range runtimeNodeFuncs {
-			if owner != nt {
+		for fn, owners := range runtimeNodeFuncs {
+			if !slices.Contains(owners, nt) {
 				continue
 			}
 			r, exists := reads[fn]

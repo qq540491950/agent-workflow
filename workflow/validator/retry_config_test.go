@@ -130,3 +130,54 @@ func TestRetryConfigValidFormsStayValid(t *testing.T) {
 		}
 	}
 }
+
+// scriptRetryWorkflow 造一个只带 retry 配置的 script 节点工作流。
+//
+// script 节点自迭代 36 起与 agent 节点共用同一份 retry 契约
+// (compiler.nodeConfigSpecs 的 SubKeys["retry"]),子键类型校验必须
+// 同口径 —— 两类节点是同一个校验函数(validateRetrySubKeys),
+// 这里用例的价值是**钉住契约表**:哪天有人把 script 的 SubKeys 拆掉,
+// 这些用例立刻变红(约定 13:校验期与运行期同源)。
+func scriptRetryWorkflow(retry any) *model.Workflow {
+	return &model.Workflow{
+		ID:   "wf-script",
+		Name: "wf-script",
+		Nodes: []model.Node{{
+			ID:   "s1",
+			Type: model.NodeTypeScript,
+			Config: map[string]any{
+				"command": "echo hi",
+				"retry":   retry,
+			},
+		}},
+	}
+}
+
+// TestScriptRetrySubKeysSameAsAgent script 节点的 retry 子键口径与 agent 一致。
+func TestScriptRetrySubKeysSameAsAgent(t *testing.T) {
+	cases := []struct {
+		name   string
+		retry  any
+		wantOK bool
+	}{
+		{"字符串 max_attempts", map[string]any{"max_attempts": "3"}, false},
+		{"负数 max_attempts", map[string]any{"max_attempts": -1}, false},
+		{"数值 backoff", map[string]any{"backoff": 3}, false},
+		{"retry 非对象", "3", false},
+		{"合法 fixed", map[string]any{"max_attempts": 3, "backoff": "fixed"}, true},
+		{"合法 exponential", map[string]any{"max_attempts": 3, "backoff": "exponential"}, true},
+		{"空对象(全缺省)", map[string]any{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Validate(scriptRetryWorkflow(tc.retry), nil, nil)
+			if res.Valid != tc.wantOK {
+				t.Fatalf("retry = %#v: 期望 valid=%v,实际 %v(错误: %+v)",
+					tc.retry, tc.wantOK, res.Valid, res.Errors)
+			}
+			if !tc.wantOK && !errHas(res, "INVALID_NODE") {
+				t.Errorf("错误码必须是 INVALID_NODE,实际: %+v", res.Errors)
+			}
+		})
+	}
+}

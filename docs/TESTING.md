@@ -276,6 +276,8 @@
 
 - DSL `config.model` → `AgentRequest.Model`(优先于 Agent 默认模型);`config.retry.{max_attempts,backoff}`
   (fixed/exponential,上限 10 次)在执行器内实现重试循环,重试发出 `agent.retry` 事件。
+  (迭代 36 起重试循环抽为 `withNodeRetries` 供 agent/script 共用,事件名统一为
+  `node.retry`;历史执行里的 `agent.retry` 行原样保留。)
 - 视觉:Designer 属性面板出现 Model/重试次数/退避策略字段。✅ 截图 `13-designer-node-model.png`
 
 ### 轮次 11:YAML 导入

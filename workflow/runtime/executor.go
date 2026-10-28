@@ -142,7 +142,7 @@ func (e *Engine) dispatchNode(ctx context.Context, env *compiler.RunEnv, node *m
 	case model.NodeTypeGit:
 		return e.runGitNode(ctx, env, node, st)
 	case model.NodeTypeScript:
-		return e.runScriptNode(ctx, node)
+		return e.runScriptNode(ctx, env, node)
 	case model.NodeTypeHuman:
 		return e.runHumanNode(ctx, env, node, st)
 	case model.NodeTypeSubWorkflow:
@@ -548,49 +548,21 @@ func (e *Engine) runAgentNode(ctx context.Context, env *compiler.RunEnv, node *m
 	//
 	// 配置非法 → 节点**失败**(fail closed):此前字符串 "3" 被当成 0 再钳到 1
 	// → 重试被静默关闭,节点照常成功(约定 14)。
-	maxAttempts, backoff, rerr := retryPolicyOf(node)
-	if rerr != nil {
-		return compiler.NodeOutcome{
-			State: model.NodeFailed,
-			Error: fmt.Sprintf("节点 %s 的 retry 配置非法: %v", node.ID, rerr),
-		}
-	}
-	var outcome compiler.NodeOutcome
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if attempt > 1 {
-			delay := retryBackoffDelay(attempt, backoff)
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return compiler.NodeOutcome{State: model.NodeFailed, Error: "执行取消"}
-			}
-		}
-
-		// Agent 输出事件(实时)
+	// 每次尝试的流式输出与节点级超时都在闭包内重来(退避后超时额度重新计时)。
+	outcome := e.withNodeRetries(ctx, env, node, func(ectx context.Context) compiler.NodeOutcome {
 		done := make(chan struct{})
 		go e.streamAgentOutput(ctx, env, node.ID, a.ID(), req, done)
 
-		ectx := ctx
+		attempt := ectx
 		if req.Timeout > 0 {
 			var cancel context.CancelFunc
-			ectx, cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
-			outcome = e.invokeAgent(ectx, a, req)
-			cancel()
-		} else {
-			outcome = e.invokeAgent(ctx, a, req)
+			attempt, cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
+			defer cancel()
 		}
+		out := e.invokeAgent(attempt, a, req)
 		close(done)
-
-		if outcome.State != model.NodeFailed || ctx.Err() != nil {
-			break
-		}
-		if attempt < maxAttempts {
-			e.Bus.Emit(event.New("agent.retry", env.Exec.ID, node.ID, map[string]any{
-				"agent": agentID, "attempt": attempt, "max_attempts": maxAttempts,
-				"error": outcome.Error,
-			}))
-		}
-	}
+		return out
+	})
 	if outcome.State == model.NodeSuccess {
 		// 保存节点输出到上下文(review/plan 等按需引用)。
 		//
@@ -786,6 +758,50 @@ func (e *Engine) invokeAgent(ctx context.Context, a coreagent.Agent, req coreage
 // 运行期本地归一(不改 agent 包的所有权范围)。
 func normalizeAgentStatus(s coreagent.AgentStatus) string {
 	return strings.ToUpper(strings.TrimSpace(string(s)))
+}
+
+// withNodeRetries 按节点级 retry 配置包裹一次执行(默认 1 次 = 不重试,
+// 退避 fixed 2s / exponential 1s→30s 上限,见 retryBackoffDelay)。
+//
+// 只对 NodeFailed 重试;SUCCESS / WAIT_USER / SKIPPED 原样返回(WAIT_USER
+// 是"等人",不是可重试的失败)。每次重试前发 node.retry 事件(带
+// attempt / max_attempts / error);退避等待期间 ctx 取消 → 立即失败,
+// 不吞取消。配置非法 → 节点**失败**(fail closed):此前字符串 "3" 被当成
+// 0 再钳到 1 → 重试被静默关闭,节点照常成功(约定 14)。
+//
+// agent 与 script 两类节点共用本循环(子进程层是最常见的瞬时失败源),
+// 事件名统一为 node.retry(历史执行里的 agent.retry 行原样保留,审计页
+// 按原文展示)。
+func (e *Engine) withNodeRetries(ctx context.Context, env *compiler.RunEnv, node *model.Node, run func(ctx context.Context) compiler.NodeOutcome) compiler.NodeOutcome {
+	maxAttempts, backoff, rerr := retryPolicyOf(node)
+	if rerr != nil {
+		return compiler.NodeOutcome{
+			State: model.NodeFailed,
+			Error: fmt.Sprintf("节点 %s 的 retry 配置非法: %v", node.ID, rerr),
+		}
+	}
+	var outcome compiler.NodeOutcome
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			delay := retryBackoffDelay(attempt, backoff)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return compiler.NodeOutcome{State: model.NodeFailed, Error: "执行取消"}
+			}
+		}
+		outcome = run(ctx)
+		if outcome.State != model.NodeFailed || ctx.Err() != nil {
+			break
+		}
+		if attempt < maxAttempts {
+			e.Bus.Emit(event.New("node.retry", env.Exec.ID, node.ID, map[string]any{
+				"node_type": string(node.Type), "attempt": attempt, "max_attempts": maxAttempts,
+				"error": outcome.Error,
+			}))
+		}
+	}
+	return outcome
 }
 
 // retryPolicyOf 读取节点 retry 配置。
@@ -1104,7 +1120,7 @@ func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *mod
 // runScriptNode 执行脚本节点(本地 shell)。
 // 显式开关门禁:该节点等价于任意本地命令执行,而工作流可由 YAML 导入
 // 获得,故默认拒绝,需用户在设置页显式放行(需求 §42 禁止绕过权限系统)。
-func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.NodeOutcome {
+func (e *Engine) runScriptNode(ctx context.Context, env *compiler.RunEnv, node *model.Node) compiler.NodeOutcome {
 	command := cfgStr(node, "command")
 	if command == "" {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: "script 节点缺少 command"}
@@ -1125,29 +1141,34 @@ func (e *Engine) runScriptNode(ctx context.Context, node *model.Node) compiler.N
 	if s := timeoutSecondsOf(cfgFloat(node, "timeout_seconds")); s > 0 {
 		timeout = s
 	}
-	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, shell, "-c", command)
-	// 脚本派生的后台子进程可能持有输出管道:进程组击杀 + WaitDelay
-	// 兜底,保证调用方及时返回(与 Agent 适配器同一策略)
-	coreagent.ConfigureProcess(cmd)
-	cmd.WaitDelay = 5 * time.Second
 	workDir := cfgStr(node, "working_dir")
 	if workDir == "" {
 		workDir = e.Git.WorkingDir()
 	}
-	if workDir != "" {
-		cmd.Dir = workDir
-	}
-	out, err := cmd.CombinedOutput()
-	// 进程已成功退出、仅孤儿子进程延迟关管道时,输出已完整捕获,不算失败
-	if errors.Is(err, exec.ErrWaitDelay) {
-		err = nil
-	}
-	if err != nil {
-		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error(), Output: string(out)}
-	}
-	return compiler.NodeOutcome{State: model.NodeSuccess, Output: string(out)}
+	// retry 包裹的是"执行一次脚本":门禁与配置检查在循环外(策略拒绝与
+	// 写错的配置不是可重试的失败,重试只会重复同样的错误);节点级超时
+	// 额度在闭包内,每次尝试重新计时(与 agent 节点语义一致)。
+	return e.withNodeRetries(ctx, env, node, func(ectx context.Context) compiler.NodeOutcome {
+		cctx, cancel := context.WithTimeout(ectx, time.Duration(timeout)*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(cctx, shell, "-c", command)
+		// 脚本派生的后台子进程可能持有输出管道:进程组击杀 + WaitDelay
+		// 兜底,保证调用方及时返回(与 Agent 适配器同一策略)
+		coreagent.ConfigureProcess(cmd)
+		cmd.WaitDelay = 5 * time.Second
+		if workDir != "" {
+			cmd.Dir = workDir
+		}
+		out, err := cmd.CombinedOutput()
+		// 进程已成功退出、仅孤儿子进程延迟关管道时,输出已完整捕获,不算失败
+		if errors.Is(err, exec.ErrWaitDelay) {
+			err = nil
+		}
+		if err != nil {
+			return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error(), Output: string(out)}
+		}
+		return compiler.NodeOutcome{State: model.NodeSuccess, Output: string(out)}
+	})
 }
 
 // runMergeNode 汇合并行分支结果:输出聚合摘要(成功/失败/跳过/被截断)。

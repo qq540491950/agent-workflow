@@ -128,7 +128,15 @@ var nodeConfigSpecs = map[model.NodeType]NodeConfigSpec{
 	},
 	model.NodeTypeScript: {
 		Required: []string{"command"},
-		Optional: []string{"shell", "timeout_seconds", "working_dir"},
+		Optional: []string{"shell", "timeout_seconds", "working_dir", "retry"},
+		SubKeys: map[string][]string{
+			// script 节点与 agent 节点共用同一份 retry 语义(重试的是"这一次
+			// 执行",失败判定统一走 NodeOutcome.NodeFailed):命令是否幂等
+			// 由工作流作者判断 —— Temporal 的 RetryPolicy 同样把幂等性留给
+			// 活动实现者。子键类型校验与 agent 侧同源(validateRetrySubKeys
+			// 只认契约表里声明了 retry 的节点类型)。
+			"retry": {"max_attempts", "backoff"},
+		},
 	},
 	model.NodeTypeGit: {
 		Required: []string{"operation"},
