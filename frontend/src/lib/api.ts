@@ -261,6 +261,7 @@ const CODE_HINTS: Record<string, string> = {
   INVALID_EXPRESSION: "条件表达式非法",
   INVALID_GIT_OPERATION: "Git 节点的操作非法",
   INVALID_LOOP_LIMIT: "settings.on_loop_limit 非法(允许: fail|wait_user)",
+  INVALID_MAX_CONCURRENT: "settings.max_concurrent 非法(0=不限,上限 100)",
   INVALID_NODE: "节点定义非法",
   INVALID_NODE_ENABLED: "节点的 enabled 必须是布尔值(true=启用,false=运行期跳过)",
   INVALID_PERMISSION_OVERRIDE: "权限覆盖段结构非法(已按拒绝处理)",

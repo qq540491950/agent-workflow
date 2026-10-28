@@ -37,7 +37,7 @@ import {
 } from "lucide-react";
 import { api, asArray, describeWarnings } from "@/lib/api";
 import { reportError } from "@/lib/errors";
-import type { AgentInfo, ValidationError, Workflow, WFNode } from "@/lib/types";
+import type { AgentInfo, InputDecl, ValidationError, Workflow, WFNode } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -248,8 +248,6 @@ function DesignerInner() {
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [errors, setErrors] = useState<ValidationError[] | null>(null);
   const [runOpen, setRunOpen] = useState(false);
-  const [task, setTask] = useState("");
-  const [runVars, setRunVars] = useState("{}");
   const [agents, setAgents] = useState<string[]>([]);
   // mode 清单:后端派生(约定 13)。加载中/失败时用 FALLBACK_MODES 兜底,
   // 控件不留空(空下拉框 = 用户以为"这个节点不能设 mode")。
@@ -512,29 +510,7 @@ function DesignerInner() {
   };
 
   saveRef.current = save;
-  // 打开运行对话框时预填工作流变量
-  const openRun = () => {
-    setRunVars(JSON.stringify(wf?.variables ?? {}, null, 2));
-    setRunOpen(true);
-  };
-  const run = async () => {
-    if (!wf) return;
-    let variables: Record<string, unknown>;
-    try {
-      variables = JSON.parse(runVars || "{}");
-    } catch {
-      reportError("变量不是合法 JSON");
-      return;
-    }
-    try {
-      const exec = await api.runWorkflow(wf.id, task || "默认任务", variables);
-      toast.success("执行已启动");
-      setRunOpen(false);
-      nav(`/executions/${exec.id}`);
-    } catch (e) {
-      reportError(e, "运行工作流");
-    }
-  };
+  const openRun = () => setRunOpen(true);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedEdge = edges.find((e) => e.id === selectedEdgeId);
@@ -755,39 +731,169 @@ function DesignerInner() {
         </div>
       </div>
 
-      {/* 运行对话框 */}
-      <Dialog open={runOpen} onOpenChange={setRunOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>运行工作流</DialogTitle>
-          </DialogHeader>
-          {/* 任务框回车 = 启动执行:填完任务直接回车是最自然的路径 */}
-          <Input
-            placeholder="任务描述(将作为 {{task}} 注入 Prompt)"
-            value={task}
-            onChange={(e) => setTask(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                run();
-              }
-            }}
-          />
-          <Textarea
-            className="min-h-16 font-mono text-xs"
-            placeholder='{"key": "value"}(可选变量,{{variable.key}} 引用)'
-            value={runVars}
-            onChange={(e) => setRunVars(e.target.value)}
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRunOpen(false)}>取消</Button>
-            <Button onClick={run}>
-              <Play className="mr-1 h-4 w-4" /> 启动执行
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* 运行对话框(导出组件,单测见 designer.rundialog.test.tsx) */}
+      <RunDialog
+        open={runOpen}
+        onOpenChange={setRunOpen}
+        wf={wf}
+        onLaunch={async (t, variables) => {
+          const exec = await api.runWorkflow(wf.id, t, variables);
+          toast.success("执行已启动");
+          setRunOpen(false);
+          nav(`/executions/${exec.id}`);
+        }}
+      />
     </div>
+  );
+}
+
+// RunDialog 是"运行工作流"对话框(从 DesignerInner 抽出,导出以便单测:
+// 见 designer.rundialog.test.tsx)。
+//
+// 三块输入:
+//   - 任务(回车 = 启动,填完直接回车是最自然的路径);
+//   - 声明式入参(迭代 36):工作流 inputs 段渲染成类型化字段 —— 字符串/
+//     数字用输入框、布尔用开关,default 预填、required 打星号;字段是
+//     声明入参的**主控件**(启动时覆盖 JSON 文本框里的同名键);
+//   - 变量 JSON 文本框:承载未声明的变量(既有行为不变)。
+//
+// 数字字段转不出数值时**原样传字符串**:让后端的 INPUT_TYPE_MISMATCH
+// 点名是哪个入参(约定 14:静默丢弃不行)。
+export function RunDialog({
+  open,
+  onOpenChange,
+  wf,
+  onLaunch,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  wf: Workflow | null;
+  onLaunch: (task: string, variables: Record<string, unknown>) => Promise<void>;
+}) {
+  const [task, setTask] = useState("");
+  const [runVars, setRunVars] = useState("{}");
+  // 声明式入参的运行值:字符串输入框存 string(数字在启动时转换),
+  // 开关存 boolean。
+  const [runInputs, setRunInputs] = useState<Record<string, unknown>>({});
+  const [launching, setLaunching] = useState(false);
+
+  // 打开时预填:变量 = 工作流静态变量;入参 = default(布尔缺省 false;
+  // 无 default 的必填项留空,由启动校验给出可读的"必填未提供"提示)。
+  useEffect(() => {
+    if (!open) return;
+    setTask("");
+    setRunVars(JSON.stringify(wf?.variables ?? {}, null, 2));
+    const prefill: Record<string, unknown> = {};
+    for (const d of wf?.inputs ?? []) {
+      if (d.default !== undefined && d.default !== null) {
+        prefill[d.name] = d.default;
+      } else if (d.type === "boolean") {
+        prefill[d.name] = false;
+      }
+    }
+    setRunInputs(prefill);
+  }, [open, wf]);
+
+  const launch = async () => {
+    let variables: Record<string, unknown>;
+    try {
+      variables = JSON.parse(runVars || "{}");
+    } catch {
+      reportError("变量不是合法 JSON");
+      return;
+    }
+    for (const d of wf?.inputs ?? []) {
+      const v = runInputs[d.name];
+      if (d.type === "boolean") {
+        variables[d.name] = v === true;
+      } else if (typeof v === "string" && v !== "") {
+        if (d.type === "number") {
+          const n = Number(v);
+          variables[d.name] = Number.isNaN(n) ? v : n;
+        } else {
+          variables[d.name] = v;
+        }
+      } else if (typeof v === "number") {
+        variables[d.name] = v;
+      }
+    }
+    setLaunching(true);
+    try {
+      await onLaunch(task || "默认任务", variables);
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>运行工作流</DialogTitle>
+        </DialogHeader>
+        {/* 任务框回车 = 启动执行:填完任务直接回车是最自然的路径 */}
+        <Input
+          placeholder="任务描述(将作为 {{task}} 注入 Prompt)"
+          value={task}
+          onChange={(e) => setTask(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              launch();
+            }
+          }}
+        />
+        {/* 声明式入参:类型化字段优先,声明过的入参不再手写 JSON。
+            开关与输入框都必须有可访问名称(aria-label),读屏不念"按钮"。 */}
+        {(wf?.inputs?.length ?? 0) > 0 && (
+          <div className="space-y-2">
+            <Label className="text-xs text-muted-foreground">运行入参(工作流声明)</Label>
+            {(wf?.inputs ?? []).map((d: InputDecl) => (
+              <div key={d.name} className="flex items-center gap-2">
+                {d.type === "boolean" ? (
+                  <div className="flex flex-1 items-center justify-between rounded-md border px-3 py-2">
+                    <span className="text-sm">
+                      {d.name}
+                      {d.required && <span aria-hidden> *</span>}
+                      {d.description && <span className="ml-2 text-xs text-muted-foreground">{d.description}</span>}
+                    </span>
+                    <Switch
+                      checked={runInputs[d.name] === true}
+                      onCheckedChange={(v) => setRunInputs((s0) => ({ ...s0, [d.name]: v }))}
+                      aria-label={`入参 ${d.name}`}
+                    />
+                  </div>
+                ) : (
+                  <Input
+                    type={d.type === "number" ? "number" : "text"}
+                    aria-label={`入参 ${d.name}`}
+                    placeholder={
+                      (d.required ? "必填 " : "") +
+                      (d.description || d.name) +
+                      (d.default !== undefined && d.default !== null ? `(默认 ${String(d.default)})` : "")
+                    }
+                    value={runInputs[d.name] == null ? "" : String(runInputs[d.name])}
+                    onChange={(e) => setRunInputs((s0) => ({ ...s0, [d.name]: e.target.value }))}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <Textarea
+          className="min-h-16 font-mono text-xs"
+          placeholder='{"key": "value"}(未声明入参的变量,{{variable.key}} 引用;声明过的入参用上方字段)'
+          value={runVars}
+          onChange={(e) => setRunVars(e.target.value)}
+        />
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={launch} disabled={launching}>
+            <Play className="mr-1 h-4 w-4" /> 启动执行
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
