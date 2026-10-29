@@ -288,6 +288,19 @@
 - `SingleInstance.AdditionalData` + `FileAssociations: [".yaml"]`:双击导入工作流。
 - `Options.Logger` 接入 logx(统一 Wails 内部日志管道)。
 
+### 4. 前端 i18n 框架(评估后暂缓,迭代 37)
+- 现状:界面文案已中文化(导航/表头/按钮/状态/提示),唯一文案来源是
+  `frontend/src/lib/labels.ts`(状态/模式/启用的枚举映射,未知值回退
+  原文),并写明英文白名单(产品名、Agent/Skill/Workflow 实体名、
+  Prompt、decision/mode 协议枚举值、事件类型与错误码)。
+- **暂缓原因**:本应用定位是单语(中文)桌面工具,没有多语言需求;
+  引入 react-i18next / FormatJS 意味着全部内联文案迁入 key-value 字典,
+  迁移面覆盖二十余个页面/组件,而收益(多语言切换)在可预见的 roadmap
+  里不存在。labels.ts 的共享映射已解决"同一枚举两处翻译不一致"的
+  一致性风险(约定 13 的前端版)。
+- 重评条件:需要面向非中文用户发布,或文案量增长到需要运营化
+  (文案热更新/审校流程)时。
+
 ## 三、已确认的语义决定(勿当 Bug "修复")
 
 - **DELETE 幂等**:删除不存在的资源返回 200(api/server_test.go 有断言)。
