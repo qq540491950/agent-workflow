@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] 侧栏导航项为中文;Git 保留;`Orchestrator` 与 `ADK Go runtime · Wails 3` 等产品/技术名保留
-- [ ] `mode:` 行显示中文(桌面/服务器),未知模式回退原文
-- [ ] StateBadge 所有已知状态显示中文;未知状态(如 PAUSED、SOME_FUTURE_STATE)回退原文
-- [ ] `components/layout.test.tsx`、`components/state-badge.test.tsx` 断言同步更新
-- [ ] `npx vitest run components` 绿
+- [x] 侧栏导航项为中文;Git 保留;`Orchestrator` 与 `ADK Go runtime · Wails 3` 等产品/技术名保留
+- [x] `mode:` 行显示中文(桌面/服务器),未知模式回退原文
+- [x] StateBadge 所有已知状态显示中文;未知状态(如 PAUSED、SOME_FUTURE_STATE)回退原文
+- [x] `components/layout.test.tsx`、`components/state-badge.test.tsx` 断言同步更新
+- [x] `npx vitest run components` 绿

@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] 页标题、HITL 面板文案为中文;provide() 提交的 response 值仍为英文枚举
-- [ ] Tab 制品/状态为中文;节点状态文本经 stateLabel 中文化;decision 徽章保留英文
-- [ ] 导出记录/取消执行/重试失败节点/跳过并继续等既有中文文案不回退
-- [ ] `pages/ExecutionMonitor.test.tsx` 断言同步(状态徽章 5 组 label、Approve→批准、Workflow requires your input→工作流等待人工输入)
-- [ ] `npx vitest run pages/ExecutionMonitor.test.tsx` 绿
+- [x] 页标题、HITL 面板文案为中文;provide() 提交的 response 值仍为英文枚举
+- [x] Tab 制品/状态为中文;节点状态文本经 stateLabel 中文化;decision 徽章保留英文
+- [x] 导出记录/取消执行/重试失败节点/跳过并继续等既有中文文案不回退
+- [x] `pages/ExecutionMonitor.test.tsx` 断言同步(状态徽章 5 组 label、Approve→批准、Workflow requires your input→工作流等待人工输入)
+- [x] `npx vitest run pages/ExecutionMonitor.test.tsx` 绿

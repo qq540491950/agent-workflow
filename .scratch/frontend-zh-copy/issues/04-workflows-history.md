@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Workflows 页标题为中文;Designer→设计器
-- [ ] WorkflowHistory 表头(执行 ID/任务/状态)与副标题为中文;版本徽章 vN 保留
-- [ ] YAML 导入/新建/运行对话框文案不回退(保持既有中文)
-- [ ] `pages/Workflows.test.tsx`、`pages/WorkflowHistory.test.tsx` 如有受影响断言同步更新
-- [ ] `npx vitest run pages/Workflows.test.tsx pages/WorkflowHistory.test.tsx` 绿
+- [x] Workflows 页标题为中文;Designer→设计器
+- [x] WorkflowHistory 表头(执行 ID/任务/状态)与副标题为中文;版本徽章 vN 保留
+- [x] YAML 导入/新建/运行对话框文案不回退(保持既有中文)
+- [x] `pages/Workflows.test.tsx`、`pages/WorkflowHistory.test.tsx` 如有受影响断言同步更新
+- [x] `npx vitest run pages/Workflows.test.tsx pages/WorkflowHistory.test.tsx` 绿

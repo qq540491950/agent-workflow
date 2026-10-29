@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] GitPanel Tab/表头/占位符/空态中文;Hash 等数据值保留
-- [ ] GitPanel 查询失败的 scope 文案中文(状态/差异/历史)
-- [ ] EventsAudit 页标题与分类按钮中文;Agent/Git 分类保留
-- [ ] Settings 页标题中文;安全说明权限口径与 07 一致
-- [ ] `npx vitest run pages/GitPanel.test.tsx pages/EventsAudit.test.tsx pages/Settings.test.tsx` 绿
+- [x] GitPanel Tab/表头/占位符/空态中文;Hash 等数据值保留
+- [x] GitPanel 查询失败的 scope 文案中文(状态/差异/历史)
+- [x] EventsAudit 页标题与分类按钮中文;Agent/Git 分类保留
+- [x] Settings 页标题中文;安全说明权限口径与 07 一致
+- [x] `npx vitest run pages/GitPanel.test.tsx pages/EventsAudit.test.tsx pages/Settings.test.tsx` 绿

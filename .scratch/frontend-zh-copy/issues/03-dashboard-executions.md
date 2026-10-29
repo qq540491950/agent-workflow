@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Dashboard 页标题、统计卡、表头、徽章、`N 个节点` 均为中文;ID/v1 保留
-- [ ] Executions 页标题、表头为中文;过滤按钮显示中文、点击过滤逻辑仍按枚举值比较
-- [ ] 状态列徽章(经 StateBadge)已由 02 中文化,此处不改
-- [ ] `pages/Dashboard.test.tsx`(Dashboard→总览、Cancelled→已取消)、`pages/Executions.test.tsx` 断言同步
-- [ ] `npx vitest run pages/Dashboard.test.tsx pages/Executions.test.tsx` 绿
+- [x] Dashboard 页标题、统计卡、表头、徽章、`N 个节点` 均为中文;ID/v1 保留
+- [x] Executions 页标题、表头为中文;过滤按钮显示中文、点击过滤逻辑仍按枚举值比较
+- [x] 状态列徽章(经 StateBadge)已由 02 中文化,此处不改
+- [x] `pages/Dashboard.test.tsx`(Dashboard→总览、Cancelled→已取消)、`pages/Executions.test.tsx` 断言同步
+- [x] `npx vitest run pages/Dashboard.test.tsx pages/Executions.test.tsx` 绿

@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] `frontend/src/lib/labels.ts` 存在,导出 `STATE_LABELS`、`stateLabel()`(未知状态回退原文)
-- [ ] labels 配套单测覆盖:已知状态映射、未知状态回退
-- [ ] 模块头注释写明白名单与使用规则(界面文案"该中文的都中文")
-- [ ] `npx vitest run` 与 `npm run build` 全绿,无 UI 行为变化
+- [x] `frontend/src/lib/labels.ts` 存在,导出 `STATE_LABELS`、`stateLabel()`(未知状态回退原文)
+- [x] labels 配套单测覆盖:已知状态映射、未知状态回退
+- [x] 模块头注释写明白名单与使用规则(界面文案"该中文的都中文")
+- [x] `npx vitest run` 与 `npm run build` 全绿,无 UI 行为变化

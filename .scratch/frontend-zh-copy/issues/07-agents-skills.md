@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Agents 权限表头中文;aria-label 保留原始权限键名
-- [ ] Agents/Skills 的 Test 按钮中文(测试中… 状态保留)
-- [ ] Skills 表头与 builtin 中文化;副标题里的 Skill/Workflow Runtime 术语保留
-- [ ] Settings 安全说明中权限口径(fs:write / git:commit / git:push)与 Agents 表头同口径中文
-- [ ] `npx vitest run pages/Agents.test.tsx pages/Skills.test.tsx pages/Settings.test.tsx` 绿
+- [x] Agents 权限表头中文;aria-label 保留原始权限键名
+- [x] Agents/Skills 的 Test 按钮中文(测试中… 状态保留)
+- [x] Skills 表头与 builtin 中文化;副标题里的 Skill/Workflow Runtime 术语保留
+- [x] Settings 安全说明中权限口径(fs:write / git:commit / git:push)与 Agents 表头同口径中文
+- [x] `npx vitest run pages/Agents.test.tsx pages/Skills.test.tsx pages/Settings.test.tsx` 绿

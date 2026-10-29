@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] nodeMeta 标签中文;左侧面板、画布节点副标题一致
-- [ ] NodePropertyPanel 行标签中文;枚举值下拉保留英文
-- [ ] WorkflowPropertyPanel 行标签(变量/循环上限/达到上限后/超时)中文
-- [ ] `pages/designer.modes.test.tsx`(Mode→执行模式 2 处)等受影响断言同步
-- [ ] `npx vitest run pages/designer.modes.test.tsx pages/designer.inputs.test.tsx pages/designer.rundialog.test.tsx` 绿
+- [x] nodeMeta 标签中文;左侧面板、画布节点副标题一致
+- [x] NodePropertyPanel 行标签中文;枚举值下拉保留英文
+- [x] WorkflowPropertyPanel 行标签(变量/循环上限/达到上限后/超时)中文
+- [x] `pages/designer.modes.test.tsx`(Mode→执行模式 2 处)等受影响断言同步
+- [x] `npx vitest run pages/designer.modes.test.tsx pages/designer.inputs.test.tsx pages/designer.rundialog.test.tsx` 绿

@@ -6,6 +6,6 @@
 
 **Status:** ready-for-agent
 
-- [ ] 残留英文扫描通过:界面文案仅剩白名单项(逐项可解释)
-- [ ] `./scripts/verify.sh` 全绿(vet + race + 前端 + 双冒烟)
-- [ ] docs/ROADMAP.md 增补 i18n 评估小节(引入/不引入的理由)
+- [x] 残留英文扫描通过:界面文案仅剩白名单项(逐项可解释)
+- [x] `./scripts/verify.sh` 全绿(vet + race + 前端 + 双冒烟)
+- [x] docs/ROADMAP.md 增补 i18n 评估小节(引入/不引入的理由)
