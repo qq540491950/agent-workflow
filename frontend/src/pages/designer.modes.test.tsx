@@ -188,7 +188,7 @@ describe("Designer 的 mode 下拉", () => {
     expect(trigger?.textContent ?? "").toContain("plan");
     // 兜底:触发器存在即可(不空)
     expect(trigger).not.toBeNull();
-    expect(screen.getByText("Mode")).toBeTruthy();
+    expect(screen.getByText("执行模式")).toBeTruthy();
   });
 });
 
@@ -251,7 +251,7 @@ describe("Designer 页面:mode 清单来自后端", () => {
       return el;
     });
     fireEvent.click(node);
-    await waitFor(() => expect(screen.getByText("Mode")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("执行模式")).toBeTruthy());
     await openSelect(selectTrigger(1));
     const options = optionTexts();
     expect(options).toContain("brand-new-mode");

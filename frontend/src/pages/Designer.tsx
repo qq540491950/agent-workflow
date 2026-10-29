@@ -66,15 +66,17 @@ export const nodeMeta: Record<
   string,
   { label: string; icon: React.ReactNode; color: string }
 > = {
+  // 节点类型名面向用户(左侧拖拽面板/画布副标题):控制结构用中文,
+  // Agent/Skill/Git 等实体名保留英文(与后端术语一致)。
   agent: { label: "Agent", icon: <Bot className="h-4 w-4" />, color: "border-violet-500/50 bg-violet-500/10" },
   skill: { label: "Skill", icon: <Wrench className="h-4 w-4" />, color: "border-amber-500/50 bg-amber-500/10" },
-  condition: { label: "Condition", icon: <ConditionIcon className="h-4 w-4" />, color: "border-sky-500/50 bg-sky-500/10" },
-  parallel: { label: "Parallel", icon: <Layers className="h-4 w-4" />, color: "border-pink-500/50 bg-pink-500/10" },
-  merge: { label: "Merge", icon: <Merge className="h-4 w-4" />, color: "border-pink-500/50 bg-pink-500/10" },
-  human: { label: "Human", icon: <UserRound className="h-4 w-4" />, color: "border-green-500/50 bg-green-500/10" },
-  script: { label: "Script", icon: <TerminalSquare className="h-4 w-4" />, color: "border-slate-500/50 bg-slate-500/10" },
+  condition: { label: "条件", icon: <ConditionIcon className="h-4 w-4" />, color: "border-sky-500/50 bg-sky-500/10" },
+  parallel: { label: "并行", icon: <Layers className="h-4 w-4" />, color: "border-pink-500/50 bg-pink-500/10" },
+  merge: { label: "汇合", icon: <Merge className="h-4 w-4" />, color: "border-pink-500/50 bg-pink-500/10" },
+  human: { label: "人工", icon: <UserRound className="h-4 w-4" />, color: "border-green-500/50 bg-green-500/10" },
+  script: { label: "脚本", icon: <TerminalSquare className="h-4 w-4" />, color: "border-slate-500/50 bg-slate-500/10" },
   git: { label: "Git", icon: <GitCommitHorizontal className="h-4 w-4" />, color: "border-orange-500/50 bg-orange-500/10" },
-  subworkflow: { label: "Sub Workflow", icon: <WorkflowIcon className="h-4 w-4" />, color: "border-cyan-500/50 bg-cyan-500/10" },
+  subworkflow: { label: "子工作流", icon: <WorkflowIcon className="h-4 w-4" />, color: "border-cyan-500/50 bg-cyan-500/10" },
 };
 
 // ---- mode 清单(后端派生) ----
@@ -1041,7 +1043,7 @@ export function NodePropertyPanel({
               </SelectContent>
             </Select>
           </Row>
-          <Row label="Model(可选,覆盖 Agent 默认模型)">
+          <Row label="模型(可选,覆盖 Agent 默认模型)">
             <Input
               className="font-mono text-xs"
               list="common-models"
@@ -1050,7 +1052,7 @@ export function NodePropertyPanel({
               onChange={(e) => setCfg("model", e.target.value)}
             />
           </Row>
-          <Row label="Mode">
+          <Row label="执行模式">
             <Select value={String(cfg.mode ?? "")} onValueChange={(v) => setCfg("mode", v)}>
               <SelectTrigger><SelectValue placeholder="执行模式" /></SelectTrigger>
               <SelectContent>
@@ -1067,10 +1069,10 @@ export function NodePropertyPanel({
               onChange={(e) => setCfg("prompt", { template: e.target.value })}
             />
           </Row>
-          <Row label="Working Directory(可选)">
+          <Row label="工作目录(可选)">
             <Input value={String(cfg.working_dir ?? "")} onChange={(e) => setCfg("working_dir", e.target.value)} />
           </Row>
-          <Row label="Timeout(秒,0=默认)">
+          <Row label="超时(秒,0=默认)">
             <Input
               type="number"
               value={String(cfg.timeout_seconds ?? 0)}
@@ -1132,7 +1134,7 @@ export function NodePropertyPanel({
           <Row label="Skill">
             <Input className="font-mono text-xs" value={String(cfg.skill ?? "")} onChange={(e) => setCfg("skill", e.target.value)} />
           </Row>
-          <Row label="Arguments(JSON)">
+          <Row label="参数(JSON)">
             <Textarea
               className="min-h-20 font-mono text-xs"
               value={JSON.stringify(cfg.args ?? {}, null, 2)}
@@ -1182,7 +1184,7 @@ export function NodePropertyPanel({
       )}
 
       {type === "git" && (
-        <Row label="Operation">
+        <Row label="Git 操作">
           <Select value={String(cfg.operation ?? "")} onValueChange={(v) => setCfg("operation", v)}>
             <SelectTrigger><SelectValue placeholder="git 操作" /></SelectTrigger>
             <SelectContent>
@@ -1195,7 +1197,7 @@ export function NodePropertyPanel({
       )}
 
       {type === "subworkflow" && (
-        <Row label="Workflow ID">
+        <Row label="子工作流 ID">
           <Input className="font-mono text-xs" value={String(cfg.workflow_id ?? "")} onChange={(e) => setCfg("workflow_id", e.target.value)} />
         </Row>
       )}
@@ -1408,7 +1410,7 @@ function WorkflowPropertyPanel({
           onCheckedChange={(v) => onChange({ enabled: v })}
         />
       </div>
-      <Row label="Variables(JSON,可用 {{variable.xxx}} 引用)">
+      <Row label="变量(JSON,可用 {{variable.xxx}} 引用)">
         <Textarea
           className="min-h-20 font-mono text-xs"
           value={JSON.stringify(wf.variables ?? {}, null, 2)}
@@ -1427,7 +1429,7 @@ function WorkflowPropertyPanel({
           onChange={(inputs) => onChange({ inputs })}
         />
       </Row>
-      <Row label="Max Iterations(循环上限)">
+      <Row label="循环上限(Max Iterations)">
         <Input
           type="number"
           value={String(wf.settings.max_iterations ?? 5)}
