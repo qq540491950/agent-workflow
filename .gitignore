@@ -22,3 +22,6 @@ bin/agent-workflow-server-smoke
 # TypeScript 增量构建产物(tsc -b 写在工作区根部,不属于任何提交)
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
+
+# NSIS 打包中间产物(package 任务生成的 bootstrapper/脚本)
+build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
