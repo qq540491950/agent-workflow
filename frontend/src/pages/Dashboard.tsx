@@ -13,6 +13,7 @@ import {
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
 import { reportError } from "@/lib/errors";
+import { enabledLabel } from "@/lib/labels";
 import type { Execution, Workflow } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -97,7 +98,7 @@ export default function Dashboard() {
   return (
     <div className="h-full overflow-auto p-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <h1 className="text-2xl font-semibold">总览</h1>
         <p className="text-sm text-muted-foreground">
           多 Agent 工作流编排总览
         </p>
@@ -106,36 +107,36 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <StatCard
           icon={<GitBranch className="h-4 w-4" />}
-          label="Workflows"
+          label="工作流"
           value={workflows.length}
         />
         <StatCard
           icon={<Activity className="h-4 w-4" />}
-          label="Running"
+          label="运行中"
           value={running}
           tone="running"
         />
         <StatCard
           icon={<CircleDashed className="h-4 w-4" />}
-          label="Waiting User"
+          label="等待人工"
           value={waiting}
           tone="waiting"
         />
         <StatCard
           icon={<CheckCircle2 className="h-4 w-4" />}
-          label="Completed"
+          label="已完成"
           value={completed}
           tone="ok"
         />
         <StatCard
           icon={<XCircle className="h-4 w-4" />}
-          label="Failed"
+          label="失败"
           value={failed}
           tone="bad"
         />
         <StatCard
           icon={<Ban className="h-4 w-4" />}
-          label="Cancelled"
+          label="已取消"
           value={cancelled}
           tone="cancelled"
         />
@@ -149,12 +150,12 @@ export default function Dashboard() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Workflow</TableHead>
+                  <TableHead>工作流</TableHead>
                   <TableHead>总执行</TableHead>
-                  <TableHead>Completed</TableHead>
-                  <TableHead>Failed</TableHead>
-                  <TableHead>Cancelled</TableHead>
-                  <TableHead>Waiting</TableHead>
+                  <TableHead>已完成</TableHead>
+                  <TableHead>失败</TableHead>
+                  <TableHead>已取消</TableHead>
+                  <TableHead>等待人工</TableHead>
                   <TableHead>成功率</TableHead>
                 </TableRow>
               </TableHeader>
@@ -219,16 +220,16 @@ export default function Dashboard() {
           <CardContent>
             {executions.length === 0 ? (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                还没有执行记录,去 Workflows 页面运行一个工作流吧
+                还没有执行记录,去工作流页面运行一个工作流吧
               </p>
             ) : (
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Execution</TableHead>
-                    <TableHead>Workflow</TableHead>
-                    <TableHead>Task</TableHead>
-                    <TableHead>State</TableHead>
+                    <TableHead>执行 ID</TableHead>
+                    <TableHead>工作流</TableHead>
+                    <TableHead>任务</TableHead>
+                    <TableHead>状态</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -259,7 +260,7 @@ export default function Dashboard() {
 
         <Card>
           <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-base">Workflows</CardTitle>
+            <CardTitle className="text-base">工作流</CardTitle>
             <Button asChild variant="ghost" size="sm">
               <Link to="/workflows">
                 管理 <ArrowRight className="ml-1 h-3 w-3" />
@@ -281,11 +282,11 @@ export default function Dashboard() {
                 <div>
                   <div className="font-medium">{w.name}</div>
                   <div className="text-xs text-muted-foreground">
-                    {w.nodes.length} nodes · v{w.version}
+                    {w.nodes.length} 个节点 · v{w.version}
                   </div>
                 </div>
                 <Badge variant={w.enabled ? "default" : "secondary"}>
-                  {w.enabled ? "enabled" : "disabled"}
+                  {enabledLabel(w.enabled)}
                 </Badge>
               </Link>
             ))}

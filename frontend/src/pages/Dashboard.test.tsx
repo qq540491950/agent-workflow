@@ -103,7 +103,7 @@ describe("Dashboard 列表防御", () => {
     m.stats.mockResolvedValue({ error: "<html></html>" });
     renderDashboard();
     await settle();
-    expect(screen.getByText("Dashboard")).toBeTruthy();
+    expect(screen.getByText("总览")).toBeTruthy();
     expect(screen.getByText("暂无工作流")).toBeTruthy();
   });
 
@@ -190,12 +190,12 @@ describe("Dashboard 取消与失败分列", () => {
     running: 0,
   };
 
-  it("Cancelled 单独成卡成列", async () => {
+  it("已取消单独成卡成列", async () => {
     m.stats.mockResolvedValue([stat]);
     renderDashboard();
     await settle();
     // 卡片标签与表头各一处
-    expect(screen.getAllByText("Cancelled").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("已取消").length).toBeGreaterThan(0);
     // 卡片值(2)与表格列值(2)都在
     expect(screen.getAllByText("2").length).toBeGreaterThan(0);
   });

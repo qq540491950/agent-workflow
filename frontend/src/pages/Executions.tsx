@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { api, asArray, subscribeEvents } from "@/lib/api";
 import { reportError } from "@/lib/errors";
 import { createRefreshDebounce } from "@/lib/debounce";
+import { stateLabel } from "@/lib/labels";
 import type { Execution } from "@/lib/types";
 import { StateBadge } from "@/components/state-badge";
 import {
@@ -47,10 +48,12 @@ export default function Executions() {
   return (
     <div className="h-full overflow-auto p-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold">Executions</h1>
+        <h1 className="text-2xl font-semibold">执行记录</h1>
         <p className="text-sm text-muted-foreground">全部执行记录(持久化于 SQLite)</p>
       </div>
       <div className="mb-3 flex items-center gap-2">
+        {/* 过滤按钮显示中文(stateLabel),比较仍用原始枚举值 —— 传给
+            后端/参与比较的值不动,只有展示层翻译 */}
         {stateOptions.map((st) => (
           <button
             key={st || "all"}
@@ -62,7 +65,7 @@ export default function Executions() {
                 : "text-muted-foreground hover:bg-accent/40")
             }
           >
-            {st || "全部"}
+            {st ? stateLabel(st) : "全部"}
           </button>
         ))}
       </div>
@@ -71,9 +74,9 @@ export default function Executions() {
           <TableHeader>
             <TableRow>
               <TableHead>ID</TableHead>
-              <TableHead>Workflow</TableHead>
-              <TableHead>Task</TableHead>
-              <TableHead>State</TableHead>
+              <TableHead>工作流</TableHead>
+              <TableHead>任务</TableHead>
+              <TableHead>状态</TableHead>
               <TableHead>当前节点</TableHead>
               <TableHead>开始时间</TableHead>
               <TableHead>结束时间</TableHead>
