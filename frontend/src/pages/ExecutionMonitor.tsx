@@ -6,6 +6,7 @@ import { api, asArray, subscribeEvents } from "@/lib/api";
 import { reportError } from "@/lib/errors";
 import { createRefreshDebounce } from "@/lib/debounce";
 import { createRequestGuard } from "@/lib/request-guard";
+import { stateLabel } from "@/lib/labels";
 import type { Artifact, Execution, ExecutionNode, UIEvent } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -347,7 +348,7 @@ export default function ExecutionMonitor() {
       <div className="mb-4 flex items-center gap-3">
         <div>
           <h1 className="flex items-center gap-2 text-xl font-semibold">
-            Execution
+            执行
             <span className="font-mono text-sm text-muted-foreground">{exec.id}</span>
             <StateBadge state={exec.state} />
             {(exec.iterations?.loop ?? 0) > 0 && (
@@ -462,24 +463,26 @@ export default function ExecutionMonitor() {
         <Card className="mb-4 border-amber-500/50">
           <CardHeader className="py-3">
             <CardTitle className="flex items-center gap-2 text-amber-400">
-              <PauseCircle className="h-4 w-4" /> Workflow requires your input
+              <PauseCircle className="h-4 w-4" /> 工作流等待人工输入
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm">{prompt}</p>
             <div className="flex gap-2">
-              <Button size="sm" disabled={busy} onClick={() => provide("approve")}>Approve</Button>
+              {/* 按钮文案中文;provide() 发给后端的 response 值仍是
+                  approve/reject/continue 协议枚举 —— 展示与协议分离 */}
+              <Button size="sm" disabled={busy} onClick={() => provide("approve")}>批准</Button>
               <Button size="sm" variant="outline" className="text-red-400" disabled={busy} onClick={() => provide("reject")}>
-                Reject
+                拒绝
               </Button>
               <Button size="sm" variant="outline" disabled={busy} onClick={() => provide("continue")}>
-                Continue
+                继续
               </Button>
             </div>
             <div className="flex gap-2">
               <Textarea
                 className="min-h-16"
-                placeholder="提供补充指令后点击 Provide instruction…"
+                placeholder="填写补充指令后点击「提交指令」…"
                 value={instruction}
                 onChange={(e) => setInstruction(e.target.value)}
               />
@@ -489,7 +492,7 @@ export default function ExecutionMonitor() {
                 disabled={busy}
                 onClick={() => provide("instruction", instruction)}
               >
-                Provide instruction
+                提交指令
               </Button>
             </div>
           </CardContent>
@@ -564,8 +567,8 @@ export default function ExecutionMonitor() {
               <TabsList>
                 <TabsTrigger value="events">实时日志 ({events.length})</TabsTrigger>
                 <TabsTrigger value="nodes">节点输出</TabsTrigger>
-                <TabsTrigger value="artifacts">Artifacts ({artifacts.length})</TabsTrigger>
-                <TabsTrigger value="state">State</TabsTrigger>
+                <TabsTrigger value="artifacts">制品 ({artifacts.length})</TabsTrigger>
+                <TabsTrigger value="state">状态</TabsTrigger>
               </TabsList>
               <TabsContent value="events" className="mt-2">
                 <EventLog events={events} />
@@ -582,7 +585,8 @@ export default function ExecutionMonitor() {
                         <summary className="cursor-pointer px-3 py-1.5 text-sm">
                           {n.node_name}
                           <span className="ml-2 text-xs text-muted-foreground">
-                            {n.state}
+                            {/* 节点状态中文(经 stateLabel,未知回退原文) */}
+                            {stateLabel(n.state)}
                           </span>
                           {/* Decision 是结构化路由依据(评审 APPROVED/REJECTED、
                               人工 WAIT_USER):一眼看到路由结果,不用展开找。

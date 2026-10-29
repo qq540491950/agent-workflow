@@ -185,12 +185,13 @@ describe("ExecutionMonitor 实时刷新防抖", () => {
 });
 
 describe("ExecutionMonitor 状态徽章", () => {
+  // 徽章文案统一走 lib/labels.ts 的 stateLabel(中文,未知回退原文)
   it.each([
-    ["RUNNING", "Running"],
-    ["WAITING_USER", "Waiting User"],
-    ["COMPLETED", "Completed"],
-    ["FAILED", "Failed"],
-    ["CANCELLED", "Cancelled"],
+    ["RUNNING", "运行中"],
+    ["WAITING_USER", "等待人工"],
+    ["COMPLETED", "已完成"],
+    ["FAILED", "失败"],
+    ["CANCELLED", "已取消"],
   ])("执行状态 %s 渲染为 %s", async (state, label) => {
     m.getExecution.mockResolvedValue(exec({ state }));
     renderMonitor();
@@ -385,8 +386,8 @@ describe("ExecutionMonitor 结构化节点结果", () => {
 //
 // Resume 之后人工节点有两行(attempt 1 WAITING / attempt 2 SUCCESS):
 // 旧行是历史。此前 waiting 判定是 nodes.some(state === "WAITING"),
-// 被历史行骗中 —— 执行已 COMPLETED,"Workflow requires your input"
-// 面板与 Approve/Reject 按钮仍然显示,再点只会吃一个错误 toast。
+// 被历史行骗中 —— 执行已 COMPLETED,"工作流等待人工输入"
+// 面板与批准/拒绝按钮仍然显示,再点只会吃一个错误 toast。
 describe("ExecutionMonitor 审批面板与执行状态一致", () => {
   const twoRows = [
     { id: "r1", node_id: "approve", node_type: "human", node_name: "人工审批", state: "WAITING", attempt: 1 },
@@ -398,8 +399,8 @@ describe("ExecutionMonitor 审批面板与执行状态一致", () => {
     m.executionNodes.mockResolvedValue(twoRows);
     renderMonitor();
     await settle();
-    expect(screen.queryByText(/Workflow requires your input/)).toBeNull();
-    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByText(/工作流等待人工输入/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "批准" })).toBeNull();
   });
 
   it("执行 WAITING_USER 时面板照常显示(旧行为不回退)", async () => {
@@ -407,8 +408,8 @@ describe("ExecutionMonitor 审批面板与执行状态一致", () => {
     m.executionNodes.mockResolvedValue([twoRows[0]]);
     renderMonitor();
     await settle();
-    expect(screen.getByText(/Workflow requires your input/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(screen.getByText(/工作流等待人工输入/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "批准" })).toBeTruthy();
   });
 
   it("仅节点行 WAITING(执行态刷新前的竞态窗口)→ 面板仍显示(兜底不丢)", async () => {
@@ -416,7 +417,7 @@ describe("ExecutionMonitor 审批面板与执行状态一致", () => {
     m.executionNodes.mockResolvedValue([twoRows[0]]);
     renderMonitor();
     await settle();
-    expect(screen.getByText(/Workflow requires your input/)).toBeTruthy();
+    expect(screen.getByText(/工作流等待人工输入/)).toBeTruthy();
   });
 });
 
