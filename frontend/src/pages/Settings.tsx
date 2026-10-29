@@ -331,7 +331,7 @@ export default function Settings() {
             <ul className="list-disc space-y-1 pl-4">
               <li>Agent 的模型/API 端点/环境变量保存在本应用自己的 SQLite 中,不写入 ~/.claude 等本地配置。</li>
               <li>敏感环境变量通过 API 读取时以 *** 掩码,不进入日志。</li>
-              <li>权限策略(fs:write / git:commit / git:push)由 Permission Manager 强制执行。</li>
+              <li>权限策略(文件写入 / Git 提交 / Git 推送)由 Permission Manager 强制执行。</li>
               <li>script 节点默认不放行(见上方「安全」),避免导入的工作流直接执行本地命令。</li>
             </ul>
           </CardContent>

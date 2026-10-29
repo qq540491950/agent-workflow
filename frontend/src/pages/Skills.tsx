@@ -51,7 +51,7 @@ export default function Skills() {
   return (
     <div className="h-full overflow-auto p-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold">Skills</h1>
+        <h1 className="text-2xl font-semibold">技能</h1>
         <p className="text-sm text-muted-foreground">
           Skill 注册表 — Workflow Runtime 不感知 Skill 内部实现,仅通过接口调用
         </p>
@@ -60,10 +60,10 @@ export default function Skills() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Skill</TableHead>
+              <TableHead>名称</TableHead>
               <TableHead>ID</TableHead>
               <TableHead>描述</TableHead>
-              <TableHead>Provider</TableHead>
+              <TableHead>提供方</TableHead>
               <TableHead>启用</TableHead>
               <TableHead className="text-right">测试</TableHead>
             </TableRow>
@@ -78,7 +78,7 @@ export default function Skills() {
                 <TableCell className="max-w-md text-sm text-muted-foreground">
                   {s.description}
                 </TableCell>
-                <TableCell className="text-sm">builtin</TableCell>
+                <TableCell className="text-sm">内置</TableCell>
                 <TableCell>
                   <Switch
                     checked={s.enabled}
@@ -100,7 +100,7 @@ export default function Skills() {
                       }
                     }}
                   >
-                    Test
+                    测试
                   </Button>
                 </TableCell>
               </TableRow>

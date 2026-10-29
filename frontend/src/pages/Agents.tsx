@@ -144,7 +144,7 @@ export default function Agents() {
   return (
     <div className="h-full overflow-auto p-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold">Agents</h1>
+        <h1 className="text-2xl font-semibold">Agent</h1>
         <p className="text-sm text-muted-foreground">
           Agent 注册表、权限策略与模型配置。模型/端点/环境变量仅通过
           <b className="text-foreground">调用级 CLI 参数与环境变量</b>
@@ -158,11 +158,13 @@ export default function Agents() {
               <TableHead>Agent</TableHead>
               <TableHead>ID</TableHead>
               <TableHead>模型</TableHead>
-              <TableHead>fs:read</TableHead>
-              <TableHead>fs:write</TableHead>
-              <TableHead>git:read</TableHead>
-              <TableHead>git:commit</TableHead>
-              <TableHead>git:push</TableHead>
+              {/* 权限表头用中文;对应的后端键名(filesystem_read 等)
+                  保留在各行 Switch 的 aria-label 里,读屏与后端口径一致 */}
+              <TableHead>文件读取</TableHead>
+              <TableHead>文件写入</TableHead>
+              <TableHead>Git 读取</TableHead>
+              <TableHead>Git 提交</TableHead>
+              <TableHead>Git 推送</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
@@ -223,7 +225,7 @@ export default function Agents() {
                       }
                     }}
                   >
-                    {testingAgent === a.id ? "测试中…" : "Test"}
+                    {testingAgent === a.id ? "测试中…" : "测试"}
                   </Button>
                 </TableCell>
               </TableRow>
