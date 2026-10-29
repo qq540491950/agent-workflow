@@ -112,7 +112,7 @@ export default function WorkflowHistory() {
           <Badge variant="secondary">v{wf?.version ?? "?"}</Badge>
         </h1>
         <p className="text-sm text-muted-foreground">
-          执行历史 · Execution 绑定具体 Workflow 版本
+          执行历史 · 每次执行绑定具体的工作流版本
         </p>
       </div>
       {versions.length > 0 && (
@@ -130,10 +130,10 @@ export default function WorkflowHistory() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Execution</TableHead>
+              <TableHead>执行 ID</TableHead>
               <TableHead>版本</TableHead>
-              <TableHead>Task</TableHead>
-              <TableHead>State</TableHead>
+              <TableHead>任务</TableHead>
+              <TableHead>状态</TableHead>
               <TableHead>开始时间</TableHead>
               <TableHead>耗时</TableHead>
             </TableRow>

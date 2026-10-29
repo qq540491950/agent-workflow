@@ -144,7 +144,7 @@ export default function Workflows() {
     <div className="h-full overflow-auto p-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Workflows</h1>
+          <h1 className="text-2xl font-semibold">工作流</h1>
           <p className="text-sm text-muted-foreground">
             创建、编辑、运行工作流
           </p>
@@ -442,7 +442,7 @@ export default function Workflows() {
             />
             <p className="text-xs text-muted-foreground">
               <Power className="mr-1 inline h-3 w-3" />
-              创建后进入 Designer 画布,可拖入节点并连线
+              创建后进入设计器画布,可拖入节点并连线
             </p>
           </div>
           <DialogFooter>
