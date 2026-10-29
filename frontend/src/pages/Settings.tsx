@@ -166,7 +166,7 @@ export default function Settings() {
   return (
     <div className="h-full overflow-auto p-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold">Settings</h1>
+        <h1 className="text-2xl font-semibold">设置</h1>
         <p className="text-sm text-muted-foreground">应用设置</p>
       </div>
 

@@ -21,13 +21,15 @@ interface AuditEvent {
 }
 
 const categories = [
+  // 事件类型前缀(后端事件域)保留原文,按钮文案用中文;Agent/Git
+  // 本身就是白名单实体名。
   { prefix: "", label: "全部" },
-  { prefix: "workflow.", label: "Workflow" },
-  { prefix: "node.", label: "Node" },
+  { prefix: "workflow.", label: "工作流" },
+  { prefix: "node.", label: "节点" },
   { prefix: "agent.", label: "Agent" },
-  { prefix: "review.", label: "Review" },
-  { prefix: "human.", label: "Human" },
-  { prefix: "skill.", label: "Skill" },
+  { prefix: "review.", label: "评审" },
+  { prefix: "human.", label: "人工" },
+  { prefix: "skill.", label: "技能" },
   { prefix: "git.", label: "Git" },
 ];
 
@@ -101,7 +103,7 @@ export default function EventsAudit() {
     <div className="h-full overflow-auto p-6">
       <div className="mb-4 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Events</h1>
+          <h1 className="text-2xl font-semibold">事件</h1>
           <p className="text-sm text-muted-foreground">
             跨执行审计日志(实时,按类型过滤)
           </p>

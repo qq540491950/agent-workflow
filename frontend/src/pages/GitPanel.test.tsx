@@ -67,12 +67,12 @@ describe("GitPanel 部分失败", () => {
     expect(vi.mocked(toast.error).mock.calls[vi.mocked(toast.error).mock.calls.length - 1]?.[0]).toContain("Git 状态");
   });
 
-  it("Log 查询失败不影响状态面板", async () => {
+  it("提交历史查询失败不影响状态面板", async () => {
     m.gitLog.mockRejectedValue(new Error("git log 失败"));
     render(<GitPanel />);
     await settle();
     expect(screen.getByText("main")).toBeTruthy();
-    expect(vi.mocked(toast.error).mock.calls[vi.mocked(toast.error).mock.calls.length - 1]?.[0]).toContain("Log");
+    expect(vi.mocked(toast.error).mock.calls[vi.mocked(toast.error).mock.calls.length - 1]?.[0]).toContain("历史");
   });
 
   it("全部成功时不报错", async () => {

@@ -95,7 +95,7 @@ describe("EventsAudit 列表防御", () => {
   it("按分类过滤时带上 type 前缀", async () => {
     renderAudit();
     await settle();
-    fireEvent.click(screen.getByText("Workflow"));
+    fireEvent.click(screen.getByText("工作流"));
     await settle();
     expect(m.allEvents).toHaveBeenCalledWith("?type=workflow.&limit=300");
   });
@@ -130,7 +130,7 @@ describe("EventsAudit 请求竞态", () => {
 
     renderAudit();
     await settle();
-    fireEvent.click(screen.getByText("Workflow"));
+    fireEvent.click(screen.getByText("工作流"));
     await settle();
     // 新前缀的结果已经渲染。
     expect(screen.getByText("workflow.started")).toBeTruthy();

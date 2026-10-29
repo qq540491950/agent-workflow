@@ -77,8 +77,8 @@ export default function GitPanel() {
     if (lg.status === "fulfilled") setLog(asArray<LogEntry>(lg.value));
     const failed = [
       st.status === "rejected" ? "状态" : "",
-      df.status === "rejected" ? "Diff" : "",
-      lg.status === "rejected" ? "Log" : "",
+      df.status === "rejected" ? "差异" : "",
+      lg.status === "rejected" ? "历史" : "",
     ].filter(Boolean);
     if (failed.length > 0) {
       const first = [st, df, lg].find((r) => r.status === "rejected") as
@@ -176,7 +176,7 @@ export default function GitPanel() {
                 </div>
                 <div className="space-y-2 border-t pt-3">
                   <Input
-                    placeholder="commit message"
+                    placeholder="提交信息"
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && commit()}
@@ -194,22 +194,22 @@ export default function GitPanel() {
           <CardContent className="pt-4">
             <Tabs defaultValue="diff">
               <TabsList>
-                <TabsTrigger value="diff">Diff</TabsTrigger>
-                <TabsTrigger value="log">Log ({log.length})</TabsTrigger>
+                <TabsTrigger value="diff">差异</TabsTrigger>
+                <TabsTrigger value="log">提交历史 ({log.length})</TabsTrigger>
               </TabsList>
               <TabsContent value="diff" className="mt-2">
                 <pre className="max-h-[440px] overflow-auto rounded-md bg-muted/40 p-3 font-mono text-[11px]">
-                  {diff || "(no diff)"}
+                  {diff || "(无变更)"}
                 </pre>
               </TabsContent>
               <TabsContent value="log" className="mt-2">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Hash</TableHead>
-                      <TableHead>Author</TableHead>
-                      <TableHead>Date</TableHead>
-                      <TableHead>Subject</TableHead>
+                      <TableHead>哈希</TableHead>
+                      <TableHead>作者</TableHead>
+                      <TableHead>时间</TableHead>
+                      <TableHead>说明</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
