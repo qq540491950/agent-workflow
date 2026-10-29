@@ -15,17 +15,20 @@ import { cn } from "@/lib/utils";
 import { api, asArray, detectMode, subscribeEvents } from "@/lib/api";
 import { createRefreshDebounce } from "@/lib/debounce";
 import { reportError } from "@/lib/errors";
+import { modeLabel } from "@/lib/labels";
 import type { Execution } from "@/lib/types";
 
+// 导航项用中文(用户可读);Git 等专有名词保留。此前直接用路由名
+// (Dashboard/Workflows/…),是"文案从数据模型贴出来"的典型。
 const nav = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/workflows", label: "Workflows", icon: GitBranch },
-  { to: "/executions", label: "Executions", icon: PlayCircle },
-  { to: "/events", label: "Events", icon: ScrollText },
-  { to: "/agents", label: "Agents", icon: Bot },
-  { to: "/skills", label: "Skills", icon: Wrench },
+  { to: "/", label: "总览", icon: LayoutDashboard },
+  { to: "/workflows", label: "工作流", icon: GitBranch },
+  { to: "/executions", label: "执行记录", icon: PlayCircle },
+  { to: "/events", label: "事件", icon: ScrollText },
+  { to: "/agents", label: "Agent", icon: Bot },
+  { to: "/skills", label: "技能", icon: Wrench },
   { to: "/git", label: "Git", icon: GitCompare },
-  { to: "/settings", label: "Settings", icon: Settings },
+  { to: "/settings", label: "设置", icon: Settings },
 ];
 
 export default function Layout() {
@@ -117,7 +120,8 @@ export default function Layout() {
           ))}
         </nav>
         <div className="border-t px-4 py-3 text-[10px] text-muted-foreground">
-          <div>mode: {mode}</div>
+          {/* 运行模式显示中文;未知值由 modeLabel 回退原文 */}
+          <div>模式:{modeLabel(mode)}</div>
           <div>ADK Go runtime · Wails 3</div>
         </div>
       </aside>

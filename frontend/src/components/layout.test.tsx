@@ -119,7 +119,7 @@ describe("Layout 列表防御", () => {
     m.listExecutions.mockResolvedValue({ error: "<html></html>" });
     renderLayout();
     await settle();
-    expect(screen.getByText("Dashboard")).toBeTruthy();
+    expect(screen.getByText("总览")).toBeTruthy();
     expect(screen.queryByText("2")).toBeNull();
   });
 });
