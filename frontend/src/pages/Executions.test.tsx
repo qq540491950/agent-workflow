@@ -8,7 +8,7 @@ import { advance, emit, makeEvent, settle } from "@/test/helpers";
 
 const m = vi.hoisted(() => ({
   handlers: [] as Array<(ev: import("@/lib/types").UIEvent) => void>,
-  listExecutions: vi.fn(),
+  listExecutionsPage: vi.fn(),
   deleteExecution: vi.fn(),
 }));
 
@@ -18,7 +18,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     ...actual,
     api: {
       ...actual.api,
-      listExecutions: m.listExecutions,
+      listExecutionsPage: m.listExecutionsPage,
       deleteExecution: m.deleteExecution,
     },
     subscribeEvents: vi.fn((h: (ev: import("@/lib/types").UIEvent) => void) => {
@@ -43,7 +43,8 @@ const exec = {
 beforeEach(() => {
   vi.useFakeTimers();
   m.handlers = [];
-  m.listExecutions.mockReset().mockResolvedValue([exec]);
+  // 组件走分页接口(游标在 X-Next-Cursor 响应头,mock 直接返回空游标)。
+  m.listExecutionsPage.mockReset().mockResolvedValue({ items: [exec], nextCursor: "" });
   m.deleteExecution.mockReset().mockResolvedValue(undefined);
 });
 
@@ -65,12 +66,12 @@ describe("Executions 实时刷新防抖", () => {
   it("workflow.* 事件在 200ms 窗口内合并为一次刷新", async () => {
     renderExecutions();
     await settle();
-    expect(m.listExecutions).toHaveBeenCalledTimes(1);
+    expect(m.listExecutionsPage).toHaveBeenCalledTimes(1);
     for (let i = 0; i < 5; i++) emit(m.handlers, makeEvent("workflow.completed"));
     await advance(199);
-    expect(m.listExecutions).toHaveBeenCalledTimes(1);
+    expect(m.listExecutionsPage).toHaveBeenCalledTimes(1);
     await advance(1);
-    expect(m.listExecutions).toHaveBeenCalledTimes(2);
+    expect(m.listExecutionsPage).toHaveBeenCalledTimes(2);
   });
 
   it("与工作流无关的事件不触发刷新", async () => {
@@ -78,7 +79,7 @@ describe("Executions 实时刷新防抖", () => {
     await settle();
     emit(m.handlers, makeEvent("agent.output"));
     await advance(500);
-    expect(m.listExecutions).toHaveBeenCalledTimes(1);
+    expect(m.listExecutionsPage).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -100,13 +101,13 @@ describe("Executions 删除二次确认", () => {
     fireEvent.click(screen.getByTitle("删除记录"));
     await settle();
     expect(m.deleteExecution).toHaveBeenCalledWith("ex-1");
-    expect(m.listExecutions).toHaveBeenCalledTimes(2);
+    expect(m.listExecutionsPage).toHaveBeenCalledTimes(2);
   });
 });
 
 describe("Executions 列表防御", () => {
   it("列表接口返回非数组时渲染空列表", async () => {
-    m.listExecutions.mockResolvedValue({ error: "<html></html>" });
+    m.listExecutionsPage.mockResolvedValue({ error: "<html></html>" });
     renderExecutions();
     await settle();
     expect(screen.getByText("暂无执行")).toBeTruthy();

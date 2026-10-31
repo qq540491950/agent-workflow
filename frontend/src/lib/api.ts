@@ -213,6 +213,9 @@ const CODE_HINTS: Record<string, string> = {
   NOT_FOUND: "资源不存在",
   UNKNOWN_FIELD: "请求含未知顶层字段(该字段不会生效)",
   INTERNAL: "后端内部错误",
+  UNAUTHORIZED: "缺少或错误的访问令牌(远程模式需要 Authorization: Bearer)",
+  FORBIDDEN_ORIGIN: "请求来源或 Host 不被信任(跨站请求已被拒绝)",
+  UNSUPPORTED_MEDIA_TYPE: "写接口要求 Content-Type: application/json(导入接口允许 YAML)",
   // ---- 工作流 / 执行 ----
   WORKFLOW_INVALID: "工作流校验未通过(见错误详情)",
   WORKFLOW_DISABLED: "工作流已禁用,先启用再运行",
@@ -225,6 +228,17 @@ const CODE_HINTS: Record<string, string> = {
   INPUT_REQUIRED: "有必填的运行入参没有提供(在工作流声明的 inputs 里)",
   INPUT_TYPE_MISMATCH: "运行入参的类型与声明不符(检查 variables 里的值)",
   WORKFLOW_BUSY: "工作流并发已达上限(settings.max_concurrent),等已有执行结束再试",
+  SYSTEM_BUSY: "全局并发已达上限(runtime.max_active_executions),等已有执行结束再试",
+  WORKSPACE_BUSY: "工作目录正被另一个执行使用,等它结束或开启排队后再试",
+  QUEUE_FULL: "排队队列已满,等已有执行结束再试",
+  INVALID_MAX_ACTIVE_EXECUTIONS: "max_active_executions 非法(0=不限,上限 1000)",
+  INVALID_MAX_QUEUED: "max_queued_executions 非法(1..10000)",
+  INVALID_QUEUE_POLICY: "queue_policy 非法(允许 fair|fifo)",
+  ON_FAILURE_MULTIPLE: "同一节点只能有一条失败边",
+  ON_FAILURE_SELF: "失败边不能指向节点自身",
+  ON_FAILURE_WITH_CONDITION: "失败边不能再带 condition",
+  ON_FAILURE_IN_PARALLEL: "并行区内暂不支持失败边",
+  ON_FAILURE_CYCLE: "失败边形成了环",
   // ---- Agent / 子进程 ----
   AGENT_CANCELLED: "Agent 执行被取消",
   AGENT_CONFIG_CORRUPT: "Agent 配置已损坏,无法解析",
@@ -477,6 +491,14 @@ async function httpText(path: string): Promise<string> {
 }
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  const { data } = await httpWithHeaders<T>(path, init);
+  return data;
+}
+
+async function httpWithHeaders<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<{ data: T; headers: Headers }> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...init,
@@ -491,7 +513,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     throw buildApiError(res.status, data);
   }
-  return data as T;
+  return { data: data as T, headers: res.headers };
 }
 
 // Wails bindings 按需加载(仅桌面模式)。
@@ -549,6 +571,13 @@ export interface SettingsInfo {
   git_working_dir_read_failed?: boolean;
   log_level_read_failed?: boolean;
   allow_script_nodes_read_failed?: boolean;
+  max_active_executions: number;
+  queue_enabled: boolean;
+  max_queued_executions: number;
+  queue_policy: "fair" | "fifo" | string;
+  event_retention_days: number;
+  execution_retention_days: number;
+  max_events_per_execution: number;
 }
 
 export const api = {
@@ -664,6 +693,24 @@ export const api = {
       : `?limit=${limit}`;
     return http(`/api/executions${q}`);
   },
+  async listExecutionsPage(
+    workflowID = "",
+    limit = 50,
+    cursor = "",
+  ): Promise<{ items: Execution[]; nextCursor: string }> {
+    if ((await detectMode()) === "desktop") {
+      const items = nn(await (await wailsBindings()).ex.List(workflowID, clampLimit(limit)));
+      return { items: asArray<Execution>(items), nextCursor: "" };
+    }
+    const params = new URLSearchParams();
+    if (workflowID) params.set("workflow_id", workflowID);
+    params.set("limit", String(Math.min(Math.max(Math.trunc(limit), 1), 500)));
+    if (cursor) params.set("cursor", cursor);
+    const { data, headers } = await httpWithHeaders<Execution[]>(
+      `/api/executions?${params.toString()}`,
+    );
+    return { items: asArray<Execution>(data), nextCursor: headers.get("X-Next-Cursor") ?? "" };
+  },
   async getExecution(id: string): Promise<Execution> {
     if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.Get(id));
     return http(`/api/executions/${id}`);
@@ -675,6 +722,34 @@ export const api = {
   async executionEvents(id: string): Promise<Record<string, unknown>[]> {
     if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.Events(id));
     return http(`/api/executions/${id}/events`);
+  },
+  async executionEventsPage(
+    id: string,
+    opts: { limit?: number; afterSeq?: number; beforeSeq?: number } = {},
+  ): Promise<{ events: Record<string, unknown>[]; nextSeq: number; hasMore: boolean; all: boolean }> {
+    if ((await detectMode()) === "desktop") {
+      const events = asArray<Record<string, unknown>>(nn(await (await wailsBindings()).ex.Events(id)));
+      let nextSeq = 0;
+      for (const ev of events) {
+        const seq = Number(ev.seq);
+        if (Number.isFinite(seq) && seq > nextSeq) nextSeq = seq;
+      }
+      return { events, nextSeq, hasMore: false, all: true };
+    }
+    const params = new URLSearchParams();
+    const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 500), 1), 2000);
+    params.set("limit", String(limit));
+    if (opts.afterSeq !== undefined && opts.afterSeq > 0) params.set("after_seq", String(opts.afterSeq));
+    if (opts.beforeSeq !== undefined && opts.beforeSeq > 0) params.set("before_seq", String(opts.beforeSeq));
+    const { data, headers } = await httpWithHeaders<Record<string, unknown>[]>(
+      `/api/executions/${id}/events?${params.toString()}`,
+    );
+    return {
+      events: asArray<Record<string, unknown>>(data),
+      nextSeq: Number(headers.get("X-Next-Seq") ?? 0) || 0,
+      hasMore: headers.get("X-Has-More") === "true",
+      all: false,
+    };
   },
   async executionArtifacts(id: string): Promise<Artifact[]> {
     if ((await detectMode()) === "desktop") return nn(await (await wailsBindings()).ex.Artifacts(id));
@@ -858,6 +933,13 @@ export const api = {
     log_level?: string;
     /** script 节点放行开关;缺省表示不修改(后端保持既有值) */
     allow_script_nodes?: boolean;
+    max_active_executions?: number;
+    queue_enabled?: boolean;
+    max_queued_executions?: number;
+    queue_policy?: "fair" | "fifo";
+    event_retention_days?: number;
+    execution_retention_days?: number;
+    max_events_per_execution?: number;
   }): Promise<SettingsInfo> {
     if ((await detectMode()) === "desktop") {
       // 省略 git_working_dir = **不修改**(后端契约:body 里是 *string,
@@ -868,15 +950,45 @@ export const api = {
       // 把用户的 git 工作目录清空(迭代 13)。
       const dir =
         patch.git_working_dir ?? (await api.getSettings()).git_working_dir;
-      return nn(
+      const info = nn(
         await (await wailsBindings()).st.Update(
           dir,
           patch.log_level ?? "",
           patch.allow_script_nodes ?? null,
         ),
-      );
+      ) as SettingsInfo;
+      const st = await wailsBindings();
+      if (patch.max_active_executions !== undefined)
+        await st.st.Set("max_active_executions", patch.max_active_executions);
+      if (patch.queue_enabled !== undefined)
+        await st.st.Set("queue_enabled", patch.queue_enabled);
+      if (patch.max_queued_executions !== undefined)
+        await st.st.Set("max_queued_executions", patch.max_queued_executions);
+      if (patch.queue_policy !== undefined)
+        await st.st.Set("queue_policy", patch.queue_policy);
+      if (patch.event_retention_days !== undefined)
+        await st.st.Set("event_retention_days", patch.event_retention_days);
+      if (patch.execution_retention_days !== undefined)
+        await st.st.Set("execution_retention_days", patch.execution_retention_days);
+      if (patch.max_events_per_execution !== undefined)
+        await st.st.Set("max_events_per_execution", patch.max_events_per_execution);
+      return info;
     }
     return http("/api/settings", { method: "POST", body: JSON.stringify(patch) });
+  },
+  async runtimeStats(): Promise<Record<string, number>> {
+    return http("/api/runtime/stats");
+  },
+  async cleanup(dryRun: boolean): Promise<{
+    events: number;
+    artifacts: number;
+    nodes: number;
+    executions: number;
+  }> {
+    return http("/api/maintenance/cleanup", {
+      method: "POST",
+      body: JSON.stringify({ dry_run: dryRun }),
+    });
   },
 
   backupURL(): string {

@@ -20,6 +20,8 @@ const m = vi.hoisted(() => ({
   restoreBackup: vi.fn(),
   exportBackupText: vi.fn(),
   version: vi.fn(),
+  runtimeStats: vi.fn(),
+  cleanup: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -33,6 +35,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
       restoreBackup: m.restoreBackup,
       exportBackupText: m.exportBackupText,
       version: m.version,
+      runtimeStats: m.runtimeStats,
+      cleanup: m.cleanup,
     },
   };
 });
@@ -57,6 +61,8 @@ beforeEach(() => {
   });
   m.exportBackupText.mockReset().mockResolvedValue("{}");
   m.version.mockReset().mockResolvedValue({});
+  m.runtimeStats.mockReset().mockResolvedValue({});
+  m.cleanup.mockReset().mockResolvedValue({ events: 0, artifacts: 0, nodes: 0, executions: 0 });
   vi.mocked(toast.error).mockClear();
   vi.mocked(toast.success).mockClear();
   vi.mocked(toast.warning).mockClear();
@@ -126,11 +132,15 @@ describe("Settings 恢复备份提示", () => {
 });
 
 describe("Settings script 开关风险提示", () => {
+  // 页面有多个 Switch(排队开关等),按 aria-label 精确锁定 script 开关。
+  const scriptSwitch = () =>
+    screen.getByRole("switch", { name: "允许执行 script 节点" }) as HTMLButtonElement;
+
   it("开启时要求二次确认,拒绝则保持关闭且不提交", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     renderSettings();
     await settle();
-    const sw = screen.getAllByRole("switch")[0] as HTMLButtonElement;
+    const sw = scriptSwitch();
     expect(sw.getAttribute("data-state")).toBe("unchecked");
     fireEvent.click(sw);
     await settle();
@@ -148,7 +158,7 @@ describe("Settings script 开关风险提示", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     renderSettings();
     await settle();
-    const sw = screen.getAllByRole("switch")[0] as HTMLButtonElement;
+    const sw = scriptSwitch();
     fireEvent.click(sw);
     await settle();
     expect(sw.getAttribute("data-state")).toBe("checked");

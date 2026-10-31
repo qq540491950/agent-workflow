@@ -28,6 +28,11 @@ export interface WFEdge {
   from: string;
   to: string;
   condition?: string;
+  /**
+   * 失败分支标记(后端 model.Edge.OnFailure):节点失败(重试耗尽)后走这条边。
+   * 与 condition 互斥 —— 同一条边要么是条件分支要么是失败分支。
+   */
+  on_failure?: boolean;
 }
 
 export interface WorkflowSettings {
@@ -97,6 +102,7 @@ export interface Workflow {
 // 留着只会让人以为"还有一种暂停中的执行",并写出永远走不到的分支。
 export type ExecutionState =
   | "CREATED"
+  | "QUEUED"
   | "RUNNING"
   | "WAITING_USER"
   | "COMPLETED"
@@ -123,12 +129,28 @@ export interface Execution {
   error?: string;
   node_states?: Record<string, string>;
   state_data?: Record<string, unknown>;
+  /** 本次执行取得租约的工作目录。 */
+  workspace_dirs?: string[];
+  /** 本次执行走过的失败分支节点。 */
+  via_failure_branch?: string[];
+  queued_at?: string;
+  queue_position?: number;
+  /** 执行级 token 用量聚合。 */
+  usage?: TokenUsage;
   /**
    * 启动前的校验警告(响应带这个字段)。
    *
    * 不阻断运行,但必须让用户看到:此前只进后端日志,用户以为设置生效了。
    */
   warnings?: ValidationError[];
+}
+
+export interface TokenUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  model?: string;
+  cost_usd?: number;
 }
 
 export interface ExecutionNode {
@@ -145,6 +167,7 @@ export interface ExecutionNode {
   started_at?: string;
   finished_at?: string;
   duration_ms?: number;
+  usage?: TokenUsage;
 }
 
 export interface UIEvent {
@@ -152,6 +175,8 @@ export interface UIEvent {
   execution_id: string;
   node_id?: string;
   timestamp: string;
+  /** 持久化事件的序号;实时 SSE 事件没有该字段。 */
+  seq?: number;
   data?: Record<string, unknown>;
 }
 
