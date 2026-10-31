@@ -63,7 +63,7 @@ cd frontend && npm run build && npx vitest run
 
 # 一键完整门禁(上述全部 + gofmt/vet)
 ./scripts/verify.sh
-# 或单独跑端到端冒烟(服务器模式:REST+SSE+HITL+导出+负路径语义+失败重试/跳过+入参校验+并发上限,12 项断言)
+# 或单独跑端到端冒烟(服务器模式:REST+SSE+HITL+导出+负路径语义+失败重试/跳过+入参校验+并发上限+游标分页+全局排队+保留清理+安全负路径+工作区租约+失败分支,16 项断言)
 ./scripts/smoke.sh
 # SSE 实时流端到端(连接即达 + 执行事件经流送达 + keepalive + 断连释放,6 项断言)
 ./scripts/smoke_sse.sh
