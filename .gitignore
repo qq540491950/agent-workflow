@@ -25,3 +25,9 @@ frontend/tsconfig.tsbuildinfo
 
 # NSIS 打包中间产物(package 任务生成的 bootstrapper/脚本)
 build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
+
+# Go 裸构建产物(go build ./tools/bench 默认输出到仓库根)
+/bench.exe
+
+# vitest junit 报告目录(测试运行产物)
+frontend/.vitest/

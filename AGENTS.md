@@ -24,7 +24,7 @@ npx vitest run       # 单测(含 jsdom 组件测试)
 # 一键完整门禁(vet + race + 前端 + 双冒烟)
 ./scripts/verify.sh
 # 或单独跑端到端冒烟(起真实 server 进程)
-./scripts/smoke.sh       # REST+SSE+HITL+导出+负路径+重试跳过+入参校验+并发上限,12 项
+./scripts/smoke.sh       # REST+SSE+HITL+导出+负路径+重试跳过+入参校验+并发上限+游标分页+排队+保留清理+安全负路径+工作区租约+失败分支,16 项
 ./scripts/smoke_sse.sh   # SSE 实时流,6 项(含断连释放)
 
 # 桌面打包(wails3 CLI 需在 ~/go/bin)
@@ -61,7 +61,9 @@ GOOS=windows go build ./agent/... ./workflow/...
 6. **DELETE 幂等**:删除不存在资源返回 200(是有意设计,见
    `api/server_test.go`);其余资源缺失 404+`code:"NOT_FOUND"`。
 7. **前端列表防御**:所有列表接口先过 `asArray()` 再 `.map`;
-   实时事件刷新一律 200ms 防抖(ExecutionMonitor/Layout/EventsAudit 模式)。
+   实时事件触发的**数据重拉**一律 200ms 防抖(ExecutionMonitor/Layout/
+   EventsAudit 模式);事件本身的**日志追加**是本地渲染、不发请求,
+   直接 `setEvents` 即可(ExecutionMonitor 的 SSE 增量追加模式)。
 8. **敏感信息**:API_KEY/TOKEN 等不进日志(logx.Mask)、不进工作流 DSL、
    API 返回掩码;备份导出含明文是唯一例外(文档已注明)。
 9. **生产总线不保留历史**(`event.Bus.KeepHistory` 仅测试用),回放走

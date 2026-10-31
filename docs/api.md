@@ -3,6 +3,21 @@
 > 桌面模式通过 Wails IPC 暴露同一套服务;以下端点在 `--server` 模式下可用。
 > 启动:`./bin/agent-workflow-server --server --addr 127.0.0.1:8080`
 
+> **安全边界(运行时加固)**:服务器模式默认只监听回环地址 ——
+> `--addr` 缺省 host、或 host 不是回环地址时启动**直接失败**
+> (确需远程访问必须显式写 `0.0.0.0` 等**并**加 `--allow-remote`)。
+> 非 2xx 之外,安全中间件还会返回三类错误(形状与普通错误一致,
+> `kind` 均为 `PermissionError`):
+>
+> | 状态码 | code | 场景 |
+> | --- | --- | --- |
+> | 403 | `FORBIDDEN_ORIGIN` | `Host` 头不在受信地址内;或带 `Origin` 且与当前服务不同源(挡浏览器跨站请求,不挡同源页面) |
+> | 415 | `UNSUPPORTED_MEDIA_TYPE` | 写方法(POST/PUT/DELETE/PATCH)带 body 但 `Content-Type` 不是 `application/json`(导入接口允许 YAML) |
+> | 401 | `UNAUTHORIZED` | 启动时传了 `--auth-token` 而请求缺 `Authorization: Bearer <token>`(`/api/health` 豁免;比对恒时,防时序侧信道) |
+>
+> HTTP Server 设有 `ReadHeaderTimeout`(10s)/ `ReadTimeout`(30s)/
+> `IdleTimeout`(120s);**不设 WriteTimeout** —— SSE 长连接依赖写不被超时掐断。
+
 > **第三十轮(迭代 34 收官,轮次 93)契约复核**:本文件是**对外契约**,
 > 收官轮对它做了 **8 条声称 vs 代码**的逐条抽查 —— **8 条全部成立,
 > 契约正文未改**。逐条的核对依据见 `docs/OPTIMIZATION.md` 第十四节
@@ -23,7 +38,7 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 健康检查与版本信息 |
+| GET | `/api/health` | 健康检查与版本信息。**DB ping 失败 → 503** `{"status":"error","code":"DB_ERROR"}`(此前 DB 坏了仍报 200,监控形同虚设);正常 200,带 `running`(当前运行中执行数) |
 | GET | `/api/modes` | agent 节点的**合法 mode 列表**(JSON 字符串数组,顺序即展示顺序)。唯一来源是 `workflow/model.AllModes()`(约定 13:同一份语义只有一处定义)—— 前端的设计器下拉据此渲染,**不再自带硬编码清单**(后端加了 mode 而前端没跟上 → 用户在下拉里选不到它;前端留着后端已删的 mode → 用户选了必然被校验期判非法)。桌面模式走 Wails 绑定 `WorkflowService.Modes()`,与本端点同一份数据(约定 10) |
 
 ## Workflows
@@ -46,11 +61,11 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/workflows/{id}/run` | 启动执行 `{task, variables}`(异步)。工作流声明了 `inputs` 段时(迭代 36):必填入参缺失 → **400 `INPUT_REQUIRED`**;传入值类型不符 → **400 `INPUT_TYPE_MISMATCH`**;缺省项自动兜 `default` 落入执行变量。同一工作流的未结束执行数达到 `settings.max_concurrent` → **409 `WORKFLOW_BUSY`**(fail fast,不排队) |
-| GET | `/api/executions?workflow_id=&limit=` | 执行列表(最新在前)。`limit` **上限 1000**,超出的数字按 1000 收敛并打 `X-Limit-Truncated` / `X-Limit-Applied` 响应头(不再因整数溢出变成"不限制"而返回全表) |
-| GET | `/api/executions/{id}` | 执行详情(含 state_data 快照) |
-| GET | `/api/executions/{id}/nodes` | 节点执行明细(attempt/duration/output)。**output / error / result_json 已在读出口脱敏**(这些字段直接来自 Agent 的 stdout/stderr,常含凭据) |
-| GET | `/api/executions/{id}/events` | 事件流 |
+| POST | `/api/workflows/{id}/run` | 启动执行 `{task, variables}`(异步)。工作流声明了 `inputs` 段时(迭代 36):必填入参缺失 → **400 `INPUT_REQUIRED`**;传入值类型不符 → **400 `INPUT_TYPE_MISMATCH`**;缺省项自动兜 `default` 落入执行变量。同一工作流的未结束执行数达到 `settings.max_concurrent` → **409 `WORKFLOW_BUSY`**。**全局并发与排队(运行时加固)**:全引擎运行中执行数达到 `max_active_executions`(0 = 不限)时,`queue_enabled=false` → 同样 409 `WORKFLOW_BUSY`;`queue_enabled=true` → 执行进入 **QUEUED** 状态,**返回 202**(body 仍是执行对象,`state: "QUEUED"` + `queue_position`),槽位释放后按 `queue_policy`(`fair` 按工作流轮转 / `fifo` 先进先出)自动调度 |
+| GET | `/api/executions?workflow_id=&limit=&cursor=` | 执行列表(最新在前),**游标分页**:响应头 `X-Next-Cursor` 非空表示还有下一页,把它的值作为 `cursor` 传入取下一页(游标是 base64 的 `created_at\0id`,**不可手造**;列表在游标页之间插入新执行不会造成重复/漏项)。`limit` **上限 500**(默认 50),超出的数字按 500 收敛并打 `X-Limit-Truncated` / `X-Limit-Applied` 响应头。`limit` 缺省时与旧的全量列表不同 —— 大量执行时请跟随游标翻页 |
+| GET | `/api/executions/{id}` | 执行详情(含 state_data 快照)。新增字段:`workspace_dirs`(本次执行取过租约的工作区目录)/ `via_failure_branch`(经失败分支完成的节点路径)/ `queue_position`(QUEUED 时的队列位次)/ `usage`(聚合 Token 用量:`input` / `output` / `total` / `model` / `cost_usd`,CLI 未上报时缺省) |
+| GET | `/api/executions/{id}/nodes` | 节点执行明细(attempt/duration/output/usage)。**output / error / result_json 已在读出口脱敏**(这些字段直接来自 Agent 的 stdout/stderr,常含凭据) |
+| GET | `/api/executions/{id}/events?after_seq=&before_seq=&limit=` | 事件流,**seq 游标分页**:`after_seq`(取其后)与 `before_seq`(取其前,两者互斥,同时给 → 400)按事件序号取页;响应头 `X-Next-Seq`(本页最大 seq,作为下一次 `after_seq`)/ `X-Has-More: true`(还有更早的,配 `before_seq` 向前翻)。`limit` **上限 2000**(默认 500)。事件带 `seq` 字段,前端按它去重与增量追加 |
 | GET | `/api/executions/{id}/artifacts` | 制品(如 git-diff)。**按值的形态脱敏**(第十轮):凭据形态的值被替换为 `***`,代码标识符原样保留(保住"改了哪一行"这个审计证据)。详见第 10 节 |
 | GET | `/api/executions/{id}/export` | 导出完整记录 JSON(附件下载)。响应头 `Cache-Control: no-store`;其中的节点明细同样已脱敏 |
 | POST | `/api/executions/{id}/input` | 人工输入并恢复 `{response, instruction}` |
@@ -114,14 +129,16 @@ getToken();` 逐字保留")。在本包再叠一层键名规则会与制品出�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关。**对应设置行读不出来时多一个 `*_read_failed: true` 标记**(仅在读失败时出现,三个标记:`git_working_dir_read_failed` / `log_level_read_failed` / `allow_script_nodes_read_failed`):此刻该字段的值是**内存态生效值**,**不是库里的值** —— 消费方必须把它标给用户,不能当"库里那个"展示或回存(回存即覆盖,损坏行就此消失) |
-| POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改)。**`log_level` 只接受 `debug`/`info`/`warn`/`error`**(大小写不敏感,落库归一为小写),非法值返回 400 —— 不再静默回落 info(界面显示的级别与实际生效的级别会不一致)。**`git_working_dir` 的"缺省"与"空串"是两种语义**:请求体里**没有该字段** = 保持原值不变;**显式传空串** = **清除**(落库空串 + 回到启动默认目录)。**先全量校验、后统一落库** —— 任一项非法则一项都不改 |
+| GET | `/api/settings` | 数据目录 / Git 工作目录 / 日志级别 / script 节点放行开关 / **运行时并发与排队**(`max_active_executions` / `queue_enabled` / `max_queued_executions` / `queue_policy`)/ **数据保留**(`event_retention_days` / `execution_retention_days` / `max_events_per_execution`,0 = 不自动删除)。**对应设置行读不出来时多一个 `*_read_failed: true` 标记**(仅在读失败时出现,三个标记:`git_working_dir_read_failed` / `log_level_read_failed` / `allow_script_nodes_read_failed`):此刻该字段的值是**内存态生效值**,**不是库里的值** —— 消费方必须把它标给用户,不能当"库里那个"展示或回存(回存即覆盖,损坏行就此消失) |
+| POST | `/api/settings` | 更新设置(日志级别与 script 节点开关即时生效;`allow_script_nodes` 缺省表示不修改)。**`log_level` 只接受 `debug`/`info`/`warn`/`error`**(大小写不敏感,落库归一为小写),非法值返回 400 —— 不再静默回落 info(界面显示的级别与实际生效的级别会不一致)。**`git_working_dir` 的"缺省"与"空串"是两种语义**:请求体里**没有该字段** = 保持原值不变;**显式传空串** = **清除**(落库空串 + 回到启动默认目录)。**先全量校验、后统一落库** —— 任一项非法则一项都不改。**运行时字段**(均为 `nil` = 不修改):`max_active_executions`(0..1000,0 = 不限)/ `queue_enabled` / `max_queued_executions`(1..10000)/ `queue_policy`(`fair`/`fifo`);**保留字段**(同 `nil` = 不修改):`event_retention_days` / `execution_retention_days`(0..3650)/ `max_events_per_execution`(0..1000000,0 = 不限) |
 | GET | `/api/backup` | 导出备份(工作流 + Agent 配置 + **技能启用状态**)。**含明文,范围是三类**:`agent_configs` 整份原样(`env` / `behavior` / `extra_args`)+ **工作流定义本体**(含工作流 `variables`)。约定 8 允许备份导出含明文(它是唯一例外),但**请按"整个文件都是敏感的"对待**。响应头 `Cache-Control: no-store`,避免明文 API Key 留在浏览器/代理的磁盘缓存里。`skill_configs` 段(id → enabled)是轮次 85 补上的:此前备份里根本没有它 → 换机器恢复后,此前**禁用**的技能又全部可用了 |
 | POST | `/api/backup/restore` | 恢复备份。**先校验 `version`**(轮次 85):缺失或不认识 → **400 `BAD_REQUEST`**(此前 `version` 只写不读,任何 JSON 都被当备份照单全收,用户看到"恢复成功"却什么也没恢复);`version: 1` 是现有备份的版本号 → 正常路径(向后兼容)。已存在的同 ID 工作流跳过;**校验不通过的定义被拒绝**(不落库)并计数;Agent 配置结构非法同样拒绝;**本机不存在的 Agent 也计入 `agent_configs_invalid` 且不落库**(此前计入"已恢复"是假成功:配置永远不会被应用)。**技能启用状态**按 `skill_configs` 段恢复(只对本机确实存在的 Skill 写回,其余跳过并计入 `skill_configs_unknown_ids`);**老备份没有这一段 → 不恢复技能状态、不报错**。响应含 `workflows_restored` / `workflows_skipped` / `workflows_invalid` / `workflows_invalid_ids` / `agent_configs_restored` / `agent_configs_invalid` / **`agent_configs_unknown_ids`** / `agent_configs_apply_failed_ids` / **`skill_configs_restored`** / **`skill_configs_unknown_ids`** |
 | GET | `/api/events` | **SSE** 实时事件流(UIEvent;连接即达响应头,15s keepalive) |
 | GET | `/api/sse/stats` | 当前 SSE 订阅数(只读,`{"subscribers": N}`,无敏感信息)。运维排查"连接泄漏 / 订阅常驻"的可观测点;冒烟脚本(`smoke_sse.sh`)靠它端到端断言"断开后订阅释放" |
 | GET | `/api/events/all?type=&limit=` | 跨执行审计事件(支持类型前缀过滤) |
 | GET | `/api/stats` | 每工作流执行统计。**`failed` 与 `cancelled` 分列**(轮次 84):`failed` 只算 `FAILED`,`cancelled` 只算 `CANCELLED`;各列之和 == `total`(列的划分穷尽所有执行状态)。消费方算成功率时**分母要排除 `cancelled`** —— 被用户叫停的执行不是"没做成" |
+| GET | `/api/runtime/stats` | **运行时状态(只读)**:`{"running": N, "queued": N, "max_active_executions": N, "queue_enabled": bool, "max_queued_executions": N, "queue_policy": "fair\|fifo", "completed": N, "failed": N, "event_persist_failures": N}`。设置页的"运行时状态"卡片与运维排障用;无敏感信息 |
+| POST | `/api/maintenance/cleanup` | **按保留策略清理历史数据** `{"dry_run": bool}`(body 可省略,等价 `dry_run=false`)。按 `event_retention_days` / `execution_retention_days` / `max_events_per_execution` 三个设置删除过期/超额的**事件与已终态执行**(含其节点、事件、制品;运行中的执行不动)。`dry_run=true` 只统计不删除,返回形状一致。响应:`{"events": N, "artifacts": N, "nodes": N, "executions": N}`(各段删除条数)。幂等:没有可删的返回全 0 |
 | GET | `/api/version` | 应用与关键依赖版本(ADK/Wails 从构建信息读取) |
 
 ## 错误格式
@@ -205,8 +222,9 @@ net/http 的主动中止信号,按官方要求放行)。
 
 
 所有 JSON 请求体上限 1MB(`http.MaxBytesReader`):超限直接拒绝,不会把
-整个 body 读进内存。服务器模式监听 `127.0.0.1` 且**无鉴权**,本机任意
-进程都能打这些端点,故该上限是必要的。
+整个 body 读进内存。服务器模式默认只监听 `127.0.0.1`(见文档开头"安全边界"),
+暴露到非回环地址需要显式 `--allow-remote`;即便如此,本机任意进程仍能打
+这些端点(可选 `--auth-token` 加 Bearer 校验),故该上限是必要的。
 **超限返回 413 `PAYLOAD_TOO_LARGE`**(此前是 400,客户端无法区分"参数错"
 与"请求体过大");`/api/workflows/import` 的 YAML body 同样按 1MB 计,
 超限不再被静默截断成一条与真实原因无关的 YAML 解析错误。
@@ -222,7 +240,9 @@ net/http 的主动中止信号,按官方要求放行)。
 
 标记走响应头而非响应体字段:列表端点的响应体是裸数组,塞字段等于
 改所有列表接口的响应形状;头是可选读取的附加语义,不读不受影响。
-三个限列表端点(`/api/executions`、`/api/events/all`、`/api/git/log`)同口径。
+限列表端点(`/api/executions`、`/api/events/all`、`/api/git/log`)同口径。
+**各端点上限不同**:`/api/executions` 为 **500**、`/api/executions/{id}/events`
+为 **2000**、其余为 1000(各端点在 Executions 表与 SSE 一节有各自标注)。
 
 文本类端点(`/export`、`/versions/{n}`)失败时同样返回上述 JSON 错误体,
 客户端应按状态码判断而非直接使用响应内容。
@@ -251,7 +271,10 @@ net/http 的主动中止信号,按官方要求放行)。
 | `BAD_REQUEST` | 400(更新 Agent 权限) | 权限载荷里的能力位**不是布尔值**(错误信息点名是哪个字段、实际类型是什么)。**静默当作 false 等于吊销该能力**,而客户端以为自己改的是别的能力(约定 14)。注意:此路径**没有**专属错误码,与其它 `BAD_REQUEST` 共用 |
 | `INPUT_REQUIRED` | 400(启动执行) | 工作流声明了必填入参(`inputs[].required: true`)而请求的 `variables` 里没有提供。执行**不创建**(校验发生在任何副作用之前) |
 | `INPUT_TYPE_MISMATCH` | 400(启动执行) | 传入的入参值与声明的 `type`(`string` / `number` / `boolean`)不符。类型判定与校验期查 `default` 走**同一个函数**(`model.InputValueMatchesType`,约定 13) |
-| `WORKFLOW_BUSY` | **409**(启动执行) | 同一工作流的非终态执行数(CREATED / RUNNING / WAITING_USER)达到 `settings.max_concurrent`(0 = 不限,迭代 36)。请求本身合法,只是"现在不能跑"—— 所以是 409 而不是 400;**不排队**,调用方决定重试或放弃 |
+| `WORKFLOW_BUSY` | **409**(启动执行) | 容量不足。两种来源:① 每工作流 —— 同一工作流的非终态执行数达到 `settings.max_concurrent`(0 = 不限,迭代 36);② **全局** —— 引擎运行中执行数达到 `max_active_executions` 且**排队关闭**(`queue_enabled=false`)。请求本身合法,只是"现在不能跑"—— 所以是 409 而不是 400;调用方决定重试或放弃(排队开启时不会拿到这个码,而是拿到 202 QUEUED,见 Executions 表) |
+| `FORBIDDEN_ORIGIN` | **403**(安全中间件) | `Host` 不在受信地址内,或 `Origin` 与当前服务不同源。服务器模式的跨站/跨主机防护,见文档开头"安全边界" |
+| `UNSUPPORTED_MEDIA_TYPE` | **415**(安全中间件) | 写方法带 body 但 `Content-Type` 不是 `application/json`(导入接口允许 YAML) |
+| `UNAUTHORIZED` | **401**(安全中间件) | `--auth-token` 启用而请求缺/错 `Authorization: Bearer` 头。比对恒时,`/api/health` 豁免 |
 | `INVALID_MAX_CONCURRENT` | 校验错误 | `settings.max_concurrent` 不在 0..100(唯一来源:`compiler.MaxConcurrentRange`)。负数会静默变成"不限",必须报出 |
 | `INVALID_TRANSITION` | 400(取消执行) | **状态迁移非法**。取消一个**已终态**(`COMPLETED` / `FAILED` / `CANCELLED`)的执行时返回 —— 取消一个已经结束的运行是"取消失败",不是幂等删除。**约定 6 的"幂等返回 200"只适用于删除资源**,不适用于状态迁移。详见"第 12 节" |
 
@@ -625,6 +648,7 @@ net/http 的主动中止信号,按官方要求放行)。
 | 库里的状态 | HTTP | `code` | 含义 |
 | --- | --- | --- | --- |
 | `RUNNING`(且执行协程还活着) | **200** | — | 取消成功。状态由执行协程收尾时 CAS 落成 `CANCELLED`,`workflow.cancelled` 事件也由它发出 |
+| `QUEUED` | **200** | — | 取消排队。直接 CAS 落成 `CANCELLED`(尚未启动,无需协程收尾),并从进程内队列摘除 |
 | `COMPLETED` / `FAILED` / `CANCELLED` | **400** | `INVALID_TRANSITION` | **取消失败**。取消一个**已经结束**的运行不是幂等删除 —— 约定 6 的"幂等返回 200"只适用于**删除资源**,不适用于状态迁移 |
 | 不存在 | **404** | `NOT_FOUND` | 执行 ID 不存在 |
 | `CREATED` / `WAITING_USER` | **200** | — | 走 CAS 裁决:落成 `CANCELLED` 并发 `workflow.cancelled` 事件。并发取消**只产生一次**状态变更与事件。**非终态节点同时落成 `SKIPPED`**(节点级视图 + `execution_nodes` 明细)—— 这条路径没有协程会再来收尾它们,不收尾就是"状态与事实不符"(轮次 84) |
@@ -861,12 +885,15 @@ POST /api/workflows/import
 
 ## 实时事件类型(UIEvent.type)
 
-`workflow.started / resumed / waiting_user / completed / failed / cancelled`
+`workflow.started / queued / resumed / waiting_user / completed / failed / cancelled`
 `node.started / completed / failed / waiting`
 `agent.started / output / completed / retry`
 `review.approved / review.rejected`
 `human.input_required / human.input_received`
 `skill.executed / git.executed / merge.completed`
+
+> **`workflow.queued`**(运行时加固):全局并发满且排队开启时,新执行进入
+> QUEUED 并发这条事件;槽位释放后自动调度,随后照常发 `workflow.started`。
 
 > **`workflow.paused` 已删除**(轮次 84):`PAUSED` 那个执行状态**从来不可达**,
 > 这个事件**从未被发出过** —— 留着它等于对外承诺一个不会发生的事
