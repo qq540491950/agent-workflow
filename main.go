@@ -7,7 +7,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 	app "agentworkflow/app/application"
 	"agentworkflow/event"
 	"agentworkflow/logx"
+	"agentworkflow/observability"
 
 	wails "github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
@@ -46,11 +49,13 @@ func main() {
 
 // options 是解析后的启动参数。
 type options struct {
-	Server   bool
-	Addr     string
-	DataDir  string
-	GitDir   string
-	LogLevel string
+	Server      bool
+	Addr        string
+	DataDir     string
+	GitDir      string
+	LogLevel    string
+	AllowRemote bool
+	AuthToken   string
 }
 
 // validLogLevels 是 --log 的合法取值(唯一来源:logx —— 应用真正能应用的
@@ -59,11 +64,13 @@ var validLogLevels = logx.Levels()
 
 // flagValues 保存各启动参数的取值指针。
 type flagValues struct {
-	server   *bool
-	addr     *string
-	data     *string
-	gitDir   *string
-	logLevel *string
+	server      *bool
+	addr        *string
+	data        *string
+	gitDir      *string
+	logLevel    *string
+	allowRemote *bool
+	authToken   *string
 }
 
 // newFlagSet 构造启动参数解析器。输出交给调用方决定:测试里丢到
@@ -72,11 +79,13 @@ func newFlagSet(out io.Writer) (*flag.FlagSet, flagValues) {
 	fs := flag.NewFlagSet("agent-workflow", flag.ContinueOnError)
 	fs.SetOutput(out)
 	v := flagValues{
-		server:   fs.Bool("server", false, "以 HTTP 服务器模式运行(无 GUI)"),
-		addr:     fs.String("addr", "127.0.0.1:8080", "HTTP 监听地址"),
-		data:     fs.String("data", "", "数据目录(默认用户配置目录)"),
-		gitDir:   fs.String("git-dir", "", "Git 工作目录(默认当前目录)"),
-		logLevel: fs.String("log", "info", "日志级别 debug|info|warn|error"),
+		server:      fs.Bool("server", false, "以 HTTP 服务器模式运行(无 GUI)"),
+		addr:        fs.String("addr", "127.0.0.1:8080", "HTTP 监听地址(默认仅回环)"),
+		data:        fs.String("data", "", "数据目录(默认用户配置目录)"),
+		gitDir:      fs.String("git-dir", "", "Git 工作目录(默认当前目录)"),
+		logLevel:    fs.String("log", "info", "日志级别 debug|info|warn|error"),
+		allowRemote: fs.Bool("allow-remote", false, "允许绑定非回环地址;需要 Bearer 令牌"),
+		authToken:   fs.String("auth-token", "", "远程模式访问令牌(缺省时启动生成一次性令牌)"),
 	}
 	return fs, v
 }
@@ -88,11 +97,13 @@ func parseArgs(args []string) (options, error) {
 		return options{}, err
 	}
 	opts := options{
-		Server:   *v.server,
-		Addr:     *v.addr,
-		DataDir:  *v.data,
-		GitDir:   *v.gitDir,
-		LogLevel: *v.logLevel,
+		Server:      *v.server,
+		Addr:        *v.addr,
+		DataDir:     *v.data,
+		GitDir:      *v.gitDir,
+		LogLevel:    *v.logLevel,
+		AllowRemote: *v.allowRemote,
+		AuthToken:   *v.authToken,
 	}
 	if err := opts.validate(); err != nil {
 		return options{}, err
@@ -110,11 +121,39 @@ func (o options) validate() error {
 		if o.Addr == "" {
 			return errors.New("服务器模式必须指定监听地址(--addr)")
 		}
-		if _, _, err := net.SplitHostPort(o.Addr); err != nil {
+		host, _, err := net.SplitHostPort(o.Addr)
+		if err != nil {
 			return fmt.Errorf("监听地址 %q 非法: %w", o.Addr, err)
+		}
+		// 空 host(`:8080`)在 Go 里等于监听所有网卡 —— 这是最容易被
+		// 顺手写出来的暴露方式。要求显式写 0.0.0.0 并同时开启远程模式。
+		if host == "" {
+			return errors.New("监听地址不能省略 host(:8080 会监听所有网卡);本机请用 127.0.0.1,远程请显式写 0.0.0.0 并加 --allow-remote")
+		}
+		if !isLoopbackHost(host) && !o.AllowRemote {
+			return fmt.Errorf("监听地址 %q 不是回环地址;如确需远程访问,请显式加 --allow-remote", o.Addr)
 		}
 	}
 	return nil
+}
+
+// isLoopbackHost 判断监听 host 是否仅限本机。
+func isLoopbackHost(host string) bool {
+	h := strings.TrimSpace(host)
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLoopbackAddr 判断完整监听地址是否仅限本机。
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(host)
 }
 
 // isValidLogLevel 判断日志级别是否合法(与 logx 支持的值一致)。
@@ -174,6 +213,17 @@ func run() int {
 		logx.Error("应用初始化失败", "error", err)
 		return 1
 	}
+	// 追踪:未配置 OTEL_EXPORTER_OTLP_ENDPOINT 时是 no-op。
+	shutdownTracing, err := observability.Setup(context.Background())
+	if err != nil {
+		logx.Warn("OTel 追踪初始化失败,继续以无追踪模式运行", "error", err)
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdownTracing(ctx)
+		}()
+	}
 	// 退出前关闭 SQLite:释放连接并让 WAL 落盘。
 	defer func() {
 		if cerr := application.Repo.Close(); cerr != nil {
@@ -199,7 +249,20 @@ func run() int {
 	}
 
 	if opts.Server {
-		if err := runServer(application, opts.Addr); err != nil {
+		// 远程模式必须有一个令牌:用户显式提供,或启动时生成一次性令牌。
+		// 生成后只向 stderr 打印一次 —— 不进 logx(日志会被收集/转发),
+		// 不进 SQLite,也不出现在 API 响应里。
+		token := opts.AuthToken
+		if !isLoopbackAddr(opts.Addr) && token == "" {
+			generated, genErr := newAuthToken()
+			if genErr != nil {
+				logx.Error("生成远程访问令牌失败", "error", genErr)
+				return 1
+			}
+			token = generated
+			fmt.Fprintf(os.Stderr, "远程访问令牌(仅显示一次): %s\n", token)
+		}
+		if err := runServer(application, opts.Addr, token); err != nil {
 			logx.Error("HTTP 服务退出", "error", err)
 			return 1
 		}
@@ -235,8 +298,12 @@ func applyGitDirArg(application *app.App, dir string) error {
 //
 // 返回错误而不是自行 os.Exit:退出码由 run() 统一决定,
 // 这样 defer(关闭 SQLite)一定会执行。
-func runServer(app *app.App, addr string) error {
-	apiHandler := api.NewServer(app)
+func runServer(app *app.App, addr, authToken string) error {
+	apiHandler := api.NewServerWithOptions(app, api.Options{
+		AuthToken: authToken,
+		Loopback:  isLoopbackAddr(addr),
+		Addr:      addr,
+	})
 
 	dist, err := fs.Sub(assets, "frontend/dist")
 	if err != nil {
@@ -262,7 +329,7 @@ func runServer(app *app.App, addr string) error {
 
 	logx.Info("HTTP 服务启动", "addr", addr, "mode", "server")
 
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := newHTTPServer(addr, mux)
 	// 优雅关闭:SIGINT/SIGTERM 时先停接收新请求,给运行中执行一次收尾机会
 	go func() {
 		sig := make(chan os.Signal, 1)
@@ -285,6 +352,28 @@ func runServer(app *app.App, addr string) error {
 	// 等待执行协程收尾后再退出
 	_ = app.Engine.WaitIdle(5 * time.Second)
 	return nil
+}
+
+// newHTTPServer 构造服务器模式的 HTTP 服务器(超时可单独测试)。
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:    addr,
+		Handler: handler,
+		// 读头/读/空闲超时:慢连接不能无限占住服务器。不设全局
+		// WriteTimeout —— SSE 是长连接,由每条连接自己的写截止时间控制。
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
+// newAuthToken 生成远程模式的一次性访问令牌。
+func newAuthToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("生成访问令牌: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // runDesktop Wails 桌面模式。

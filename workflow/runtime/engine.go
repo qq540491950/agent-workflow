@@ -14,6 +14,9 @@ import (
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -25,6 +28,7 @@ import (
 	"agentworkflow/event"
 	"agentworkflow/git"
 	"agentworkflow/logx"
+	"agentworkflow/observability"
 	"agentworkflow/permission"
 	"agentworkflow/persistence"
 	"agentworkflow/skill"
@@ -77,9 +81,19 @@ type Engine struct {
 	// script 节点以 /bin/sh -c 执行 DSL 里的任意命令,而工作流可以来自
 	// YAML 导入,默认关闭:钩子未注入时一律拒绝执行(fail closed)。
 	AllowScriptNodes func() bool
+	// Workspaces 是执行级工作区租约管理器。nil 时 NewEngine 会装默认实现。
+	Workspaces WorkspaceLeaseManager
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+	leases  map[string]WorkspaceLease
+
+	limitsMu sync.RWMutex
+	limits   RuntimeLimits
+	// queueMu 保护排队队列与公平调度游标。
+	queueMu       sync.Mutex
+	queue         []queuedExecution
+	lastScheduled string
 	// startMu 串行化"每工作流并发上限"的检查-插入(settings.max_concurrent):
 	// 查数与首次落库是两条语句,不串行的话并发 Start 会同时通过检查。
 	// 只在设置了上限的启动路径上加锁,不设限的路径零开销。
@@ -107,6 +121,9 @@ type Engine struct {
 	// stateCommitFailures 统计"状态迁移未落库"的次数(CAS 冲突或落库错误)。
 	// 状态没落库 = 事件流与 DB 可能不一致(约定 #14),必须可观测。
 	stateCommitFailures atomic.Int64
+	// rejectedTotal 统计准入被拒次数(容量不足:WORKFLOW_BUSY / SYSTEM_BUSY /
+	// QUEUE_FULL)。票 10 的"拒绝次数可观测":运维据此判断限流是否过紧。
+	rejectedTotal atomic.Int64
 	// failures 记录每次执行里确凿失败的节点及其原因。
 	//
 	// 存在的理由:失败信息只存在于 ADK 事件的 StateDelta 里(节点状态的唯一
@@ -120,6 +137,87 @@ type Engine struct {
 	// 引擎是唯一见过节点 outcome 的地方,必须自己留底。详见
 	// failure_ledger.go。
 	failures *failureLedger
+}
+
+// RuntimeLimits 是全局准入与排队设置。
+type RuntimeLimits struct {
+	// MaxActiveExecutions 是全局同时运行的执行数上限;0 = 不限。
+	MaxActiveExecutions int
+	// QueueEnabled 为真时,超限的启动进入 QUEUED 而不是直接拒绝。
+	QueueEnabled bool
+	// MaxQueuedExecutions 是队列长度上限;<=0 时按 100 处理。
+	MaxQueuedExecutions int
+	// QueuePolicy 是 fifo | fair;默认 fair。
+	QueuePolicy string
+}
+
+type queuedExecution struct {
+	ExecID     string
+	WorkflowID string
+	QueuedAt   time.Time
+}
+
+// SetRuntimeLimits 更新全局准入/排队设置(设置页可运行时修改)。
+func (e *Engine) SetRuntimeLimits(l RuntimeLimits) {
+	if l.MaxQueuedExecutions <= 0 {
+		l.MaxQueuedExecutions = 100
+	}
+	if l.QueuePolicy != "fifo" {
+		l.QueuePolicy = "fair"
+	}
+	e.limitsMu.Lock()
+	e.limits = l
+	e.limitsMu.Unlock()
+}
+
+// RuntimeLimits 返回当前设置(副本)。
+func (e *Engine) RuntimeLimits() RuntimeLimits {
+	e.limitsMu.RLock()
+	defer e.limitsMu.RUnlock()
+	l := e.limits
+	if l.MaxQueuedExecutions <= 0 {
+		l.MaxQueuedExecutions = 100
+	}
+	if l.QueuePolicy == "" {
+		l.QueuePolicy = "fair"
+	}
+	return l
+}
+
+// QueueStats 返回队列深度与最老排队时间。
+func (e *Engine) QueueStats() (depth int, oldest time.Time) {
+	e.queueMu.Lock()
+	defer e.queueMu.Unlock()
+	for _, q := range e.queue {
+		if oldest.IsZero() || q.QueuedAt.Before(oldest) {
+			oldest = q.QueuedAt
+		}
+	}
+	return len(e.queue), oldest
+}
+
+// QueuePosition 返回执行的 1-based 队列位置;不在队列中返回 0。
+func (e *Engine) QueuePosition(executionID string) int {
+	e.queueMu.Lock()
+	defer e.queueMu.Unlock()
+	for i, q := range e.queue {
+		if q.ExecID == executionID {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func (e *Engine) removeFromQueue(executionID string) {
+	e.queueMu.Lock()
+	defer e.queueMu.Unlock()
+	out := e.queue[:0]
+	for _, q := range e.queue {
+		if q.ExecID != executionID {
+			out = append(out, q)
+		}
+	}
+	e.queue = out
 }
 
 // EscalateStats 返回 Escalate 事件分类计数(预期内 / 异常)。
@@ -139,6 +237,9 @@ func (e *Engine) StateCommitFailures() int64 { return e.stateCommitFailures.Load
 // RunningCount 返回正在执行的执行协程数。
 func (e *Engine) RunningCount() int64 { return e.running.Load() }
 
+// RejectedTotal 返回准入被拒累计次数(容量不足类)。
+func (e *Engine) RejectedTotal() int64 { return e.rejectedTotal.Load() }
+
 // WaitIdle 等待全部执行协程收尾,超时返回当前计数。
 func (e *Engine) WaitIdle(timeout time.Duration) int64 {
 	deadline := time.Now().Add(timeout)
@@ -155,16 +256,18 @@ func (e *Engine) WaitIdle(timeout time.Duration) int64 {
 func NewEngine(agents coreagent.Registry, skills skill.Registry, perms *permission.Manager,
 	bus *event.Bus, gitSvc *git.Service, repo *persistence.DB) *Engine {
 	e := &Engine{
-		Agents:   agents,
-		Skills:   skills,
-		Perms:    perms,
-		CtxMgr:   contextx.NewManager(),
-		Tpl:      template.NewEngine(),
-		Bus:      bus,
-		Git:      gitSvc,
-		Repo:     repo,
-		cancels:  map[string]context.CancelFunc{},
-		failures: newFailureLedger(),
+		Agents:     agents,
+		Skills:     skills,
+		Perms:      perms,
+		CtxMgr:     contextx.NewManager(),
+		Tpl:        template.NewEngine(),
+		Bus:        bus,
+		Git:        gitSvc,
+		Repo:       repo,
+		Workspaces: NewWorkspaceLeaseManager(),
+		cancels:    map[string]context.CancelFunc{},
+		leases:     map[string]WorkspaceLease{},
+		failures:   newFailureLedger(),
 	}
 	// 事件持久化:所有携带 ExecutionID 的事件写入 SQLite(审计/恢复/UI 回放)
 	//
@@ -178,6 +281,45 @@ func NewEngine(agents coreagent.Registry, skills skill.Registry, perms *permissi
 		e.persistEvent(ev)
 	})
 	return e
+}
+
+// acquireWorkspace 为执行获取工作区租约,并把目录记到执行记录上。
+//
+// 只读工作流(没有 script/git/写模式 agent)返回 noop 租约,不降低并发。
+// Workspaces 由 NewEngine 装好默认实现 —— 这里不做 nil 惰性赋值:
+// 多个执行协程并发进入时,无锁的"检查再写"正是约定 15 要消灭的形态。
+func (e *Engine) acquireWorkspace(exec *model.Execution) error {
+	if exec == nil {
+		return nil
+	}
+	dirs := workspaceDirsForWorkflow(exec.Snapshot, e.defaultWorkingDir())
+	lease, err := e.Workspaces.Acquire(context.Background(), exec.ID, dirs)
+	if err != nil {
+		return err
+	}
+	exec.WorkspaceDirs = dirs
+	e.mu.Lock()
+	e.leases[exec.ID] = lease
+	e.mu.Unlock()
+	return nil
+}
+
+// releaseWorkspace 释放执行持有的工作区租约(幂等)。
+func (e *Engine) releaseWorkspace(executionID string) {
+	e.mu.Lock()
+	lease := e.leases[executionID]
+	delete(e.leases, executionID)
+	e.mu.Unlock()
+	if lease != nil {
+		lease.Release()
+	}
+}
+
+func (e *Engine) defaultWorkingDir() string {
+	if e.Git == nil {
+		return ""
+	}
+	return e.Git.WorkingDir()
 }
 
 // persistEvent 把事件写入 SQLite(审计/恢复/回放)。
@@ -310,7 +452,9 @@ func applyInputs(wf *model.Workflow, vars, provided map[string]any) error {
 }
 
 // Start 创建并异步执行一个 Execution。
-// 返回创建好的 Execution(状态 RUNNING),执行在后台进行。
+//
+// 返回 RUNNING(立即启动)或 QUEUED(排队开启且超限/工作区被占用)。
+// 入参校验在 Agent 重置之前完成:启动失败不得产生副作用。
 func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, variables map[string]any) (*model.Execution, error) {
 	if res := e.Validate(wf); !res.Valid {
 		// 错误消息里带上**具体**的校验原因:此前只有"工作流校验失败",
@@ -322,13 +466,22 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 		err.Detail = string(raw)
 		return nil, err
 	}
+	now := time.Now().Format(time.RFC3339Nano)
+	// 变量合并:DSL variables: 段为底,声明式入参 default 次之,运行请求
+	// 传入的 variables 最后覆盖(显式传入的优先级最高)。
+	vars := map[string]any{}
+	for k, v := range wf.Variables {
+		vars[k] = v
+	}
+	// 声明式入参:类型校验 + 必填检查 + 默认值兜底。
+	if err := applyInputs(wf, vars, variables); err != nil {
+		return nil, err
+	}
+	for k, v := range variables {
+		vars[k] = v
+	}
 	// 重置本次工作流引用的可重置 Agent(如 Mock),使决策序列从头开始。
-	// 只重置被引用的:嵌套工作流启动不得干扰并发运行的其他执行
-	// (如父工作流的 Mock 决策序列被中途清零)。
-	//
-	// 注意:AgentRequest 带 ExecutionID,mock 的计数按执行隔离,所以同
-	// 一工作流并发启动两次也互不干扰;此处只重置无执行上下文的共享
-	// 空间(单测 / Agents 页 Test),不会清掉正在运行的执行的状态。
+	// 放在入参校验之后:被拒绝的启动不得清空共享 Mock 计数。
 	refs := map[string]bool{}
 	for i := range wf.Nodes {
 		if id, ok := wf.Nodes[i].Config["agent"].(string); ok {
@@ -344,43 +497,33 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 		}
 	}
 
-	now := time.Now().Format(time.RFC3339Nano)
-	// 变量合并:DSL variables: 段为底,声明式入参 default 次之,运行请求
-	// 传入的 variables 最后覆盖(显式传入的优先级最高)。
-	// 此前只取请求参数,DSL 里声明的 variables 完全不生效 ——
-	// {{variable.xxx}} 渲染空串、`variables.xxx == ...` 条件恒假,
-	// 而 DSL 解析与导出都保留了这段(需求 §12 示例即用它)。
-	vars := map[string]any{}
-	for k, v := range wf.Variables {
-		vars[k] = v
+	// 准入检查与首次插入必须在同一临界区:两个并发 Start 不能同时
+	// 通过检查。排队开启时,超限/工作区被占用都进入 QUEUED。
+	e.startMu.Lock()
+	defer e.startMu.Unlock()
+
+	limits := e.RuntimeLimits()
+	perFull, globalFull, err := e.admissionFull(wf)
+	if err != nil {
+		e.rejectedTotal.Add(1)
+		return nil, model.NewError(model.KindStateError, "SYSTEM_BUSY",
+			fmt.Sprintf("无法确认当前并发水位(%v);按已满处理,请稍后重试", err))
 	}
-	// 声明式入参:类型校验 + 必填检查 + 默认值兜底(迭代 36)。
-	//
-	// 必须放在引用 Agent 重置**之前**:启动失败不得产生副作用(重置会
-	// 清掉共享 Mock 的决策序列,并发场景下影响别人的执行)。
-	if err := applyInputs(wf, vars, variables); err != nil {
-		return nil, err
-	}
-	for k, v := range variables {
-		vars[k] = v
-	}
-	// 每工作流并发上限(fail fast,迭代 36):检查与首次插入在同一临界区,
-	// 两个并发 Start 不会同时通过。达到上限 → WORKFLOW_BUSY,**不排队**
-	// (排队需要新执行状态并波及状态机/CAS/前端徽标,fail fast 让调用方
-	// 立刻看到原因)。放在 Agent 重置之前:启动失败不得产生副作用。
-	if wf.Settings.MaxConcurrent > 0 {
-		e.startMu.Lock()
-		defer e.startMu.Unlock()
-		n, err := e.Repo.CountActiveExecutions(wf.ID)
-		if err != nil {
-			return nil, err
+	if perFull || globalFull {
+		if !limits.QueueEnabled {
+			e.rejectedTotal.Add(1)
+			if perFull {
+				return nil, model.NewError(model.KindStateError, "WORKFLOW_BUSY",
+					fmt.Sprintf("工作流并发已达上限 %d,请等待已有执行结束或调大 settings.max_concurrent",
+						wf.Settings.MaxConcurrent))
+			}
+			return nil, model.NewError(model.KindStateError, "SYSTEM_BUSY",
+				fmt.Sprintf("全局并发已达上限 %d,请等待已有执行结束或调大 runtime.max_active_executions",
+					limits.MaxActiveExecutions))
 		}
-		if n >= wf.Settings.MaxConcurrent {
-			return nil, model.NewError(model.KindStateError, "WORKFLOW_BUSY",
-				fmt.Sprintf("工作流并发已达上限 %d(当前 %d 个未结束的执行),请等待已有执行结束或调大 settings.max_concurrent",
-					wf.Settings.MaxConcurrent, n))
-		}
+		return e.enqueueNew(wf, task, vars, now)
 	}
+
 	execID, err := newID("exec")
 	if err != nil {
 		return nil, err
@@ -397,30 +540,134 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 		NodeStates:      map[string]string{},
 		CreatedAt:       now,
 		Snapshot:        cloneWorkflow(wf),
+		WorkspaceDirs:   workspaceDirsForWorkflow(wf, e.defaultWorkingDir()),
 	}
 	if exec.Variables == nil {
 		exec.Variables = map[string]any{}
 	}
+	// 工作区租约必须在插入执行行之前取得:取得失败且未开启排队 =
+	// 这次启动根本没发生;开启排队则落 QUEUED 等调度器重试。
+	if err := e.acquireWorkspace(exec); err != nil {
+		if limits.QueueEnabled {
+			return e.enqueueExecution(exec, now, "workspace_busy")
+		}
+		return nil, err
+	}
 	if err := e.transition(exec, model.ExecutionRunning); err != nil {
+		e.releaseWorkspace(exec.ID)
 		return nil, err
 	}
 	exec.StartedAt = now
 	// 首次写入:整行插入(此刻行还不存在,状态列随行一起落定)。
 	// 之后所有状态变更一律走 CAS,整行写不再碰 state 列。
 	if err := e.insertExecution(exec); err != nil {
+		e.releaseWorkspace(exec.ID)
 		return nil, err
 	}
 	e.Bus.Emit(event.New(event.WorkflowStarted, exec.ID, "", map[string]any{
 		"workflow": wf.Name, "task": task,
 	}))
+	return e.launch(exec, ctx, "", nil), nil
+}
 
+// globalAtCapacity 判断全局并发是否已满。
+//
+// 计数查询失败时**按已满处理**(约定 14:数不出来就不能放行 ——
+// 放行的执行没有上限约束,"该拒绝却放行"比"多拒绝一次"危险)。
+func (e *Engine) globalAtCapacity() (bool, error) {
+	limits := e.RuntimeLimits()
+	if limits.MaxActiveExecutions <= 0 {
+		return false, nil
+	}
+	n, err := e.Repo.CountRunningExecutions()
+	if err != nil {
+		return true, err
+	}
+	return n >= limits.MaxActiveExecutions, nil
+}
+
+// admissionFull 判断每工作流/全局并发是否已满。
+// 全局只统计 RUNNING(等待人工不占进程资源);每工作流沿用既有口径
+// (CREATED/RUNNING/WAITING_USER)。计数查询失败按已满处理(fail closed,
+// 同 globalAtCapacity),错误随返回值上抛给调用方生成可读错误。
+func (e *Engine) admissionFull(wf *model.Workflow) (perFull, globalFull bool, err error) {
+	if wf.Settings.MaxConcurrent > 0 {
+		n, cerr := e.Repo.CountActiveExecutions(wf.ID)
+		if cerr != nil {
+			return true, true, cerr
+		}
+		if n >= wf.Settings.MaxConcurrent {
+			perFull = true
+		}
+	}
+	limits := e.RuntimeLimits()
+	if limits.MaxActiveExecutions > 0 {
+		n, cerr := e.Repo.CountRunningExecutions()
+		if cerr != nil {
+			return true, true, cerr
+		}
+		if n >= limits.MaxActiveExecutions {
+			globalFull = true
+		}
+	}
+	return perFull, globalFull, nil
+}
+
+// enqueueNew 为一次新启动创建 QUEUED 执行并入队。
+func (e *Engine) enqueueNew(wf *model.Workflow, task string, vars map[string]any, now string) (*model.Execution, error) {
+	execID, err := newID("exec")
+	if err != nil {
+		return nil, err
+	}
+	exec := &model.Execution{
+		ID: execID, WorkflowID: wf.ID, WorkflowVersion: wf.Version,
+		WorkflowName: wf.Name, State: model.ExecutionCreated, Task: task,
+		Variables: vars, Iterations: map[string]int{}, NodeStates: map[string]string{},
+		CreatedAt: now, Snapshot: cloneWorkflow(wf),
+		WorkspaceDirs: workspaceDirsForWorkflow(wf, e.defaultWorkingDir()),
+	}
+	if exec.Variables == nil {
+		exec.Variables = map[string]any{}
+	}
+	return e.enqueueExecution(exec, now, "capacity")
+}
+
+// enqueueExecution 把执行落成 QUEUED 并入队。
+func (e *Engine) enqueueExecution(exec *model.Execution, now, reason string) (*model.Execution, error) {
+	limits := e.RuntimeLimits()
+	e.queueMu.Lock()
+	if len(e.queue) >= limits.MaxQueuedExecutions {
+		e.queueMu.Unlock()
+		e.rejectedTotal.Add(1)
+		return nil, model.NewError(model.KindStateError, "QUEUE_FULL",
+			fmt.Sprintf("排队队列已满(%d),请等待已有执行结束", limits.MaxQueuedExecutions))
+	}
+	e.queueMu.Unlock()
+
+	if err := e.transition(exec, model.ExecutionQueued); err != nil {
+		return nil, err
+	}
+	exec.QueuedAt = now
+	if err := e.insertExecution(exec); err != nil {
+		return nil, err
+	}
+	e.queueMu.Lock()
+	e.queue = append(e.queue, queuedExecution{ExecID: exec.ID, WorkflowID: exec.WorkflowID, QueuedAt: time.Now()})
+	e.queueMu.Unlock()
+	e.Bus.Emit(event.New(event.WorkflowQueued, exec.ID, "", map[string]any{
+		"workflow": exec.WorkflowName, "reason": reason,
+	}))
+	snapshot := cloneExec(exec)
+	snapshot.QueuePosition = e.QueuePosition(exec.ID)
+	return snapshot, nil
+}
+
+// launch 注册取消句柄并启动执行协程。
+func (e *Engine) launch(exec *model.Execution, ctx context.Context, mode string, input map[string]any) *model.Execution {
 	runCtx, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	e.cancels[exec.ID] = cancel
 	e.mu.Unlock()
-
-	// 返回派发前的快照:goroutine 会并发改写 exec,调用方(如 REST 响应
-	// 的 JSON 序列化)不得与它共享可变结构
 	snapshot := cloneExec(exec)
 	go func() {
 		defer func() {
@@ -428,9 +675,109 @@ func (e *Engine) Start(ctx context.Context, wf *model.Workflow, task string, var
 			delete(e.cancels, exec.ID)
 			e.mu.Unlock()
 		}()
-		e.execute(runCtx, exec, "", nil)
+		e.execute(runCtx, exec, mode, input)
 	}()
-	return snapshot, nil
+	return snapshot
+}
+
+// schedule 在槽位释放后按队列策略启动排队执行。
+// 每次只在本协程内推进;调用方:Start 之后(队列可能已有)、execute 收尾。
+func (e *Engine) schedule() {
+	e.startMu.Lock()
+	defer e.startMu.Unlock()
+	for {
+		limits := e.RuntimeLimits()
+		if limits.MaxActiveExecutions > 0 {
+			n, err := e.Repo.CountRunningExecutions()
+			if err != nil || n >= limits.MaxActiveExecutions {
+				return
+			}
+		}
+		e.queueMu.Lock()
+		if len(e.queue) == 0 {
+			e.queueMu.Unlock()
+			return
+		}
+		idx := e.pickQueuedLocked(limits.QueuePolicy)
+		if idx < 0 {
+			e.queueMu.Unlock()
+			return
+		}
+		q := e.queue[idx]
+		e.queue = append(e.queue[:idx], e.queue[idx+1:]...)
+		e.queueMu.Unlock()
+
+		exec, err := e.Repo.GetExecution(q.ExecID)
+		if err != nil || exec.State != model.ExecutionQueued {
+			continue
+		}
+		// 工作流快照/存在性/启用状态在调度时再校验一次(排队期间工作流
+		// 可能被删除或禁用):跑不了的落 FAILED 并给可读原因(票 10)。
+		if reason := e.queuedUnrunnableReason(exec); reason != "" {
+			e.failQueued(exec, reason)
+			continue
+		}
+		if exec.Snapshot.Settings.MaxConcurrent > 0 {
+			n, err := e.Repo.CountActiveExecutions(exec.WorkflowID)
+			if err != nil || n >= exec.Snapshot.Settings.MaxConcurrent {
+				e.queueMu.Lock()
+				e.queue = append(e.queue, q)
+				e.queueMu.Unlock()
+				// 队首受每工作流上限限制:先停在这里,避免空转;
+				// 该工作流终态时会再次唤醒调度器。
+				return
+			}
+		}
+		if err := e.acquireWorkspace(exec); err != nil {
+			// 工作区仍被占用:放回队尾,等下一次释放。
+			e.queueMu.Lock()
+			e.queue = append(e.queue, q)
+			e.queueMu.Unlock()
+			return
+		}
+		ok, err := e.Repo.CasExecutionState(exec.ID,
+			[]model.ExecutionState{model.ExecutionQueued}, model.ExecutionRunning)
+		if err != nil || !ok {
+			e.releaseWorkspace(exec.ID)
+			continue
+		}
+		exec.State = model.ExecutionRunning
+		exec.StartedAt = time.Now().Format(time.RFC3339Nano)
+		e.save(exec)
+		e.Bus.Emit(event.New(event.WorkflowStarted, exec.ID, "", map[string]any{
+			"workflow": exec.WorkflowName, "task": exec.Task, "from_queue": true,
+		}))
+		e.queueMu.Lock()
+		e.lastScheduled = exec.WorkflowID
+		e.queueMu.Unlock()
+		e.launch(exec, context.Background(), "", nil)
+	}
+}
+
+// pickQueuedLocked 选择下一个可调度条目;返回 -1 表示当前没有可调度的
+// (例如所有条目都受每工作流上限限制)。调用方必须持有 queueMu。
+func (e *Engine) pickQueuedLocked(policy string) int {
+	if policy != "fair" {
+		return 0
+	}
+	for i, q := range e.queue {
+		if q.WorkflowID != e.lastScheduled {
+			return i
+		}
+	}
+	return 0
+}
+
+func (e *Engine) failQueued(exec *model.Execution, msg string) {
+	ok, err := e.Repo.CasExecutionState(exec.ID,
+		[]model.ExecutionState{model.ExecutionQueued}, model.ExecutionFailed)
+	if err != nil || !ok {
+		return
+	}
+	exec.State = model.ExecutionFailed
+	exec.Error = msg
+	e.save(exec)
+	e.Bus.Emit(event.New(event.WorkflowFailed, exec.ID, "", map[string]any{"error": msg}))
 }
 
 // Resume 恢复一个 WAITING_USER 的执行(人工输入后)。
@@ -447,6 +794,15 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 		return nil, model.NewError(model.KindStateError, "INVALID_RESUME",
 			fmt.Sprintf("执行 %s 状态为 %s,不能恢复", executionID, exec.State))
 	}
+	if full, err := e.globalAtCapacity(); err != nil || full {
+		return nil, model.NewError(model.KindStateError, "SYSTEM_BUSY",
+			"全局并发已达上限(或水位无法确认),请等待已有执行结束后再恢复")
+	}
+	// 恢复前重新取得工作区租约。等待人工期间租约已释放;如果此时
+	// 目录被别的执行占用,明确拒绝,保持 WAITING_USER 不变。
+	if err := e.acquireWorkspace(exec); err != nil {
+		return nil, err
+	}
 	// 数据库级 CAS:并发 Resume(如双击批准)只允许一个调用方成功,
 	// 否则同一执行会被两份 goroutine 同时重放。
 	//
@@ -456,9 +812,11 @@ func (e *Engine) Resume(ctx context.Context, executionID string, userResponse ma
 	ok, err := e.Repo.CasExecutionState(executionID,
 		[]model.ExecutionState{model.ExecutionWaitingUser}, model.ExecutionRunning)
 	if err != nil {
+		e.releaseWorkspace(executionID)
 		return nil, err
 	}
 	if !ok {
+		e.releaseWorkspace(executionID)
 		return nil, model.NewError(model.KindStateError, "INVALID_RESUME",
 			fmt.Sprintf("执行 %s 正在被恢复或状态已变化", executionID))
 	}
@@ -584,8 +942,31 @@ func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 		// 但协程可能还在收尾(终态已落库、defer 还没摘除句柄):
 		// 仍然把 ctx 取消掉,让它尽快收尾 —— 只是**不**把这次取消说成成功。
 		e.stopRun(executionID)
+		e.releaseWorkspace(executionID)
 		return model.NewError(model.KindStateError, "INVALID_TRANSITION",
 			fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, state))
+	case model.ExecutionQueued:
+		// 排队中的执行没有协程:从队列移除后直接 CAS 落 CANCELLED。
+		e.removeFromQueue(executionID)
+		ok, err := e.Repo.CasExecutionState(executionID,
+			[]model.ExecutionState{model.ExecutionQueued}, model.ExecutionCancelled)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			cur, err := e.loadExecState(executionID)
+			if err != nil {
+				return err
+			}
+			return model.NewError(model.KindStateError, "INVALID_TRANSITION",
+				fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, cur))
+		}
+		e.Bus.Emit(event.New(event.WorkflowCancelled, executionID, "", nil))
+		if err := e.Repo.MarkExecutionFinished(executionID, time.Now().Format(time.RFC3339Nano)); err != nil {
+			logx.Warn("取消排队执行后补写结束时间失败", "execution", executionID, "error", err.Error())
+		}
+		e.skipRemainingNodes(executionID)
+		return nil
 	case model.ExecutionRunning:
 		e.mu.Lock()
 		cancel, running := e.cancels[executionID]
@@ -623,6 +1004,7 @@ func (e *Engine) Cancel(ctx context.Context, executionID string) error {
 		return model.NewError(model.KindStateError, "INVALID_TRANSITION",
 			fmt.Sprintf("执行 %s 状态为 %s,不能取消", executionID, cur))
 	}
+	e.releaseWorkspace(executionID)
 	e.Bus.Emit(event.New(event.WorkflowCancelled, executionID, "", nil))
 	// 取消也是终态,结束时间必须落库(与 transitionAndSave 的盖章语义一致)。
 	// 状态 CAS 已成功,行归本次取消裁决所有;时间单独补写一条 —— 状态
@@ -758,6 +1140,14 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	if nodeID == "" {
 		return nil, model.NewError(model.KindStateError, "NO_FAILED_NODE", "无法定位失败节点")
 	}
+	if full, err := e.globalAtCapacity(); err != nil || full {
+		return nil, model.NewError(model.KindStateError, "SYSTEM_BUSY",
+			"全局并发已达上限(或水位无法确认),请等待已有执行结束后再重试")
+	}
+	// 重试同样要重新取得工作区租约。
+	if err := e.acquireWorkspace(exec); err != nil {
+		return nil, err
+	}
 	// 失败台账清零:重试是一次**新的运行**,上一次记下的失败原因不能
 	// 再用来补状态(否则会把上一次的 FAILED 状态补回这次的重试结果)。
 	e.failures.reset(executionID)
@@ -769,9 +1159,11 @@ func (e *Engine) RetryNode(ctx context.Context, executionID string, skip bool) (
 	ok, err := e.Repo.CasExecutionState(executionID,
 		[]model.ExecutionState{model.ExecutionFailed}, model.ExecutionRunning)
 	if err != nil {
+		e.releaseWorkspace(executionID)
 		return nil, err
 	}
 	if !ok {
+		e.releaseWorkspace(executionID)
 		return nil, model.NewError(model.KindStateError, "INVALID_RETRY",
 			fmt.Sprintf("执行 %s 正在被重试或状态已变化", executionID))
 	}
@@ -823,6 +1215,8 @@ func (e *Engine) RecoverPending() error {
 				"execution", exec.ID, "error", err.Error())
 		}
 	}
+	// 重启后 QUEUED 行重新入队;若有空槽位立即调度。
+	e.schedule()
 	return nil
 }
 
@@ -840,14 +1234,74 @@ func (e *Engine) recoverExecution(exec *model.Execution) error {
 	case model.ExecutionWaitingUser:
 		// 保持状态,可通过 Resume 继续
 		return nil
+	case model.ExecutionQueued:
+		// 排队中的执行没有副作用,重启后按原顺序重新入队。
+		// 但前提是它**还能跑**:工作流已删除/被禁用、或快照损坏的排队
+		// 执行落 FAILED 并给可读原因(票 10)—— 否则调度器拿到它才发现
+		// 跑不了,用户看到的失败没有上下文。
+		if reason := e.queuedUnrunnableReason(exec); reason != "" {
+			exec.Error = reason
+			return e.transitionAndSave(exec, model.ExecutionFailed)
+		}
+		at := time.Now()
+		if exec.QueuedAt != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, exec.QueuedAt); err == nil {
+				at = parsed
+			}
+		}
+		e.queueMu.Lock()
+		e.queue = append(e.queue, queuedExecution{
+			ExecID: exec.ID, WorkflowID: exec.WorkflowID, QueuedAt: at,
+		})
+		e.queueMu.Unlock()
+		return nil
 	}
 	return nil
 }
 
+// queuedUnrunnableReason 返回排队执行无法运行的可读原因;能跑返回空串。
+func (e *Engine) queuedUnrunnableReason(exec *model.Execution) string {
+	if exec.Snapshot == nil {
+		return "执行快照损坏,无法恢复排队执行"
+	}
+	wf, err := e.Repo.GetWorkflow(exec.WorkflowID)
+	if err != nil {
+		return fmt.Sprintf("工作流 %s 已不存在,排队执行无法恢复", exec.WorkflowID)
+	}
+	if !wf.Enabled {
+		return fmt.Sprintf("工作流 %s 已被禁用,排队执行无法恢复", wf.Name)
+	}
+	return ""
+}
+
 // execute 是执行主循环:编译 → ADK Runner 执行 → 收尾。
 func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string, userInput map[string]any) {
+	ctx, span := observability.Tracer().Start(ctx, "workflow.execution",
+		trace.WithAttributes(
+			attribute.String("execution.id", exec.ID),
+			attribute.String("workflow.id", exec.WorkflowID),
+			attribute.String("workflow.version", fmt.Sprint(exec.WorkflowVersion)),
+		))
+	defer func() {
+		switch exec.State {
+		case model.ExecutionFailed:
+			span.SetStatus(codes.Error, exec.Error)
+			if exec.Error != "" {
+				span.RecordError(errors.New(exec.Error))
+			}
+		case model.ExecutionCompleted:
+			span.SetStatus(codes.Ok, "")
+		}
+		span.End()
+	}()
+	// 收尾顺序(后注册先执行):先释放工作区,再递减运行计数,最后
+	// 唤醒调度器 —— 调度器看到的是"槽位真的空了"。
+	defer e.schedule()
 	e.running.Add(1)
 	defer e.running.Add(-1)
+	// 工作区租约跟随执行协程的生命周期:WAITING_USER / 终态 / panic
+	// 都会在这里释放(等待人工时不应长期占住目录)。
+	defer e.releaseWorkspace(exec.ID)
 	// 失败台账:每次 execute 都是一次**新的运行**(首次 / 恢复 / 重试),
 	// 台账从空开始;跑完即清空,不跨执行累积。
 	e.failures.reset(exec.ID)
@@ -1072,8 +1526,9 @@ func (e *Engine) execute(ctx context.Context, exec *model.Execution, mode string
 		return
 	}
 	e.commitTerminal(exec, model.ExecutionCompleted, event.WorkflowCompleted, map[string]any{
-		"nodes":      exec.NodeStates,
-		"iterations": exec.Iterations,
+		"nodes":              exec.NodeStates,
+		"iterations":         exec.Iterations,
+		"via_failure_branch": exec.ViaFailureBranch,
 	})
 }
 
@@ -1085,7 +1540,26 @@ func (e *Engine) collectResult(exec *model.Execution, sess session.Session) {
 		data[k] = v
 	}
 	exec.StateData = data
+	if raw, ok := data[compiler.KeyViaFailureBranch]; ok {
+		exec.ViaFailureBranch = stringSliceOf(raw)
+	}
 	e.syncNodeStates(exec)
+}
+
+func stringSliceOf(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return append([]string(nil), t...)
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, x := range t {
+			if x != nil {
+				out = append(out, fmt.Sprint(x))
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // syncNodeStates 从 StateData 重建节点级视图(会话不可读时的兜端,
@@ -1121,6 +1595,9 @@ func (e *Engine) syncNodeStates(exec *model.Execution) {
 		}
 	}
 	exec.NodeStates = ns
+	if v, ok := exec.StateData[compiler.KeyViaFailureBranch]; ok {
+		exec.ViaFailureBranch = stringSliceOf(v)
+	}
 
 	if v, ok := exec.StateData[compiler.KeyCurrentNode]; ok && v != nil {
 		if s := fmt.Sprint(v); s != "" {

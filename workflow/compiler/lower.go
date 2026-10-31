@@ -54,6 +54,8 @@ const (
 	KeyStatus       = "status"         // 最近一次 Agent 状态
 	KeyOutput       = "output"         // 最近一次 Agent 输出
 	KeyCurrentNode  = "_current_node"
+	// KeyViaFailureBranch 记录本次执行走过的失败分支节点 ID(结构化数组)。
+	KeyViaFailureBranch = "_via_failure_branch"
 )
 
 // StatusKey / ResultKey 生成节点级状态键。
@@ -78,6 +80,15 @@ func RouteBranchKey(decisionNodeID string) string {
 	return "route:" + decisionNodeID + ":branch"
 }
 
+// FailureRouteKey 记录"该节点的失败分支已被选中"。
+//
+// 值不是分支下标而是标记(true/1):V1 每个节点最多一条失败边。
+// 恢复时 nodeAlreadyDone 靠它跳过已失败的决策节点,避免把失败节点
+// 重新执行一遍。
+func FailureRouteKey(nodeID string) string {
+	return "route:" + nodeID + ":failure"
+}
+
 // NodeRunner 由 runtime 实现:真正执行一个节点的业务逻辑。
 // compiler 只负责编排,不感知 Agent/Skill/Git 的实现细节。
 type NodeRunner interface {
@@ -92,6 +103,8 @@ type NodeOutcome struct {
 	Output   string
 	Data     map[string]any
 	Error    string
+	// Usage 是本次节点调用的 token 用量(可选,不参与路由)。
+	Usage *model.TokenUsage
 }
 
 // StateAccess 是节点执行器可用的状态读写接口(写入会被 ADK 持久化)。
@@ -203,6 +216,35 @@ func (e *RunEnv) SetCurrentNode(nodeID string) {
 	e.execMu.Lock()
 	defer e.execMu.Unlock()
 	e.Exec.CurrentNodeID = nodeID
+}
+
+// AddUsage 汇总一次节点调用的 token 用量(并发安全)。
+func (e *RunEnv) AddUsage(u *model.TokenUsage) {
+	if u == nil {
+		return
+	}
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
+	if e.Exec.Usage == nil {
+		e.Exec.Usage = &model.TokenUsage{}
+	}
+	e.Exec.Usage.InputTokens += u.InputTokens
+	e.Exec.Usage.OutputTokens += u.OutputTokens
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.InputTokens + u.OutputTokens
+	}
+	e.Exec.Usage.TotalTokens += total
+	if e.Exec.Usage.Model == "" {
+		e.Exec.Usage.Model = u.Model
+	}
+	if u.CostUSD != nil {
+		if e.Exec.Usage.CostUSD == nil {
+			c := 0.0
+			e.Exec.Usage.CostUSD = &c
+		}
+		*e.Exec.Usage.CostUSD += *u.CostUSD
+	}
 }
 
 // SetNodeState 并发安全地记录节点状态。
@@ -378,7 +420,7 @@ func (l *lowerer) lowerInner(p *Plan, name string) (agent.Agent, error) {
 		if err != nil {
 			return l.noopAgent(name) // 汇合占位节点
 		}
-		return l.nodeAgent(node, "")
+		return l.nodeAgent(node, "", false)
 	case KindSeq:
 		var subs []agent.Agent
 		for i, c := range p.Children {
@@ -619,8 +661,13 @@ func escalateEvent(ctx agent.InvocationContext, actions *session.EventActions) *
 
 // nodeAgent 为单个节点创建 ADK 自定义 Agent。
 // Run 内置:中断守卫 / 恢复跳过(已完成节点直接跳过) / 状态机 / 事件发射。
-func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error) {
+// nodeAgent 为单个节点创建 ADK Agent。
+//
+// allowFailure=true 表示该节点有失败边:失败时不设置全局 abort / 不
+// escalate,交给外层 routeAgent 选择失败分支。失败节点状态仍写 FAILED。
+func (l *lowerer) nodeAgent(node *model.Node, suffix string, allowFailure bool) (agent.Agent, error) {
 	env := l.env
+	failureRouted := allowFailure
 	return agent.New(agent.Config{
 		Name:        l.uniqueName("node:" + node.ID + suffix),
 		Description: node.Name,
@@ -725,14 +772,20 @@ func (l *lowerer) nodeAgent(node *model.Node, suffix string) (agent.Agent, error
 					yield(escalateEvent(ctx, actions), nil)
 					return
 				case model.NodeFailed:
-					st.Set(KeyAbort, "FAILED:"+node.ID)
-					env.SetAbort("FAILED:" + node.ID)
 					if outcome.Error != "" {
 						st.Set("_error", outcome.Error)
 					}
 					env.Bus.Emit(event.New(event.NodeFailed, env.Exec.ID, node.ID, map[string]any{
 						"node": node.ID, "error": outcome.Error, "summary": outcome.Summary,
 					}))
+					if failureRouted {
+						// 失败已由失败边接管:不写全局 abort,不 escalate。
+						// 节点状态仍是 FAILED,routeAgent 据此选择失败分支。
+						yield(stateEvent(ctx, actions), nil)
+						return
+					}
+					st.Set(KeyAbort, "FAILED:"+node.ID)
+					env.SetAbort("FAILED:" + node.ID)
 					yield(escalateEvent(ctx, actions), nil)
 					return
 				}
@@ -753,23 +806,30 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 	}
 
 	var subs []agent.Agent
-	firstNode, err := l.nodeAgent(decisionNode, "")
-	if err != nil {
-		return nil, err
-	}
-	subs = append(subs, firstNode)
 
-	var exitAgents []agent.Agent
-	var exitBranches []RouteBranch
+	// 先按分支类型分组:失败分支只在节点 FAILED 时选择,普通分支按条件选择。
+	var normalBranches []RouteBranch
+	var normalAgents []agent.Agent
+	var failureAgents []agent.Agent
 	for _, b := range p.Branches {
 		a, err := l.lower(b.Target, name+".exit")
 		if err != nil {
 			return nil, err
 		}
-		exitAgents = append(exitAgents, a)
-		exitBranches = append(exitBranches, b)
 		subs = append(subs, a)
+		if b.OnFailure {
+			failureAgents = append(failureAgents, a)
+			continue
+		}
+		normalBranches = append(normalBranches, b)
+		normalAgents = append(normalAgents, a)
 	}
+	hasFailureBranch := len(failureAgents) > 0
+	firstNode, err := l.nodeAgent(decisionNode, "", hasFailureBranch)
+	if err != nil {
+		return nil, err
+	}
+	subs = append([]agent.Agent{firstNode}, subs...)
 
 	var loopAgent agent.Agent
 	var loopNodeIDs []string
@@ -778,7 +838,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 		if err != nil {
 			return nil, err
 		}
-		revisit, err := l.nodeAgent(decisionNode, "#revisit") // 新实例,避免同一 Agent 双父
+		revisit, err := l.nodeAgent(decisionNode, "#revisit", false) // 新实例,避免同一 Agent 双父
 		if err != nil {
 			return nil, err
 		}
@@ -874,8 +934,29 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 					return
 				}
 
+				// 1.5 失败边:节点 FAILED 时优先走失败分支,不参与条件求值。
+				if hasFailureBranch {
+					status, _ := st.Get(StatusKey(decisionNode.ID))
+					if fmt.Sprint(status) == string(model.NodeFailed) {
+						if err := st.Set(FailureRouteKey(decisionNode.ID), true); err != nil {
+							logx.Warn("记录失败分支选择失败(路由仍继续)",
+								"execution", env.Exec.ID, "node", decisionNode.ID, "error", err.Error())
+						}
+						recordViaFailureBranch(st, decisionNode.ID)
+						for _, a := range failureAgents {
+							for ev, err := range a.Run(ctx) {
+								if !yield(ev, err) {
+									return
+								}
+							}
+						}
+						yield(stateEvent(ctx, actions), nil)
+						return
+					}
+				}
+
 				// 2. 评估出口分支
-				idx, ok, err := l.selectExitBranch(exitBranches, st, decisionNode.ID, decisionSkipped)
+				idx, ok, err := l.selectExitBranch(normalBranches, st, decisionNode.ID, decisionSkipped)
 				if err != nil {
 					// 出口分支下标写不进状态 = 恢复时无法回放已选定的
 					// 分支(可能"人批准 A、恢复后走 B")。显式失败,不让
@@ -885,7 +966,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 					return
 				}
 				if ok {
-					for ev, err := range exitAgents[idx].Run(ctx) {
+					for ev, err := range normalAgents[idx].Run(ctx) {
 						if !yield(ev, err) {
 							return
 						}
@@ -912,14 +993,14 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 						// 节点重新执行过决策节点,output/decision 是本轮的新值,
 						// 与循环开始前的那一份不同。求值结果照样记进状态,
 						// 供后续恢复回放(见 selectExitBranch)。
-						idx, ok, err := l.selectExitBranch(exitBranches, st, decisionNode.ID, false)
+						idx, ok, err := l.selectExitBranch(normalBranches, st, decisionNode.ID, false)
 						if err != nil {
 							l.abortRouteRecordFailed(ctx, actions, st, env, decisionNode.ID, err)
 							yield(escalateEvent(ctx, actions), nil)
 							return
 						}
 						if ok {
-							for ev, err := range exitAgents[idx].Run(ctx) {
+							for ev, err := range normalAgents[idx].Run(ctx) {
 								if !yield(ev, err) {
 									return
 								}
@@ -954,9 +1035,9 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 				}
 
 				// 4. 无匹配出口且无循环:走第一个无条件出口(若有)
-				for i, b := range exitBranches {
+				for i, b := range normalBranches {
 					if b.Condition == "" {
-						for ev, err := range exitAgents[i].Run(ctx) {
+						for ev, err := range normalAgents[i].Run(ctx) {
 							if !yield(ev, err) {
 								return
 							}
@@ -971,7 +1052,7 @@ func (l *lowerer) routeAgent(p *Plan, name string) (agent.Agent, error) {
 				//    一个都没跑,UI 却显示"成功"。这是"静默成功"最危险的一类
 				//    缺陷(条件写错、decision 值对不上、上游返回空决策都会
 				//    命中)。显式判失败:告诉用户哪个决策点没有可用出口。
-				l.abortNoRoute(ctx, actions, st, env, decisionNode.ID, exitBranches)
+				l.abortNoRoute(ctx, actions, st, env, decisionNode.ID, normalBranches)
 				yield(escalateEvent(ctx, actions), nil)
 			}
 		},
@@ -1211,6 +1292,9 @@ func aborted(st StateAccess) bool {
 func (l *lowerer) matchBranch(branches []RouteBranch, st StateAccess) (int, bool) {
 	fallback := -1
 	for i, b := range branches {
+		if b.OnFailure {
+			continue
+		}
 		if b.Condition == "" {
 			if fallback < 0 {
 				fallback = i
@@ -1296,8 +1380,43 @@ func nodeAlreadyDone(st StateAccess, nodeID string) bool {
 	switch fmt.Sprint(s) {
 	case string(model.NodeSuccess), string(model.NodeSkipped):
 		return true
+	case string(model.NodeFailed):
+		// 已由失败边接管:恢复时不能再把失败节点重跑一遍。
+		_, routed := st.Get(FailureRouteKey(nodeID))
+		return routed
 	}
 	return false
+}
+
+// recordViaFailureBranch 记录本次执行走过的失败分支节点(去重)。
+func recordViaFailureBranch(st StateAccess, nodeID string) {
+	raw, _ := st.Get(KeyViaFailureBranch)
+	list := toStringSlice(raw)
+	for _, id := range list {
+		if id == nodeID {
+			return
+		}
+	}
+	list = append(list, nodeID)
+	if err := st.Set(KeyViaFailureBranch, list); err != nil {
+		logx.Warn("记录 via_failure_branch 失败(不影响路由)", "node", nodeID, "error", err.Error())
+	}
+}
+
+func toStringSlice(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return append([]string(nil), t...)
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, x := range t {
+			if x != nil {
+				out = append(out, fmt.Sprint(x))
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // EvalCondition 用 expr 引擎对状态求值条件表达式。

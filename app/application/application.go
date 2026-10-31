@@ -195,6 +195,9 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 		app.scriptNodes.Store(allowScript)
 	}
 
+	// 运行时准入/排队设置(全局并发、排队开关、队列上限、调度策略)。
+	loadRuntimeLimits(repo, app.Engine)
+
 	// 崩溃恢复
 	if err := app.Engine.RecoverPending(); err != nil {
 		logx.Warn("恢复执行状态失败", "error", err)
@@ -210,6 +213,72 @@ func NewApp(dataDir string, examples fs.FS) (*App, error) {
 
 	logx.Info("应用初始化完成", "data_dir", dataDir)
 	return app, nil
+}
+
+// loadRuntimeLimits 读取运行时准入/排队设置。
+//
+// 新库(没有任何执行记录)默认全局并发 4;已有库保持 0(不限),
+// 避免升级时悄悄改变既有并发行为。设置读取失败一律留痕并按默认值运行。
+func loadRuntimeLimits(repo *persistence.DB, eng *wfruntime.Engine) {
+	if repo == nil || eng == nil {
+		return
+	}
+	limits := wfruntime.RuntimeLimits{MaxQueuedExecutions: 100, QueuePolicy: "fair"}
+	var maxActive int
+	if err := repo.GetSetting("max_active_executions", &maxActive); err != nil {
+		if isSettingNotFound(err) {
+			var n int
+			_ = repo.SQL().QueryRow(`SELECT COUNT(1) FROM executions`).Scan(&n)
+			if n == 0 {
+				maxActive = 4
+			}
+			if saveErr := repo.SaveSetting("max_active_executions", maxActive); saveErr != nil {
+				logx.Warn("写入默认 max_active_executions 失败", "error", saveErr.Error())
+			}
+		} else {
+			logx.Warn("读取 max_active_executions 失败,按 0(不限)处理", "error", err.Error())
+		}
+	}
+	limits.MaxActiveExecutions = maxActive
+	if err := repo.GetSetting("queue_enabled", &limits.QueueEnabled); err != nil && !isSettingNotFound(err) {
+		logx.Warn("读取 queue_enabled 失败,按关闭处理", "error", err.Error())
+	}
+	if err := repo.GetSetting("max_queued_executions", &limits.MaxQueuedExecutions); err != nil {
+		if !isSettingNotFound(err) {
+			logx.Warn("读取 max_queued_executions 失败,按 100 处理", "error", err.Error())
+		}
+		limits.MaxQueuedExecutions = 100
+	}
+	if err := repo.GetSetting("queue_policy", &limits.QueuePolicy); err != nil {
+		limits.QueuePolicy = "fair"
+	}
+	eng.SetRuntimeLimits(limits)
+}
+
+// RuntimeStats 返回运行时统计(只读;不含敏感信息)。
+func (a *App) RuntimeStats() map[string]any {
+	depth, oldest := a.Engine.QueueStats()
+	oldestAge := 0
+	if !oldest.IsZero() {
+		oldestAge = int(time.Since(oldest).Seconds())
+	}
+	exp, unexp := a.Engine.EscalateStats()
+	counts, _ := a.Repo.CountExecutionsByState()
+	return map[string]any{
+		"running":                  a.Engine.RunningCount(),
+		"queued":                   depth,
+		"oldest_queued_age_sec":    oldestAge,
+		"rejected_total":           a.Engine.RejectedTotal(),
+		"completed":                counts["COMPLETED"],
+		"failed":                   counts["FAILED"],
+		"cancelled":                counts["CANCELLED"],
+		"waiting_user":             counts["WAITING_USER"],
+		"event_persist_failures":   a.Engine.EventPersistFailures(),
+		"state_commit_failures":    a.Engine.StateCommitFailures(),
+		"escalate_expected":        exp,
+		"escalate_unexpected":      unexp,
+		"sse_subscribers":          a.EventSubscriberCount(),
+	}
 }
 
 // loadAgentConfig 读取某 Agent 的持久化配置(未配置返回零值)。
@@ -1108,14 +1177,21 @@ func (s *ExecutionService) Run(ctx context.Context, workflowID, task string, var
 }
 
 func (s *ExecutionService) List(workflowID string, limit int) ([]*model.Execution, error) {
-	execs, err := s.app.Repo.ListExecutions(workflowID, limit)
+	execs, _, err := s.ListPage(workflowID, limit, "")
+	return execs, err
+}
+
+// ListPage 返回执行摘要页与下一页游标。
+func (s *ExecutionService) ListPage(workflowID string, limit int, cursor string) ([]*model.Execution, string, error) {
+	execs, next, err := s.app.Repo.ListExecutionSummaries(workflowID, limit, cursor)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	for _, e := range execs {
+		e.QueuePosition = s.app.Engine.QueuePosition(e.ID)
 		maskExecution(e)
 	}
-	return execs, nil
+	return execs, next, nil
 }
 
 func (s *ExecutionService) Get(id string) (*model.Execution, error) {
@@ -1123,6 +1199,7 @@ func (s *ExecutionService) Get(id string) (*model.Execution, error) {
 	if err != nil {
 		return nil, err
 	}
+	exec.QueuePosition = s.app.Engine.QueuePosition(exec.ID)
 	maskExecution(exec)
 	return exec, nil
 }
@@ -1148,6 +1225,14 @@ func (s *ExecutionService) Events(id string) ([]map[string]any, error) {
 		return nil, err
 	}
 	return s.app.Repo.ListEvents(id, 0)
+}
+
+// EventsPage 返回事件页与游标信息(监控页增量读取用)。
+func (s *ExecutionService) EventsPage(id string, afterSeq, beforeSeq int64, limit int) ([]map[string]any, int64, bool, error) {
+	if _, err := s.app.Repo.GetExecution(id); err != nil {
+		return nil, 0, false, err
+	}
+	return s.app.Repo.ListEventsPage(id, afterSeq, beforeSeq, limit)
 }
 
 // Artifacts 返回某次执行的制品(内容已脱敏,约定 8)。
@@ -1668,7 +1753,12 @@ func (s *SettingsService) Get(key string, out any) error {
 // 返回副本而不是包级变量:白名单是只读语义,不该是可被改写的全局状态
 // (约定 15:共享可变状态一律加锁 —— 更好的做法是压根不给它可变的余地)。
 func writableSettingKeys() []string {
-	return []string{"git_working_dir", "log_level", "allow_script_nodes"}
+	return []string{
+		"git_working_dir", "log_level", "allow_script_nodes",
+		"max_active_executions", "queue_enabled",
+		"max_queued_executions", "queue_policy",
+		"event_retention_days", "execution_retention_days", "max_events_per_execution",
+	}
 }
 
 // isWritableSettingKey 判断 key 是否在 Set 白名单里。
@@ -1708,6 +1798,20 @@ func (s *SettingsService) Set(key string, value any) error {
 		return s.setLogLevelValue(value)
 	case "allow_script_nodes":
 		return s.setAllowScriptNodes(value)
+	case "max_active_executions":
+		return s.setMaxActiveExecutions(value)
+	case "queue_enabled":
+		return s.setQueueEnabled(value)
+	case "max_queued_executions":
+		return s.setMaxQueuedExecutions(value)
+	case "queue_policy":
+		return s.setQueuePolicy(value)
+	case "event_retention_days":
+		return s.setRetentionInt("event_retention_days", value, 3650)
+	case "execution_retention_days":
+		return s.setRetentionInt("execution_retention_days", value, 3650)
+	case "max_events_per_execution":
+		return s.setRetentionInt("max_events_per_execution", value, 1000000)
 	default:
 		// 白名单里有键却没有处理逻辑 → 必须显式报错,不能"静默成功"。
 		return model.NewError(model.KindValidationError, "BAD_REQUEST",
@@ -1790,6 +1894,132 @@ func (s *SettingsService) setAllowScriptNodes(value any) error {
 	return nil
 }
 
+func (s *SettingsService) setMaxActiveExecutions(value any) error {
+	n, ok := value.(int)
+	if !ok || n < 0 || n > 1000 {
+		return model.NewError(model.KindValidationError, "INVALID_MAX_ACTIVE_EXECUTIONS",
+			fmt.Sprintf("max_active_executions 必须是 0..1000 的整数(0 = 不限),实际是 %v", value))
+	}
+	if err := s.app.Repo.SaveSetting("max_active_executions", n); err != nil {
+		return err
+	}
+	s.app.applyRuntimeLimits()
+	return nil
+}
+
+func (s *SettingsService) setQueueEnabled(value any) error {
+	enabled, ok := value.(bool)
+	if !ok {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("queue_enabled 必须是布尔值(实际是 %T)", value))
+	}
+	if err := s.app.Repo.SaveSetting("queue_enabled", enabled); err != nil {
+		return err
+	}
+	s.app.applyRuntimeLimits()
+	return nil
+}
+
+func (s *SettingsService) setMaxQueuedExecutions(value any) error {
+	n, ok := value.(int)
+	if !ok || n < 1 || n > 10000 {
+		return model.NewError(model.KindValidationError, "INVALID_MAX_QUEUED",
+			fmt.Sprintf("max_queued_executions 必须是 1..10000 的整数,实际是 %v", value))
+	}
+	if err := s.app.Repo.SaveSetting("max_queued_executions", n); err != nil {
+		return err
+	}
+	s.app.applyRuntimeLimits()
+	return nil
+}
+
+func (s *SettingsService) setQueuePolicy(value any) error {
+	policy, ok := value.(string)
+	if !ok || (policy != "fair" && policy != "fifo") {
+		return model.NewError(model.KindValidationError, "INVALID_QUEUE_POLICY",
+			fmt.Sprintf("queue_policy 必须是 fair 或 fifo,实际是 %v", value))
+	}
+	if err := s.app.Repo.SaveSetting("queue_policy", policy); err != nil {
+		return err
+	}
+	s.app.applyRuntimeLimits()
+	return nil
+}
+
+func (s *SettingsService) setRetentionInt(key string, value any, max int) error {
+	n, ok := value.(int)
+	if !ok || n < 0 || n > max {
+		return model.NewError(model.KindValidationError, "BAD_REQUEST",
+			fmt.Sprintf("%s 必须是 0..%d 的整数(0 = 不自动删除),实际是 %v", key, max, value))
+	}
+	if err := s.app.Repo.SaveSetting(key, n); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Cleanup 按当前保留策略清理终态数据;dryRun=true 只返回统计。
+func (s *SettingsService) Cleanup(dryRun bool) (persistence.RetentionStats, error) {
+	info := s.Info()
+	return s.app.Repo.Cleanup(dryRun, info.EventRetentionDays, info.ExecutionRetentionDays, info.MaxEventsPerExecution)
+}
+
+// UpdateRuntime 更新运行时准入/排队设置;nil 表示不修改。
+func (s *SettingsService) UpdateRuntime(maxActive *int, queueEnabled *bool, maxQueued *int, policy *string) (*SettingsInfo, error) {
+	if maxActive != nil && (*maxActive < 0 || *maxActive > 1000) {
+		return nil, model.NewError(model.KindValidationError, "INVALID_MAX_ACTIVE_EXECUTIONS",
+			"max_active_executions 必须是 0..1000 的整数")
+	}
+	if policy != nil && *policy != "fair" && *policy != "fifo" {
+		return nil, model.NewError(model.KindValidationError, "INVALID_QUEUE_POLICY",
+			fmt.Sprintf("queue_policy 必须是 fair 或 fifo,实际是 %q", *policy))
+	}
+	if maxQueued != nil && (*maxQueued < 1 || *maxQueued > 10000) {
+		return nil, model.NewError(model.KindValidationError, "INVALID_MAX_QUEUED",
+			"max_queued_executions 必须是 1..10000 的整数")
+	}
+	// 先全部校验,再逐项落库(尽量缩小部分成功的窗口)。
+	if maxActive != nil {
+		if err := s.setMaxActiveExecutions(*maxActive); err != nil {
+			return nil, err
+		}
+	}
+	if queueEnabled != nil {
+		if err := s.setQueueEnabled(*queueEnabled); err != nil {
+			return nil, err
+		}
+	}
+	if maxQueued != nil {
+		if err := s.setMaxQueuedExecutions(*maxQueued); err != nil {
+			return nil, err
+		}
+	}
+	if policy != nil {
+		if err := s.setQueuePolicy(*policy); err != nil {
+			return nil, err
+		}
+	}
+	return s.Info(), nil
+}
+
+// applyRuntimeLimits 从设置表读取运行时限制并应用;读失败保留当前值。
+func (a *App) applyRuntimeLimits() {
+	limits := a.Engine.RuntimeLimits()
+	if err := a.Repo.GetSetting("max_active_executions", &limits.MaxActiveExecutions); err != nil && !isSettingNotFound(err) {
+		logx.Warn("读取 max_active_executions 失败,保留当前值", "error", err.Error())
+	}
+	if err := a.Repo.GetSetting("queue_enabled", &limits.QueueEnabled); err != nil && !isSettingNotFound(err) {
+		logx.Warn("读取 queue_enabled 失败,保留当前值", "error", err.Error())
+	}
+	if err := a.Repo.GetSetting("max_queued_executions", &limits.MaxQueuedExecutions); err != nil && !isSettingNotFound(err) {
+		logx.Warn("读取 max_queued_executions 失败,保留当前值", "error", err.Error())
+	}
+	if err := a.Repo.GetSetting("queue_policy", &limits.QueuePolicy); err != nil && !isSettingNotFound(err) {
+		logx.Warn("读取 queue_policy 失败,保留当前值", "error", err.Error())
+	}
+	a.Engine.SetRuntimeLimits(limits)
+}
+
 // SettingsInfo 是设置页展示的只读信息 + 可修改项。
 type SettingsInfo struct {
 	DataDir       string `json:"data_dir"`
@@ -1821,6 +2051,15 @@ type SettingsInfo struct {
 	// "是否读失败"段;生效值 / 库值的区分靠本标记表达)。
 	LogLevelReadFailed         bool `json:"log_level_read_failed,omitempty"`
 	AllowScriptNodesReadFailed bool `json:"allow_script_nodes_read_failed,omitempty"`
+	// 运行时准入/排队设置。
+	MaxActiveExecutions int    `json:"max_active_executions"`
+	QueueEnabled        bool   `json:"queue_enabled"`
+	MaxQueuedExecutions int    `json:"max_queued_executions"`
+	QueuePolicy         string `json:"queue_policy"`
+	// 保留策略:0 = 不自动删除。
+	EventRetentionDays     int `json:"event_retention_days"`
+	ExecutionRetentionDays int `json:"execution_retention_days"`
+	MaxEventsPerExecution  int `json:"max_events_per_execution"`
 }
 
 // isSettingNotFound 判断 err 是否表示"这个设置项从未设置过"。
@@ -1843,11 +2082,19 @@ func isSettingNotFound(err error) bool {
 //     (GitWorkingDirReadFailed)并记 ERROR,否则用户一保存就把损坏行
 //     覆盖成内存值,损坏事实消失(约定 14)。
 func (s *SettingsService) Info() *SettingsInfo {
+	limits := s.app.Engine.RuntimeLimits()
 	info := &SettingsInfo{
-		DataDir:          s.app.DataDir,
-		LogLevel:         s.app.LogLevelValue(),
-		AllowScriptNodes: s.app.ScriptNodesAllowed(),
+		DataDir:             s.app.DataDir,
+		LogLevel:            s.app.LogLevelValue(),
+		AllowScriptNodes:    s.app.ScriptNodesAllowed(),
+		MaxActiveExecutions: limits.MaxActiveExecutions,
+		QueueEnabled:        limits.QueueEnabled,
+		MaxQueuedExecutions: limits.MaxQueuedExecutions,
+		QueuePolicy:         limits.QueuePolicy,
 	}
+	_ = s.app.Repo.GetSetting("event_retention_days", &info.EventRetentionDays)
+	_ = s.app.Repo.GetSetting("execution_retention_days", &info.ExecutionRetentionDays)
+	_ = s.app.Repo.GetSetting("max_events_per_execution", &info.MaxEventsPerExecution)
 	var wd string
 	switch err := s.app.Repo.GetSetting("git_working_dir", &wd); {
 	case err == nil:

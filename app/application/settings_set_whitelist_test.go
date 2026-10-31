@@ -213,6 +213,20 @@ func TestWritableSettingKeysAllWritable(t *testing.T) {
 			value = "info"
 		case "allow_script_nodes":
 			value = false
+		case "max_active_executions":
+			value = 0
+		case "queue_enabled":
+			value = false
+		case "max_queued_executions":
+			value = 100
+		case "queue_policy":
+			value = "fair"
+		case "event_retention_days":
+			value = 30
+		case "execution_retention_days":
+			value = 90
+		case "max_events_per_execution":
+			value = 5000
 		default:
 			t.Fatalf("白名单里出现了没有约定取值的键 %q(请同步更新本用例与实现)", key)
 		}

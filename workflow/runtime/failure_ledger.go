@@ -218,12 +218,24 @@ func (e *Engine) repairFailureState(exec *model.Execution) {
 		exec.StateData[key] = string(model.NodeFailed)
 	}
 	// 2. 失败原因:以台账为准(确定性:按节点 ID 排序,与事件落地顺序无关)。
-	reason := failureReason(fails)
+	//    但**已由失败边接管**的失败不算执行中断 —— 失败节点仍为 FAILED,
+	//    执行可以经失败分支 COMPLETED。这里只对未接管的失败设置 abort。
+	unhandled := make([]nodeFailure, 0, len(fails))
+	for _, f := range fails {
+		if _, routed := exec.StateData[compiler.FailureRouteKey(f.NodeID)]; routed {
+			continue
+		}
+		unhandled = append(unhandled, f)
+	}
+	if len(unhandled) == 0 {
+		return
+	}
+	reason := failureReason(unhandled)
 	// 3. 中断原因:会话状态已经指向同一个真失败节点就保留;
 	//    缺失 / 指向被取消的兄弟 / 被 WAIT_USER 盖住 → 一律纠正。
 	cur := fmt.Sprint(exec.StateData[compiler.KeyAbort])
-	if !abortNamesFailure(cur, fails) {
-		exec.StateData[compiler.KeyAbort] = "FAILED:" + fails[0].NodeID
+	if !abortNamesFailure(cur, unhandled) {
+		exec.StateData[compiler.KeyAbort] = "FAILED:" + unhandled[0].NodeID
 	}
 	exec.StateData["_error"] = reason
 }

@@ -136,6 +136,7 @@ type Edge struct {
 	From      string `yaml:"from" json:"from"`
 	To        string `yaml:"to" json:"to"`
 	Condition string `yaml:"condition" json:"condition,omitempty"`
+	OnFailure bool   `yaml:"on_failure" json:"on_failure,omitempty"`
 }
 
 // Parse 将 YAML/JSON 文本解析为 Document。

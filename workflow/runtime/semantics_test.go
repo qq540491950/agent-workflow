@@ -340,6 +340,9 @@ func TestMockIsolatedPerExecution(t *testing.T) {
 		_ = skills.Register(sk)
 	}
 	eng := NewEngine(agents, skills, permission.NewManager(), bus, git.New(t.TempDir()), repo)
+	// 本测试只验证 mock 的按执行隔离,不验证工作区串行化;显式跳过租约,
+	// 让两个执行真正并发(生产语义由 workspace_test 覆盖)。
+	eng.Workspaces = noopWorkspaceLeases{}
 	eng.Perms.Set("mock-claude", permission.Policy{FilesystemRead: true, GitRead: true})
 	eng.Perms.Set("mock-pi", permission.Policy{FilesystemRead: true, FilesystemWrite: true})
 
@@ -390,6 +393,13 @@ func TestMockSharedSpaceStillResets(t *testing.T) {
 	if resp.Decision != coreagent.DecisionRejected {
 		t.Errorf("重置后应从序列首个决策开始,实际 %s", resp.Decision)
 	}
+}
+
+// noopWorkspaceLeases 是测试用的无租约实现:只用于"故意并发"的用例。
+type noopWorkspaceLeases struct{}
+
+func (noopWorkspaceLeases) Acquire(context.Context, string, []string) (WorkspaceLease, error) {
+	return noopWorkspaceLease{}, nil
 }
 
 var _ = dsl.Parse

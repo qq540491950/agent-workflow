@@ -3,6 +3,7 @@ package stubcli
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +86,9 @@ func TestBuildStubExitCodes(t *testing.T) {
 // TestProcessAliveDetectsDeath 进程残留断言的地面真值:探测必须能
 // 分辨"活着"与"已死"。
 func TestProcessAliveDetectsDeath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ProcessAlive 在 Windows 上没有信号 0 探测(见 proc_windows.go)")
+	}
 	if ProcessAlive(0) {
 		t.Fatal("PID 0 不该被判定为存活")
 	}

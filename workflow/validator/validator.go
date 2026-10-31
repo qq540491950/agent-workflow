@@ -171,6 +171,7 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 			}
 		}
 	}
+	failureEdges := map[string]int{}
 	for i, e := range wf.Edges {
 		if !nodeIDs[e.From] {
 			addErr("INVALID_EDGE", e.From, "第 %d 条边的 from 节点 %q 不存在", i+1, e.From)
@@ -180,6 +181,28 @@ func Validate(wf *model.Workflow, agents AgentResolver, skills SkillResolver, wo
 		}
 		if e.From == e.To && e.From != "" {
 			addErr("SELF_LOOP", e.From, "节点 %q 不能连接自身", e.From)
+		}
+		if !e.OnFailure {
+			continue
+		}
+		failureEdges[e.From]++
+		if failureEdges[e.From] > 1 {
+			addErr("ON_FAILURE_MULTIPLE", e.From, "节点 %q 只能有一条失败边", e.From)
+		}
+		if e.From == e.To && e.From != "" {
+			addErr("ON_FAILURE_SELF", e.From, "节点 %q 的失败边不能指向自身", e.From)
+		}
+		if e.Condition != "" {
+			addErr("ON_FAILURE_WITH_CONDITION", e.From,
+				"节点 %q 的失败边不能再带 condition(失败路由不参与条件求值)", e.From)
+		}
+		if wf.Reaches(e.To, e.From, map[string]bool{}) {
+			addErr("ON_FAILURE_CYCLE", e.From,
+				"节点 %q 的失败边形成了环;失败分支 V1 只允许顺序上下文中的非循环路径", e.From)
+		}
+		if inParallelBranch(wf, e.From) {
+			addErr("ON_FAILURE_IN_PARALLEL", e.From,
+				"节点 %q 位于并行区内;失败分支 V1 只支持顺序上下文", e.From)
 		}
 	}
 
@@ -969,6 +992,32 @@ func joinIDs(ids []string) string {
 		out += id
 	}
 	return out
+}
+
+// inParallelBranch 判断节点是否位于某个 parallel → merge 区内。
+//
+// 汇合点判定走 model.Workflow.ParallelJoin(约定 13:与编译器同源)。
+// 失败分支 V1 不支持并行区,校验期必须挡住 —— 运行期失败台账与级联取消
+// 会与失败分支打架。
+func inParallelBranch(wf *model.Workflow, nodeID string) bool {
+	for _, n := range wf.Nodes {
+		if n.Type != model.NodeTypeParallel {
+			continue
+		}
+		out := wf.OutgoingEdges(n.ID)
+		if len(out) < 2 {
+			continue
+		}
+		join := wf.ParallelJoin(n.ID, out)
+		if join == "" || nodeID == n.ID || nodeID == join {
+			continue
+		}
+		if wf.Reaches(n.ID, nodeID, map[string]bool{}) &&
+			wf.Reaches(nodeID, join, map[string]bool{}) {
+			return true
+		}
+	}
+	return false
 }
 
 // Summary 把校验错误压成一行可读文本(最多 3 条)。

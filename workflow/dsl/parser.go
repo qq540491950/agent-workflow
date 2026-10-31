@@ -115,7 +115,7 @@ func (d *Document) ToModel() *model.Workflow {
 		wf.Nodes = append(wf.Nodes, mn)
 	}
 	for _, e := range d.Edges {
-		wf.Edges = append(wf.Edges, model.Edge{From: e.From, To: e.To, Condition: e.Condition})
+		wf.Edges = append(wf.Edges, model.Edge{From: e.From, To: e.To, Condition: e.Condition, OnFailure: e.OnFailure})
 	}
 	return wf
 }
@@ -196,7 +196,7 @@ func FromModel(wf *model.Workflow) *Document {
 		doc.Nodes = append(doc.Nodes, dn)
 	}
 	for _, e := range wf.Edges {
-		doc.Edges = append(doc.Edges, Edge{From: e.From, To: e.To, Condition: e.Condition})
+		doc.Edges = append(doc.Edges, Edge{From: e.From, To: e.To, Condition: e.Condition, OnFailure: e.OnFailure})
 	}
 	return doc
 }

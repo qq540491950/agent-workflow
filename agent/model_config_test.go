@@ -27,6 +27,7 @@ func fakeCLIScript(t *testing.T, dir, name, dumpFile string) string {
 }
 
 func TestClaudeAdapterModelAndEnv(t *testing.T) {
+	skipWindowsShell(t)
 	dir := t.TempDir()
 	dump := filepath.Join(dir, "args.txt")
 	bin := fakeCLIScript(t, dir, "fake-claude-m", dump)
@@ -82,6 +83,7 @@ func TestClaudeAdapterMaskedConfig(t *testing.T) {
 }
 
 func TestPiAdapterModelFlag(t *testing.T) {
+	skipWindowsShell(t)
 	dir := t.TempDir()
 	dump := filepath.Join(dir, "pi-args.txt")
 	bin := filepath.Join(dir, "fake-pi-m")

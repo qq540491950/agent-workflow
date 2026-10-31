@@ -34,7 +34,8 @@ import (
 //
 // 刻意不包含 state:状态由 CAS 单独落定(见文件头注释)。
 const execMetaColumns = `current_node_id=?, iterations_json=?, started_at=?, finished_at=?,
-	error=?, node_states_json=?, snapshot_json=?, state_json=?`
+	error=?, node_states_json=?, snapshot_json=?, state_json=?, workspace_json=?,
+	via_failure_branch_json=?, queued_at=?, usage_json=?`
 
 // execMetaUpdate 只更新非状态列的整行更新语句。
 const execMetaUpdate = `UPDATE executions SET ` + execMetaColumns + ` WHERE id=?`
@@ -121,6 +122,10 @@ func execMetaArgs(exec *model.Execution) []any {
 		marshalStrMap(exec.NodeStates),
 		marshalSnapshot(exec.Snapshot),
 		marshalAnyMap(MaskStateData(exec.StateData)),
+		marshalStrSlice(exec.WorkspaceDirs),
+		marshalStrSlice(exec.ViaFailureBranch),
+		exec.QueuedAt,
+		marshalUsage(exec.Usage),
 	}
 }
 
@@ -269,5 +274,21 @@ func marshalSnapshot(wf *model.Workflow) string {
 		return ""
 	}
 	b, _ := json.Marshal(wf)
+	return string(b)
+}
+
+func marshalStrSlice(v []string) string {
+	if v == nil {
+		return "[]"
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func marshalUsage(u *model.TokenUsage) string {
+	if u == nil {
+		return "{}"
+	}
+	b, _ := json.Marshal(u)
 	return string(b)
 }

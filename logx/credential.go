@@ -540,10 +540,10 @@ func looksLikePath(v string) bool {
 // 随机 base64 的段是大小写混排的 —— 12 个字符全落在 {a-z,0-9} 的概率
 // ≈ (36/64)^12 ≈ 6e-5,实测 50000 个随机样本里只多命中 3 个(0.006%)。
 func isPathSegment(text string, start, end int) bool {
-	if start > 0 && text[start-1] == '/' {
+	if start > 0 && (text[start-1] == '/' || text[start-1] == '\\') {
 		return true
 	}
-	if end < len(text) && text[end] == '/' {
+	if end < len(text) && (text[end] == '/' || text[end] == '\\') {
 		return true
 	}
 	if start >= end {
@@ -554,10 +554,18 @@ func isPathSegment(text string, start, end int) bool {
 
 // isPathShaped 判定一个 token 是不是"路径"(含 "/" 且含路径名形态的段)。
 func isPathShaped(tok string) bool {
-	if !strings.Contains(tok, "/") {
+	if !strings.ContainsAny(tok, `/\`) {
 		return false
 	}
-	for _, seg := range strings.Split(tok, "/") {
+	// 绝对路径(Unix `/…`、Windows `C:\…`、Git Bash `/c/…`)含多个分隔符
+	// 时按路径保护。随机凭据以 "/" 或盘符开头的概率极低,而脚本节点的
+	// pwd 输出、临时目录正是这类形态 —— 抹掉它们会毁掉工作目录审计。
+	seps := strings.Count(tok, "/") + strings.Count(tok, `\`)
+	if seps >= 2 && (strings.HasPrefix(tok, "/") || (len(tok) > 2 && tok[1] == ':')) &&
+		hasKnownPathSegment(tok) {
+		return true
+	}
+	for _, seg := range strings.FieldsFunc(tok, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if len(seg) < minPathNameLen {
 			continue
 		}
@@ -570,6 +578,24 @@ func isPathShaped(tok string) bool {
 			}
 		}
 		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+// knownPathSegments 是常见路径段。绝对路径只有命中这些段才按路径保护 ——
+// 随机 base64 也含 "/",不能凭"以 / 开头 + 多个 /"就整段豁免。
+var knownPathSegments = map[string]bool{
+	"Users": true, "home": true, "tmp": true, "var": true, "usr": true,
+	"opt": true, "etc": true, "Local": true, "AppData": true, "Temp": true,
+	"Documents": true, "Desktop": true, "Downloads": true, "workspace": true,
+	"projects": true, "src": true, "c": true, "d": true,
+}
+
+func hasKnownPathSegment(tok string) bool {
+	for _, seg := range strings.FieldsFunc(tok, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if knownPathSegments[seg] {
 			return true
 		}
 	}

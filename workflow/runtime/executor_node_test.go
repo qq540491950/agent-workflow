@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -114,6 +115,13 @@ edges:
 
 // script 节点等价于任意本地命令执行,而工作流可由 YAML 导入获得。
 // 默认必须拒绝(fail closed):未注入 AllowScriptNodes 钩子即不放行。
+func scriptShellYAML() string {
+	if runtime.GOOS == "windows" {
+		return "    shell: sh\n"
+	}
+	return ""
+}
+
 func TestScriptNodeDeniedByDefault(t *testing.T) {
 	scriptYAML := func(command string) string {
 		return `
@@ -124,7 +132,7 @@ workflow:
 nodes:
   - id: danger
     type: script
-    command: "` + command + `"
+` + scriptShellYAML() + `    command: "` + command + `"
 edges: []
 `
 	}
@@ -163,7 +171,7 @@ edges: []
 		}
 	})
 	t.Run("显式放行后命令真实执行", func(t *testing.T) {
-		marker := filepath.Join(t.TempDir(), "pwned")
+		marker := filepath.ToSlash(filepath.Join(t.TempDir(), "pwned"))
 		final := run(t, func() bool { return true }, "touch "+marker)
 		if final.State != model.ExecutionCompleted {
 			t.Fatalf("放行后应执行成功,state = %s err = %s", final.State, final.Error)
@@ -189,7 +197,7 @@ workflow:
 nodes:
   - id: bg
     type: script
-    command: "sleep 60 & echo hi"
+` + scriptShellYAML() + `    command: "sleep 60 & echo hi"
 edges: []
 `
 	doc, err := dsl.Parse([]byte(yml))
@@ -450,7 +458,7 @@ workflow:
 nodes:
   - id: bg
     type: script
-    command: "sleep 30"
+` + scriptShellYAML() + `    command: "sleep 30"
     timeout_seconds: 2
 edges: []
 `))
@@ -483,8 +491,8 @@ workflow:
 nodes:
   - id: bg
     type: script
-    command: "pwd"
-    working_dir: ` + workDir + `
+` + scriptShellYAML() + `    command: "pwd"
+    working_dir: ` + filepath.ToSlash(workDir) + `
 edges: []
 `))
 		if err != nil {
@@ -508,8 +516,12 @@ edges: []
 				out = n.Output
 			}
 		}
-		if !strings.Contains(strings.TrimSpace(out), workDir) {
-			t.Errorf("working_dir 未生效: 输出 = %q, 期望包含 %q", out, workDir)
+		// Git Bash 的 pwd 会把 Windows 临时目录映射成 /tmp/…,不能直接
+		// 比较完整路径;用最后两段确认执行目录确实切换到了 workDir。
+		wantParent := filepath.Base(filepath.Dir(workDir))
+		wantLeaf := filepath.Base(workDir)
+		if !strings.Contains(out, wantParent) || !strings.Contains(out, wantLeaf) {
+			t.Errorf("working_dir 未生效: 输出 = %q, 期望包含 %q / %q", out, wantParent, wantLeaf)
 		}
 	})
 }

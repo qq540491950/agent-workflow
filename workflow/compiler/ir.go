@@ -82,6 +82,9 @@ const (
 // RouteBranch 是路由的一个出口分支。
 type RouteBranch struct {
 	Condition string // expr 表达式;空串表示无条件(兜底)
+	// OnFailure 为真表示这是失败边:只在节点状态为 FAILED 时选择,
+	// 不参与条件求值。
+	OnFailure bool
 	Target    *Plan
 }
 
@@ -223,8 +226,8 @@ func (b *irBuilder) chainStop(fromID string, ancestors map[string]bool, stop map
 		visited[cur] = true
 		path = append(path, cur)
 
-		// 决策点:多条出边或带条件出边
-		if len(out) > 1 || (len(out) == 1 && out[0].Condition != "") {
+		// 决策点:多条出边、带条件出边,或存在失败边。
+		if len(out) > 1 || (len(out) == 1 && out[0].Condition != "") || hasFailureEdge(out) {
 			children = append(children, b.route(cur, ancestors, stop))
 			path = append(path, cur+"(route)")
 			break
@@ -253,7 +256,7 @@ func (b *irBuilder) parallel(parID string, ancestors map[string]bool, outerStop 
 	}
 
 	// 汇合点:所有分支的公共后继(取第一条分支可达的、入边数>1 的节点)
-	join := b.findJoin(parID, out)
+	join := b.wf.ParallelJoin(parID, out)
 	_ = parNode
 
 	var branches []*Plan
@@ -297,14 +300,18 @@ func (b *irBuilder) parallel(parID string, ancestors map[string]bool, outerStop 
 func (b *irBuilder) route(decisionID string, ancestors map[string]bool, stop map[string]bool) *Plan {
 	out := b.wf.OutgoingEdges(decisionID)
 
-	// 分类出口:loop 回边 vs exit 出口
+	// 分类出口:失败边 / loop 回边 / exit 出口。
+	var failureEdges []model.Edge
 	var exits []model.Edge
 	var loopEdges []model.Edge
 	for i := range out {
 		e := out[i]
-		if b.reaches(e.To, decisionID, map[string]bool{}) {
+		switch {
+		case e.OnFailure:
+			failureEdges = append(failureEdges, e)
+		case b.wf.Reaches(e.To, decisionID, map[string]bool{}):
 			loopEdges = append(loopEdges, e)
-		} else {
+		default:
 			exits = append(exits, e)
 		}
 	}
@@ -318,6 +325,14 @@ func (b *irBuilder) route(decisionID string, ancestors map[string]bool, stop map
 	for _, e := range exits {
 		rp.Branches = append(rp.Branches, RouteBranch{
 			Condition: e.Condition,
+			Target:    b.chainStop(e.To, newAncestors, stop),
+		})
+	}
+	// 失败边与普通出口分开存:运行期只在节点 FAILED 时选择它,
+	// 恢复时也不会把它和条件出口混在一起求值。
+	for _, e := range failureEdges {
+		rp.Branches = append(rp.Branches, RouteBranch{
+			OnFailure: true,
 			Target:    b.chainStop(e.To, newAncestors, stop),
 		})
 	}
@@ -358,41 +373,13 @@ func (b *irBuilder) route(decisionID string, ancestors map[string]bool, stop map
 	return rp
 }
 
-// reaches 判断 from 是否能沿边到达 target(有向可达性)。
-func (b *irBuilder) reaches(from, target string, seen map[string]bool) bool {
-	if from == target {
-		return true
-	}
-	if seen[from] {
-		return false
-	}
-	seen[from] = true
-	for _, e := range b.wf.OutgoingEdges(from) {
-		if b.reaches(e.To, target, seen) {
+func hasFailureEdge(edges []model.Edge) bool {
+	for _, e := range edges {
+		if e.OnFailure {
 			return true
 		}
 	}
 	return false
-}
-
-// findJoin 寻找并行分支的汇合点:入边数>1、且是所有分支起点的公共可达节点。
-func (b *irBuilder) findJoin(parID string, branches []model.Edge) string {
-	for _, n := range b.wf.Nodes {
-		if n.ID == parID || len(b.wf.IncomingEdges(n.ID)) <= 1 {
-			continue
-		}
-		all := true
-		for _, be := range branches {
-			if !b.reaches(be.To, n.ID, map[string]bool{}) {
-				all = false
-				break
-			}
-		}
-		if all {
-			return n.ID
-		}
-	}
-	return ""
 }
 
 func copySet(m map[string]bool) map[string]bool {
