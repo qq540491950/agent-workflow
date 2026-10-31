@@ -14,6 +14,7 @@ const m = vi.hoisted(() => ({
   getExecution: vi.fn(),
   executionNodes: vi.fn(),
   executionEvents: vi.fn(),
+  executionEventsPage: vi.fn(),
   executionArtifacts: vi.fn(),
   provideInput: vi.fn(),
   cancelExecution: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       getExecution: m.getExecution,
       executionNodes: m.executionNodes,
       executionEvents: m.executionEvents,
+      executionEventsPage: m.executionEventsPage,
       executionArtifacts: m.executionArtifacts,
       provideInput: m.provideInput,
       cancelExecution: m.cancelExecution,
@@ -42,6 +44,20 @@ vi.mock("@/lib/api", async (importOriginal) => {
     }),
   };
 });
+
+// 事件页负载:events 数组包装(X-Has-More=false,无更早历史)。
+// 组件初始加载 reloadEvents=true 时走 executionEventsPage(分页游标),
+// mock 缺失时真实实现会发 fetch(jsdom 未 stub)→ reject → 失败态。
+// 参数放宽到 object[](UIEvent 是 interface,无索引签名,塞不进
+// Record<string, unknown>;运行时反正原样回给组件的 toMonitorEvent)。
+function eventsPage(events: readonly object[]) {
+  return {
+    events: events as Record<string, unknown>[],
+    nextSeq: 0,
+    hasMore: false,
+    all: false,
+  };
+}
 
 function exec(over: Record<string, unknown> = {}) {
   return {
@@ -62,6 +78,7 @@ beforeEach(() => {
   m.getExecution.mockReset().mockResolvedValue(exec());
   m.executionNodes.mockReset().mockResolvedValue([]);
   m.executionEvents.mockReset().mockResolvedValue([]);
+  m.executionEventsPage.mockReset().mockResolvedValue(eventsPage([]));
   m.executionArtifacts.mockReset().mockResolvedValue([]);
   m.provideInput.mockReset().mockResolvedValue(exec());
   m.cancelExecution.mockReset().mockResolvedValue(undefined);
@@ -203,7 +220,7 @@ describe("ExecutionMonitor 状态徽章", () => {
 describe("ExecutionMonitor 列表防御", () => {
   it("节点/事件/制品接口返回非数组时不白屏", async () => {
     m.executionNodes.mockResolvedValue({ error: "<html></html>" });
-    m.executionEvents.mockResolvedValue({ error: "<html></html>" });
+    m.executionEventsPage.mockResolvedValue({ error: "<html></html>" });
     m.executionArtifacts.mockResolvedValue({ error: "<html></html>" });
     renderMonitor();
     await settle();
@@ -212,7 +229,9 @@ describe("ExecutionMonitor 列表防御", () => {
   });
 
   it("事件负载字段缺失时仍能渲染(不抛 TypeError)", async () => {
-    m.executionEvents.mockResolvedValue([{ type: "node.started" }]);
+    m.executionEventsPage.mockResolvedValue(
+      eventsPage([{ type: "node.started" }]),
+    );
     renderMonitor();
     await settle();
     expect(screen.getByText("node.started")).toBeTruthy();
@@ -442,53 +461,64 @@ describe("ExecutionMonitor 实时日志跟随滚动", () => {
   }
 
   function box() {
-    return document.querySelector('[role="tabpanel"] > div') as HTMLElement;
+    // EventLog 现在带"共 N 条/加载更早"头条,滚动容器是 tabpanel 里的
+    // max-h-[420px] 日志框(不再是 tabpanel 的直接子 div)。
+    return document.querySelector(
+      '[role="tabpanel"] .max-h-\\[420px\\]',
+    ) as HTMLElement;
   }
 
   it("新事件到达时自动滚到底部(跟随模式)", async () => {
-    m.executionEvents.mockResolvedValue([makeEvent("workflow.started", "ex-1")]);
+    m.executionEventsPage.mockResolvedValue(
+      eventsPage([makeEvent("workflow.started", "ex-1")]),
+    );
     renderMonitor();
     await settle();
     const grow = fakeScrollBox(box());
     expect(box().scrollTop).toBe(0);
     // 新事件 → 内容变长 → 应自动滚到 scrollHeight(1400)
-    m.executionEvents.mockResolvedValue([
-      makeEvent("workflow.started", "ex-1"),
-      makeEvent("node.started", "ex-1"),
-    ]);
-    emit(m.handlers, makeEvent("node.started", "ex-1"));
+    m.executionEventsPage.mockResolvedValue(
+      eventsPage([
+        makeEvent("workflow.started", "ex-1"),
+        makeEvent("node.started", "ex-1"),
+      ]),
+    );
+    // SSE 事件是**先追加到日志**(act 内同步渲染,滚动 effect 随即执行),
+    // 防抖刷新只拉执行/节点、不再重拉事件 —— 所以内容增长要先于事件到达,
+    // effect 才能把 scrollTop 滚到新的 scrollHeight。
     grow();
+    emit(m.handlers, makeEvent("node.started", "ex-1"));
     await advance(250);
     expect(box().scrollTop).toBe(1400);
   });
 
   it("用户向上翻历史时不拽人;滚回底部恢复跟随", async () => {
-    m.executionEvents.mockResolvedValue([makeEvent("workflow.started", "ex-1")]);
+    m.executionEventsPage.mockResolvedValue(
+      eventsPage([makeEvent("workflow.started", "ex-1")]),
+    );
     renderMonitor();
     await settle();
     const grow = fakeScrollBox(box());
     // 用户上翻:scrollTop=10(距底 990 > 48)→ stick=false
     box().scrollTop = 10;
     fireEvent.scroll(box());
-    m.executionEvents.mockResolvedValue([
-      makeEvent("workflow.started", "ex-1"),
-      makeEvent("node.started", "ex-1"),
-    ]);
-    emit(m.handlers, makeEvent("node.started", "ex-1"));
+    m.executionEventsPage.mockResolvedValue(
+      eventsPage([
+        makeEvent("workflow.started", "ex-1"),
+        makeEvent("node.started", "ex-1"),
+      ]),
+    );
     grow();
+    emit(m.handlers, makeEvent("node.started", "ex-1"));
     await advance(250);
     expect(box().scrollTop).toBe(10); // 没有被拽到底部
 
-    // 滚回底部 → 恢复跟随
+    // 滚回底部 → 恢复跟随。组件把 scrollTop 赋成 scrollHeight(jsdom 不做
+    // clamp),距底 0 → stick=true。
     box().scrollTop = 1400;
     fireEvent.scroll(box());
-    m.executionEvents.mockResolvedValue([
-      makeEvent("workflow.started", "ex-1"),
-      makeEvent("node.started", "ex-1"),
-      makeEvent("node.completed", "ex-1"),
-    ]);
+    grow(); // 内容长到 1800
     emit(m.handlers, makeEvent("node.completed", "ex-1"));
-    grow();
     await advance(250);
     expect(box().scrollTop).toBe(1800); // 又跟到底了
   });

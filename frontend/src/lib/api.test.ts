@@ -1771,7 +1771,14 @@ async function collectBackendCodes(): Promise<Set<string>> {
     add(/\bCode:\s*"([A-Z][A-Z0-9_]*)"/g);
     add(/"code":\s*"([A-Z][A-Z0-9_]*)"/g);
     add(/body\["code"\]\s*=\s*"([A-Z][A-Z0-9_]*)"/g);
-    add(/const\s+\w+\s*=\s*"([A-Z][A-Z0-9_]{3,})"/g);
+    // (var|const) 声明的错误码常量,含 var ( ...) 分组形式
+    // (如 api/security 中间件的 securityCodeForbidden = "FORBIDDEN_ORIGIN");
+    // 宽松形态(任意 \w+ = "大写")只在 api/ 目录启用,避免把执行状态、
+    // Agent 决策等同名常量误当错误码收集。
+    add(/(?:var|const)\s+\w+\s*=\s*"([A-Z][A-Z0-9_]{3,})"/g);
+    if (file.includes(`${path.sep}api${path.sep}`)) {
+      add(/\b\w+\s*=\s*"([A-Z][A-Z0-9_]{3,})"/g);
+    }
     if (isValidator) add(/"([A-Z][A-Z0-9_]{3,})"/g);
   }
   return codes;

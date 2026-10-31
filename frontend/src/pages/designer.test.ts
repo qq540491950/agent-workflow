@@ -162,3 +162,52 @@ describe("声明式入参不被保存丢掉", () => {
     expect(JSON.stringify(model)).not.toContain("inputs");
   });
 });
+
+// 失败分支边(后端 model.Edge.OnFailure):节点失败(重试耗尽)后走这条边。
+//
+// 与 condition 互斥 —— 后端编译器 route() 按 on_failure 分组,同一条边
+// 双语义会被静默丢掉一边(用户以为配了失败兜底,运行时却按条件分支裁决)。
+// toWorkflowModel 必须:① onFailure=true → payload 带 on_failure:true 且
+// **不带** condition;② 普通边不带 on_failure 键(omitempty,序列化后没有)。
+describe("失败分支边的序列化与互斥", () => {
+  const base: Workflow = {
+    id: "wf-3",
+    name: "W3",
+    description: "",
+    version: 1,
+    enabled: true,
+    variables: {},
+    nodes: [],
+    edges: [],
+    settings: { max_iterations: 5, on_loop_limit: "wait_user" },
+  };
+  const mkEdges = (data: Record<string, unknown>) =>
+    [{ id: "e1", source: "a", target: "b", data }] as unknown as Parameters<
+      typeof toWorkflowModel
+    >[2];
+
+  it("onFailure=true → 带 on_failure:true 且清空 condition", () => {
+    const model = toWorkflowModel(base, [], mkEdges({ condition: "x", onFailure: true }));
+    expect(model.edges[0].on_failure).toBe(true);
+    expect(model.edges[0].condition).toBeUndefined();
+    // 序列化后 condition 键不得出现(undefined 不序列化,双保险)
+    const payload = JSON.parse(JSON.stringify(model)) as Workflow;
+    expect(payload.edges[0]).not.toHaveProperty("condition");
+    expect(payload.edges[0].on_failure).toBe(true);
+  });
+
+  it("普通边不带 on_failure 键(序列化后无该字段)", () => {
+    const model = toWorkflowModel(base, [], mkEdges({ condition: 'decision == "APPROVED"', onFailure: false }));
+    expect(model.edges[0].on_failure).toBeUndefined();
+    const payload = JSON.parse(JSON.stringify(model)) as Workflow;
+    expect(payload.edges[0]).not.toHaveProperty("on_failure");
+    expect(payload.edges[0].condition).toBe('decision == "APPROVED"');
+  });
+
+  it("无条件普通边两个键都不带", () => {
+    const model = toWorkflowModel(base, [], mkEdges({ condition: "", onFailure: false }));
+    const payload = JSON.parse(JSON.stringify(model)) as Workflow;
+    expect(payload.edges[0]).not.toHaveProperty("on_failure");
+    expect(payload.edges[0]).not.toHaveProperty("condition");
+  });
+});

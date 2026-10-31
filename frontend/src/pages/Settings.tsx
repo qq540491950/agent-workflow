@@ -43,7 +43,16 @@ export default function Settings() {
   const [gitDir, setGitDir] = useState("");
   const [level, setLevel] = useState("info");
   const [allowScript, setAllowScript] = useState(false);
+  const [maxActive, setMaxActive] = useState("0");
+  const [queueEnabled, setQueueEnabled] = useState(false);
+  const [maxQueued, setMaxQueued] = useState("100");
+  const [queuePolicy, setQueuePolicy] = useState("fair");
+  const [eventRetention, setEventRetention] = useState("0");
+  const [execRetention, setExecRetention] = useState("0");
+  const [maxEvents, setMaxEvents] = useState("0");
   const [saving, setSaving] = useState(false);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [runtimeStats, setRuntimeStats] = useState<Record<string, number>>({});
   const [backupBusy, setBackupBusy] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -53,6 +62,13 @@ export default function Settings() {
       setGitDir(i.git_working_dir);
       setLevel(i.log_level || "info");
       setAllowScript(!!i.allow_script_nodes);
+      setMaxActive(String(i.max_active_executions ?? 0));
+      setQueueEnabled(!!i.queue_enabled);
+      setMaxQueued(String(i.max_queued_executions ?? 100));
+      setQueuePolicy(i.queue_policy || "fair");
+      setEventRetention(String(i.event_retention_days ?? 0));
+      setExecRetention(String(i.execution_retention_days ?? 0));
+      setMaxEvents(String(i.max_events_per_execution ?? 0));
     } catch (e) {
       reportError(e, "加载设置");
     }
@@ -66,6 +82,10 @@ export default function Settings() {
       .version()
       .then((v) => setVer(v ?? {}))
       .catch((e: unknown) => reportError(e, "加载版本信息"));
+    api
+      .runtimeStats()
+      .then((s) => setRuntimeStats(s ?? {}))
+      .catch((e: unknown) => reportError(e, "加载运行时统计"));
   }, [refresh]);
 
   const save = async () => {
@@ -75,12 +95,38 @@ export default function Settings() {
       reportError(`日志级别非法: ${level}(可选 ${LOG_LEVELS.join("|")})`);
       return;
     }
+    const maxActiveN = Number(maxActive);
+    const maxQueuedN = Number(maxQueued);
+    if (!Number.isInteger(maxActiveN) || maxActiveN < 0 || maxActiveN > 1000) {
+      reportError("全局并发上限必须是 0..1000 的整数(0 = 不限)");
+      return;
+    }
+    if (!Number.isInteger(maxQueuedN) || maxQueuedN < 1 || maxQueuedN > 10000) {
+      reportError("队列上限必须是 1..10000 的整数");
+      return;
+    }
+    const eventDays = Number(eventRetention);
+    const execDays = Number(execRetention);
+    const maxEv = Number(maxEvents);
+    if (!Number.isInteger(eventDays) || eventDays < 0 || eventDays > 3650 ||
+        !Number.isInteger(execDays) || execDays < 0 || execDays > 3650 ||
+        !Number.isInteger(maxEv) || maxEv < 0 || maxEv > 1000000) {
+      reportError("保留策略必须是合法整数(天数 0..3650,单执行事件上限 0..1000000;0 = 不自动删除)");
+      return;
+    }
     setSaving(true);
     try {
       const i = await api.updateSettings({
         git_working_dir: gitDir,
         log_level: level,
         allow_script_nodes: allowScript,
+        max_active_executions: maxActiveN,
+        queue_enabled: queueEnabled,
+        max_queued_executions: maxQueuedN,
+        queue_policy: queuePolicy === "fifo" ? "fifo" : "fair",
+        event_retention_days: eventDays,
+        execution_retention_days: execDays,
+        max_events_per_execution: maxEv,
       });
       setInfo(i);
       setAllowScript(!!i.allow_script_nodes);
@@ -89,6 +135,35 @@ export default function Settings() {
       reportError(e, "保存设置");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const previewCleanup = async () => {
+    setCleanupBusy(true);
+    try {
+      const s = await api.cleanup(true);
+      toast.message(
+        `dry-run:将删除事件 ${s.events} 条、制品 ${s.artifacts} 个、节点 ${s.nodes} 行、执行 ${s.executions} 条`,
+      );
+    } catch (e) {
+      reportError(e, "预览清理");
+    } finally {
+      setCleanupBusy(false);
+    }
+  };
+
+  const runCleanup = async () => {
+    if (!window.confirm("按当前保留策略清理终态数据?该操作不可恢复(运行中/等待人工/排队中不受影响)。")) return;
+    setCleanupBusy(true);
+    try {
+      const s = await api.cleanup(false);
+      toast.success(
+        `已清理事件 ${s.events} 条、制品 ${s.artifacts} 个、节点 ${s.nodes} 行、执行 ${s.executions} 条`,
+      );
+    } catch (e) {
+      reportError(e, "执行清理");
+    } finally {
+      setCleanupBusy(false);
     }
   };
 
@@ -224,6 +299,117 @@ export default function Settings() {
             <Button onClick={save} disabled={saving}>
               保存设置
             </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3">
+            <CardTitle className="text-base">运行时并发与排队</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">全局并发上限(0 = 不限)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={1000}
+                  value={maxActive}
+                  onChange={(e) => setMaxActive(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">队列长度上限</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10000}
+                  value={maxQueued}
+                  onChange={(e) => setMaxQueued(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="text-xs">超过并发上限时排队</Label>
+                <p className="text-[11px] text-muted-foreground">
+                  关闭时超限立即返回 409;开启时执行进入 QUEUED,槽位释放后自动调度。
+                </p>
+              </div>
+              <Switch
+                checked={queueEnabled}
+                aria-label="超过并发上限时排队"
+                onCheckedChange={setQueueEnabled}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">调度策略</Label>
+              <Select value={queuePolicy} onValueChange={setQueuePolicy}>
+                <SelectTrigger className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="fair">公平(按工作流轮转)</SelectItem>
+                  <SelectItem value="fifo">先进先出</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              0 = 不限。建议桌面环境设置 2–4,避免同时启动过多 CLI 子进程。
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3">
+            <CardTitle className="text-base">运行时状态</CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+            <div>运行中:{runtimeStats.running ?? 0}</div>
+            <div>排队中:{runtimeStats.queued ?? 0}</div>
+            <div>已完成:{runtimeStats.completed ?? 0}</div>
+            <div>失败:{runtimeStats.failed ?? 0}</div>
+            <div>事件落库失败:{runtimeStats.event_persist_failures ?? 0}</div>
+            <div>状态提交失败:{runtimeStats.state_commit_failures ?? 0}</div>
+            <div>SSE 订阅:{runtimeStats.sse_subscribers ?? 0}</div>
+            <div>最老排队:{runtimeStats.oldest_queued_age_sec ?? 0}s</div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3">
+            <CardTitle className="text-base">数据保留与清理</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">事件保留天数(0=永久)</Label>
+                <Input type="number" min={0} max={3650} value={eventRetention}
+                  onChange={(e) => setEventRetention(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">执行保留天数(0=永久)</Label>
+                <Input type="number" min={0} max={3650} value={execRetention}
+                  onChange={(e) => setExecRetention(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">单执行事件上限(0=不限)</Label>
+                <Input type="number" min={0} max={1000000} value={maxEvents}
+                  onChange={(e) => setMaxEvents(e.target.value)} />
+              </div>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              默认 0 = 不自动删除。清理只处理已完成/失败/已取消的数据;
+              运行中、等待人工、排队中的执行永不被清理。
+            </p>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={previewCleanup} disabled={cleanupBusy}>
+                预览清理
+              </Button>
+              <Button variant="outline" onClick={runCleanup} disabled={cleanupBusy}>
+                立即清理
+              </Button>
+            </div>
           </CardContent>
         </Card>
 

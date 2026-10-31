@@ -110,7 +110,19 @@ const nodeIcon: Record<string, React.ReactNode> = {
  * 用户要不停手动滚动。跟随规则 —— 用户本来就在底部(或从未滚动)→
  * 跟随到底;用户向上翻历史时不拽人,滚回底部即恢复跟随。
  */
-function EventLog({ events }: { events: UIEvent[] }) {
+function EventLog({
+  events,
+  hasOlder,
+  onLoadOlder,
+  loadingOlder,
+  truncated,
+}: {
+  events: UIEvent[];
+  hasOlder?: boolean;
+  onLoadOlder?: () => void;
+  loadingOlder?: boolean;
+  truncated?: boolean;
+}) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   const stickRef = useRef(true);
   useEffect(() => {
@@ -119,6 +131,17 @@ function EventLog({ events }: { events: UIEvent[] }) {
     box.scrollTop = box.scrollHeight;
   }, [events.length]);
   return (
+    <div>
+      <div className="mb-2 flex items-center justify-between text-[11px] text-muted-foreground">
+        <span>
+          共 {events.length} 条{truncated ? "(仅显示最近 2000 条,完整记录请导出)" : ""}
+        </span>
+        {hasOlder && onLoadOlder && (
+          <Button size="sm" variant="outline" onClick={onLoadOlder} disabled={loadingOlder}>
+            {loadingOlder ? "加载中…" : "加载更早"}
+          </Button>
+        )}
+      </div>
     <div
       ref={boxRef}
       onScroll={() => {
@@ -149,6 +172,7 @@ function EventLog({ events }: { events: UIEvent[] }) {
       {events.length === 0 && (
         <div className="py-6 text-center text-muted-foreground">暂无日志</div>
       )}
+    </div>
     </div>
   );
 }
@@ -208,6 +232,28 @@ export function decisionTone(decision: string): string {
   return "";
 }
 
+const MAX_MONITOR_EVENTS = 2000;
+
+function toMonitorEvent(x: Record<string, unknown>): UIEvent {
+  const seq = Number(x.seq);
+  return {
+    type: String(x.type),
+    execution_id: String(x.execution_id),
+    node_id: String(x.node_id ?? ""),
+    timestamp: String(x.created_at ?? x.timestamp ?? ""),
+    data: (x.data as Record<string, unknown>) ?? {},
+    ...(Number.isFinite(seq) && seq > 0 ? { seq } : {}),
+  };
+}
+
+function appendMonitorEvent(prev: UIEvent[], ev: UIEvent): { events: UIEvent[]; truncated: boolean } {
+  const last = prev[prev.length - 1];
+  if (last && ev.seq && last.seq === ev.seq && last.type === ev.type) return { events: prev, truncated: false };
+  const next = [...prev, ev];
+  if (next.length <= MAX_MONITOR_EVENTS) return { events: next, truncated: false };
+  return { events: next.slice(next.length - MAX_MONITOR_EVENTS), truncated: true };
+}
+
 export default function ExecutionMonitor() {
   const { id = "" } = useParams();
   const [exec, setExec] = useState<Execution | null>(null);
@@ -219,6 +265,9 @@ export default function ExecutionMonitor() {
   usePageTitle(exec ? `执行:${exec.workflow_name}` : "执行详情");
   const [nodes, setNodes] = useState<ExecutionNode[]>([]);
   const [events, setEvents] = useState<UIEvent[]>([]);
+  const [eventsHasOlder, setEventsHasOlder] = useState(false);
+  const [eventsTruncated, setEventsTruncated] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [instruction, setInstruction] = useState("");
   // 提交互斥:防止双击重复提交(后端另有 CAS 兜底)
@@ -232,13 +281,12 @@ export default function ExecutionMonitor() {
   // 以为不是的那条执行上。守卫让旧响应直接丢弃。
   const guard = useMemo(() => createRequestGuard(), []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (reloadEvents = false) => {
     const seq = guard.next();
     try {
-      const [e, ns, evs, arts] = await Promise.all([
+      const [e, ns, arts] = await Promise.all([
         api.getExecution(id),
         api.executionNodes(id),
-        api.executionEvents(id),
         api.executionArtifacts(id),
       ]);
       // 已经切换到别的执行(或发起了更新的请求):旧响应丢弃,不得覆盖。
@@ -249,22 +297,40 @@ export default function ExecutionMonitor() {
       // null 或被解析成 HTML 兜底页的对象,直接 setNodes(ns) 会在
       // nodes.length / nodes.map 处抛 TypeError 导致整页白屏。
       setNodes(asArray<ExecutionNode>(ns));
-      setEvents(
-        asArray<Record<string, unknown>>(evs).map((x) => ({
-          type: String(x.type),
-          execution_id: String(x.execution_id),
-          node_id: String(x.node_id ?? ""),
-          timestamp: String(x.created_at),
-          data: (x.data as Record<string, unknown>) ?? {},
-        })),
-      );
       setArtifacts(asArray<Artifact>(arts));
+      if (reloadEvents) {
+        const page = await api.executionEventsPage(id, { limit: 500 });
+        if (!guard.isCurrent(seq)) return;
+        setEvents(page.events.map(toMonitorEvent));
+        setEventsHasOlder(page.hasMore);
+        setEventsTruncated(false);
+      }
     } catch (err) {
       if (!guard.isCurrent(seq)) return;
       setLoadFailed(true);
       reportError(err, "加载执行详情");
     }
   }, [id, guard]);
+
+  const loadOlderEvents = useCallback(async () => {
+    if (loadingOlder) return;
+    const oldest = events.find((e) => e.seq !== undefined)?.seq;
+    if (!oldest) return;
+    setLoadingOlder(true);
+    try {
+      const page = await api.executionEventsPage(id, { limit: 500, beforeSeq: oldest });
+      const older = page.events.map(toMonitorEvent);
+      setEvents((prev) => {
+        const seen = new Set(prev.map((e) => e.seq).filter((s): s is number => s !== undefined));
+        return [...older.filter((e) => e.seq === undefined || !seen.has(e.seq)), ...prev];
+      });
+      setEventsHasOlder(page.hasMore);
+    } catch (err) {
+      reportError(err, "加载更早的事件");
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [id, events, loadingOlder]);
 
   useEffect(() => {
     // 切换执行:先清空上一条执行的数据。留着它的话,"取消执行"/
@@ -273,17 +339,22 @@ export default function ExecutionMonitor() {
     setExec(null);
     setNodes([]);
     setEvents([]);
+    setEventsHasOlder(false);
+    setEventsTruncated(false);
     setArtifacts([]);
-    refresh();
-    // 实时事件:匹配当前执行则刷新。
-    // 防抖窗口统一走 createRefreshDebounce(约定 7:一律 200ms)——
-    // 此处此前是 120ms,与 Layout/EventsAudit 不一致,高频 node.* 事件下
-    // 会打出比预期更密的刷新。
+    refresh(true);
+    // 实时事件:直接追加到日志,只把执行/节点刷新做 200ms 防抖。
+    // 此前每个事件都触发一次全量事件重拉,长执行会越跑越卡。
     const trigger = createRefreshDebounce(() => {
       void refresh();
     });
     const unsub = subscribeEvents((ev) => {
       if (ev.execution_id !== id) return;
+      setEvents((prev) => {
+        const appended = appendMonitorEvent(prev, ev);
+        if (appended.truncated) setEventsTruncated(true);
+        return appended.events;
+      });
       trigger();
     });
     return () => {
@@ -351,9 +422,26 @@ export default function ExecutionMonitor() {
             执行
             <span className="font-mono text-sm text-muted-foreground">{exec.id}</span>
             <StateBadge state={exec.state} />
+            {exec.state === "QUEUED" && exec.queue_position ? (
+              <Badge variant="secondary" className="text-[11px]">队列第 {exec.queue_position} 位</Badge>
+            ) : null}
+            {(exec.via_failure_branch?.length ?? 0) > 0 && (
+              <Badge variant="secondary" className="text-[11px]">经失败分支完成</Badge>
+            )}
             {(exec.iterations?.loop ?? 0) > 0 && (
               <Badge variant="secondary" className="text-[11px]">循环 {exec.iterations?.loop} 轮</Badge>
             )}
+            {/* 用量徽标:有数据显示数值,没有显示"—"而不是 0(票 19 ——
+                "0"暗示"跑过但零消耗","—"才是"适配器没上报") */}
+            <Badge variant="secondary" className="text-[11px]">
+              Token{" "}
+              {(exec.usage?.total_tokens ?? 0) > 0
+                ? exec.usage?.total_tokens
+                : "—"}
+              {exec.usage?.cost_usd !== undefined
+                ? ` · $${exec.usage.cost_usd.toFixed(4)}`
+                : ""}
+            </Badge>
           </h1>
           <p className="text-sm text-muted-foreground">
             <Link className="hover:underline" to={`/workflows/${exec.workflow_id}/design`}>
@@ -379,6 +467,16 @@ export default function ExecutionMonitor() {
               ))}
             </p>
           )}
+          {(exec.workspace_dirs?.length ?? 0) > 0 && (
+            <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+              <span>工作区:</span>
+              {exec.workspace_dirs?.map((d) => (
+                <span key={d} className="rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px]">
+                  {d}
+                </span>
+              ))}
+            </p>
+          )}
         </div>
         <div className="ml-auto flex gap-2">
           <a
@@ -388,7 +486,7 @@ export default function ExecutionMonitor() {
           >
             导出记录
           </a>
-          {(exec.state === "RUNNING" || exec.state === "WAITING_USER") && (
+          {(exec.state === "QUEUED" || exec.state === "RUNNING" || exec.state === "WAITING_USER") && (
             <Button
               variant="outline"
               size="sm"
@@ -402,7 +500,7 @@ export default function ExecutionMonitor() {
                 refresh();
               }}
             >
-              取消执行
+              {exec.state === "QUEUED" ? "取消排队" : "取消执行"}
             </Button>
           )}
         </div>
@@ -571,7 +669,13 @@ export default function ExecutionMonitor() {
                 <TabsTrigger value="state">状态</TabsTrigger>
               </TabsList>
               <TabsContent value="events" className="mt-2">
-                <EventLog events={events} />
+                <EventLog
+                  events={events}
+                  hasOlder={eventsHasOlder}
+                  onLoadOlder={loadOlderEvents}
+                  loadingOlder={loadingOlder}
+                  truncated={eventsTruncated}
+                />
               </TabsContent>
               <TabsContent value="nodes" className="mt-2">
                 <div className="max-h-[420px] space-y-2 overflow-auto">

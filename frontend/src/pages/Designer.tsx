@@ -213,6 +213,11 @@ export function toWorkflowModel(
       from: e.source,
       to: e.target,
       condition: (e.data?.condition as string) || undefined,
+      // 失败分支与条件分支互斥(后端编译器按 on_failure 分组):
+      // on_failure=true 时不得带 condition(面板里也互相清空)。
+      ...(e.data?.onFailure
+        ? { on_failure: true, condition: undefined }
+        : {}),
     })),
     settings: wf?.settings ?? { max_iterations: 5, on_loop_limit: "wait_user" },
   };
@@ -369,13 +374,16 @@ function DesignerInner() {
         id: `e-${e.from}-${e.to}-${i}`,
         source: e.from,
         target: e.to,
-        label: e.condition || undefined,
+        // 失败分支:红色虚线 + "失败"标签,与条件分支(蓝)/普通边(灰)区分。
+        label: e.on_failure ? "失败" : e.condition || undefined,
         animated: !!e.condition,
-        style: { stroke: e.condition ? "#38bdf8" : "#64748b" },
-        labelStyle: { fill: "#94a3b8", fontSize: 10 },
+        style: e.on_failure
+          ? { stroke: "#f87171", strokeDasharray: "6 4" }
+          : { stroke: e.condition ? "#38bdf8" : "#64748b" },
+        labelStyle: { fill: e.on_failure ? "#fca5a5" : "#94a3b8", fontSize: 10 },
         labelBgStyle: { fill: "#1e293b" },
         markerEnd: { type: MarkerType.ArrowClosed },
-        data: { condition: e.condition ?? "" },
+        data: { condition: e.condition ?? "", onFailure: !!e.on_failure },
       })),
     );
   }
@@ -714,7 +722,27 @@ function DesignerInner() {
                           label: condition || undefined,
                           animated: !!condition,
                           style: { stroke: condition ? "#38bdf8" : "#64748b" },
-                          data: { condition },
+                          // 填条件即退出失败分支(两者互斥,后端编译器按
+                          // on_failure 分组,同边双语义会被静默丢一边)。
+                          data: { condition, onFailure: false },
+                        }
+                      : e,
+                  ),
+                )
+              }
+              onToggleFailure={(on) =>
+                setEdges((eds) =>
+                  eds.map((e) =>
+                    e.id === selectedEdge.id
+                      ? {
+                          ...e,
+                          label: on ? "失败" : undefined,
+                          animated: false,
+                          style: on
+                            ? { stroke: "#f87171", strokeDasharray: "6 4" }
+                            : { stroke: "#64748b" },
+                          // 开失败分支即清条件(互斥,与后端 route() 分组一致)
+                          data: { condition: on ? "" : (e.data?.condition as string) ?? "", onFailure: on },
                         }
                       : e,
                   ),
@@ -1218,12 +1246,15 @@ export function NodePropertyPanel({
 function EdgePropertyPanel({
   edge,
   onChange,
+  onToggleFailure,
   onDelete,
 }: {
   edge: RFEdge;
   onChange: (condition: string) => void;
+  onToggleFailure: (on: boolean) => void;
   onDelete: () => void;
 }) {
+  const onFailure = !!edge.data?.onFailure;
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -1235,17 +1266,33 @@ function EdgePropertyPanel({
       <div className="text-xs text-muted-foreground">
         {edge.source} → {edge.target}
       </div>
-      <Row label="条件表达式(留空=无条件)">
-        <Input
-          className="font-mono text-xs"
-          placeholder={'decision == "APPROVED"'}
-          value={(edge.data?.condition as string) ?? ""}
-          onChange={(e) => onChange(e.target.value)}
+      <Row label="失败分支(节点失败后走这条边)">
+        <Switch
+          checked={onFailure}
+          aria-label="失败分支"
+          onCheckedChange={(v) => onToggleFailure(v)}
         />
       </Row>
-      <p className="text-xs text-muted-foreground">
-        条件按声明顺序求值,第一个成立的分支被执行。可用变量: decision, status, output, iteration。
-      </p>
+      {onFailure ? (
+        <p className="text-xs text-muted-foreground">
+          失败分支与条件表达式互斥 —— 开启时条件被清空。节点失败(重试耗尽)后走这条边;
+          建议指向收尾/告警节点,让失败可见而不是静默中断。
+        </p>
+      ) : (
+        <>
+          <Row label="条件表达式(留空=无条件)">
+            <Input
+              className="font-mono text-xs"
+              placeholder={'decision == "APPROVED"'}
+              value={(edge.data?.condition as string) ?? ""}
+              onChange={(e) => onChange(e.target.value)}
+            />
+          </Row>
+          <p className="text-xs text-muted-foreground">
+            条件按声明顺序求值,第一个成立的分支被执行。可用变量: decision, status, output, iteration。
+          </p>
+        </>
+      )}
     </div>
   );
 }

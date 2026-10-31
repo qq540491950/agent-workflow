@@ -27,6 +27,7 @@
 export const STATE_LABELS: Record<string, string> = {
   // 执行状态
   CREATED: "已创建",
+  QUEUED: "排队中",
   RUNNING: "运行中",
   WAITING_USER: "等待人工",
   COMPLETED: "已完成",

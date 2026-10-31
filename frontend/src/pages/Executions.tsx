@@ -19,16 +19,38 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-const stateOptions = ["", "RUNNING", "WAITING_USER", "COMPLETED", "FAILED", "CANCELLED"] as const;
+const stateOptions = ["", "QUEUED", "RUNNING", "WAITING_USER", "COMPLETED", "FAILED", "CANCELLED"] as const;
 
 export default function Executions() {
   usePageTitle("执行记录");
   const [execs, setExecs] = useState<Execution[]>([]);
   const [stateFilter, setStateFilter] = useState<string>("");
+  const [nextCursor, setNextCursor] = useState("");
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const refresh = useCallback(() => {
-    api.listExecutions("", 100).then((x) => setExecs(asArray<Execution>(x))).catch((e) => reportError(e, "加载执行记录"));
+    api
+      .listExecutionsPage("", 50, "")
+      .then(({ items, nextCursor }) => {
+        setExecs(asArray<Execution>(items));
+        setNextCursor(nextCursor);
+      })
+      .catch((e) => reportError(e, "加载执行记录"));
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const { items, nextCursor: next } = await api.listExecutionsPage("", 50, nextCursor);
+      setExecs((prev) => [...prev, ...asArray<Execution>(items)]);
+      setNextCursor(next);
+    } catch (e) {
+      reportError(e, "加载更多执行记录");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore]);
 
   useEffect(() => {
     refresh();
@@ -108,6 +130,9 @@ export default function Executions() {
                 </TableCell>
                 <TableCell>
                   <StateBadge state={e.state} />
+                  {e.state === "QUEUED" && e.queue_position ? (
+                    <div className="mt-1 text-[10px] text-muted-foreground">队列第 {e.queue_position} 位</div>
+                  ) : null}
                   {e.error && (
                     <div className="mt-1 max-w-56 truncate text-[10px] text-red-400" title={e.error}>
                       {e.error}
@@ -148,6 +173,13 @@ export default function Executions() {
           </TableBody>
         </Table>
       </div>
+      {nextCursor && (
+        <div className="mt-3 flex justify-center">
+          <Button variant="outline" size="sm" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? "加载中…" : "加载更多"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
