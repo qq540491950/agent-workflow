@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1304,8 +1303,8 @@ func TestContract_Settings(t *testing.T) {
 
 	// git_working_dir
 	dir := t.TempDir()
-	code, body, raw = doReq(t, s, http.MethodPost, "/api/settings",
-		`{"git_working_dir":"`+dir+`"}`)
+	dirBody, _ := json.Marshal(map[string]string{"git_working_dir": dir})
+	code, body, raw = doReq(t, s, http.MethodPost, "/api/settings", string(dirBody))
 	if code != http.StatusOK || body["git_working_dir"] != dir {
 		t.Fatalf("POST settings git_working_dir → %d (%s)", code, raw)
 	}
@@ -1638,8 +1637,9 @@ func TestLimitTruncatedHeader(t *testing.T) {
 	if got := w.Header().Get("X-Limit-Truncated"); got != "true" {
 		t.Errorf("截断请求缺 X-Limit-Truncated: true,got %q", got)
 	}
-	if got := w.Header().Get("X-Limit-Applied"); got != strconv.Itoa(maxQueryLimit) {
-		t.Errorf("截断请求缺 X-Limit-Applied: %d,got %q", maxQueryLimit, got)
+	// 执行列表的上限是 500(摘要 DTO + 游标),与 events/git 的 1000 分开。
+	if got := w.Header().Get("X-Limit-Applied"); got != "500" {
+		t.Errorf("截断请求缺 X-Limit-Applied: 500,got %q", got)
 	}
 
 	w = do("/api/executions?limit=50")

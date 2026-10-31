@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -28,8 +29,8 @@ func TestSettingsOmittedGitWorkingDirIsNotModified(t *testing.T) {
 	dir := t.TempDir()
 
 	// 先设一个明确的 git 工作目录
-	code, body, raw := doReq(t, s, http.MethodPost, "/api/settings",
-		`{"git_working_dir":"`+dir+`"}`)
+	dirBody, _ := json.Marshal(map[string]string{"git_working_dir": dir})
+	code, body, raw := doReq(t, s, http.MethodPost, "/api/settings", string(dirBody))
 	if code != http.StatusOK || body["git_working_dir"] != dir {
 		t.Fatalf("POST settings git_working_dir → %d (%s)", code, raw)
 	}
@@ -59,8 +60,8 @@ func TestSettingsExplicitEmptyGitWorkingDirClears(t *testing.T) {
 	s := newTestServer(t)
 	dir := t.TempDir()
 
-	code, body, raw := doReq(t, s, http.MethodPost, "/api/settings",
-		`{"git_working_dir":"`+dir+`"}`)
+	dirBody, _ := json.Marshal(map[string]string{"git_working_dir": dir})
+	code, body, raw := doReq(t, s, http.MethodPost, "/api/settings", string(dirBody))
 	if code != http.StatusOK || body["git_working_dir"] != dir {
 		t.Fatalf("POST settings git_working_dir → %d (%s)", code, raw)
 	}

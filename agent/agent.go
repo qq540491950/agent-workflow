@@ -59,6 +59,8 @@ type AgentResponse struct {
 	Output   string         `json:"output,omitempty"`
 	Data     map[string]any `json:"data,omitempty"`
 	Error    string         `json:"error,omitempty"`
+	// Usage 是 CLI 明确提供的 token 用量;拿不到时留 nil,不猜测。
+	Usage *model.TokenUsage `json:"usage,omitempty"`
 }
 
 // Agent 是所有外部 Agent 的统一接口。

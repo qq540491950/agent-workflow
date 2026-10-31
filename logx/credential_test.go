@@ -149,6 +149,12 @@ func TestMaskDoesNotMaskPathsAndIdentifiers(t *testing.T) {
 	cases := []string{
 		"/var/folders/j2/1009hrfj2tz2f0cw7vhbzppm0000gn/T/" +
 			"TestScriptNodeHonorsTimeoutAndWorkingDir1637892132/001",
+		// Windows 路径同样要保住:反斜杠也是路径分隔符。
+		`C:\Users\admin\AppData\Local\Temp\` +
+			`TestScriptNodeHonorsTimeoutAndWorkingDir1637892132\001`,
+		`C:\Users\admin\AppData\Local\Temp\` +
+			`TestScriptNodeHonorsTimeoutAndWorkingDir3159610206\001`,
+		"/c/Users/admin/AppData/Local/Temp/TestScriptNodeHonorsTimeoutAndWorkingDir3159610206/001",
 		"commit 4a7c9e2b1d8f3a6c5e4d9b2a1c8f7e6d5c4b3a",
 		"class TestScriptNodeHonorsTimeoutAndWorkingDir1637892132",
 	}

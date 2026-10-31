@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,7 +135,7 @@ func (d *DB) SaveWorkflow(wf *model.Workflow, bumpVersion bool) error {
 
 // GetWorkflow 按 ID 读取 Workflow。
 func (d *DB) GetWorkflow(id string) (*model.Workflow, error) {
-	row := d.sql.QueryRow(`SELECT id,name,description,version,enabled,variables_json,inputs_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows WHERE id=?`, id)
+	row := d.Read().QueryRow(`SELECT id,name,description,version,enabled,variables_json,inputs_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows WHERE id=?`, id)
 	wf, err := scanWorkflow(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -147,7 +148,7 @@ func (d *DB) GetWorkflow(id string) (*model.Workflow, error) {
 
 // ListWorkflows 返回全部 Workflow。
 func (d *DB) ListWorkflows() ([]*model.Workflow, error) {
-	rows, err := d.sql.Query(`SELECT id,name,description,version,enabled,variables_json,inputs_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows ORDER BY updated_at DESC`)
+	rows, err := d.Read().Query(`SELECT id,name,description,version,enabled,variables_json,inputs_json,nodes_json,edges_json,settings_json,permission_json,created_at,updated_at FROM workflows ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -171,7 +172,7 @@ func (d *DB) DeleteWorkflow(id string) error {
 
 // GetWorkflowVersion 读取指定版本的快照(Execution 绑定版本使用)。
 func (d *DB) GetWorkflowVersion(workflowID string, version int) (*model.Workflow, error) {
-	row := d.sql.QueryRow(`SELECT snapshot_json FROM workflow_versions WHERE workflow_id=? AND version=?`, workflowID, version)
+	row := d.Read().QueryRow(`SELECT snapshot_json FROM workflow_versions WHERE workflow_id=? AND version=?`, workflowID, version)
 	var snap string
 	if err := row.Scan(&snap); err != nil {
 		// 版本不存在是正常的"资源缺失",应映射为 NOT_FOUND(404)而非 DB_ERROR
@@ -194,7 +195,7 @@ func (d *DB) GetWorkflowVersion(workflowID string, version int) (*model.Workflow
 // 老库同样可读:这一列一直都在(本轮只是给它补上读点,没有删)。
 func (d *DB) GetWorkflowVersionDSL(workflowID string, version int) (string, error) {
 	var text string
-	err := d.sql.QueryRow(`SELECT dsl_text FROM workflow_versions WHERE workflow_id=? AND version=?`,
+	err := d.Read().QueryRow(`SELECT dsl_text FROM workflow_versions WHERE workflow_id=? AND version=?`,
 		workflowID, version).Scan(&text)
 	if err != nil {
 		// 版本不存在是"资源缺失" → NOT_FOUND(404),与 GetWorkflowVersion 同口径。
@@ -215,7 +216,7 @@ type WorkflowVersionMeta struct {
 // 是什么时候存的"(与 ListWorkflowVersions 的版本号列表同口径,多一个
 // 时间字段)。
 func (d *DB) ListWorkflowVersionMeta(workflowID string) ([]WorkflowVersionMeta, error) {
-	rows, err := d.sql.Query(`SELECT version, created_at FROM workflow_versions WHERE workflow_id=? ORDER BY version DESC`, workflowID)
+	rows, err := d.Read().Query(`SELECT version, created_at FROM workflow_versions WHERE workflow_id=? ORDER BY version DESC`, workflowID)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -233,7 +234,7 @@ func (d *DB) ListWorkflowVersionMeta(workflowID string) ([]WorkflowVersionMeta, 
 
 // ListWorkflowVersions 返回某 Workflow 的版本号列表(降序)。
 func (d *DB) ListWorkflowVersions(workflowID string) ([]int, error) {
-	rows, err := d.sql.Query(`SELECT version FROM workflow_versions WHERE workflow_id=? ORDER BY version DESC`, workflowID)
+	rows, err := d.Read().Query(`SELECT version FROM workflow_versions WHERE workflow_id=? ORDER BY version DESC`, workflowID)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -354,14 +355,14 @@ func (d *DB) TouchExecutionNode(executionID, nodeID string) error {
 // 一致性由 workflow/runtime/persist_contract_test.go 核对。
 const ExecInsertColumns = `id,workflow_id,workflow_version,workflow_name,state,task,variables_json,` +
 	`current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,` +
-	`snapshot_json,state_json`
+	`snapshot_json,state_json,workspace_json,via_failure_branch_json,queued_at,usage_json`
 
 // ExecUpsertMetaColumns 是 upsert 冲突时更新的**非状态**列。
 //
 // 不含 state:state 走终态守卫(execStateGuard),裁决权在 CAS 手里。
 // 运行期的 execMetaColumns 必须与这份列表逐列一致(同上)。
 const ExecUpsertMetaColumns = `current_node_id,iterations_json,started_at,finished_at,error,` +
-	`node_states_json,snapshot_json,state_json`
+	`node_states_json,snapshot_json,state_json,workspace_json,via_failure_branch_json,queued_at,usage_json`
 
 // execColumns 把列清单切成切片(去空白)。
 func execColumns(list string) []string {
@@ -417,6 +418,21 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 	if err != nil {
 		return wrap(err)
 	}
+	workspace, err := marshalJSON(emptyStrings(e.WorkspaceDirs))
+	if err != nil {
+		return wrap(err)
+	}
+	viaFailure, err := marshalJSON(emptyStrings(e.ViaFailureBranch))
+	if err != nil {
+		return wrap(err)
+	}
+	usage := []byte("{}")
+	if e.Usage != nil {
+		usage, err = marshalJSON(e.Usage)
+		if err != nil {
+			return wrap(err)
+		}
+	}
 	var snapshot []byte
 	if e.Snapshot != nil {
 		snapshot, err = marshalJSON(e.Snapshot)
@@ -434,8 +450,17 @@ func (d *DB) SaveExecution(e *model.Execution) error {
 			e.ID, e.WorkflowID, e.WorkflowVersion, e.WorkflowName, string(e.State), e.Task,
 			string(variables), e.CurrentNodeID, string(iterations), e.CreatedAt,
 			e.StartedAt, e.FinishedAt, e.Error, string(nodeStates), string(snapshot), string(stateData),
+			string(workspace), string(viaFailure), e.QueuedAt, string(usage),
 		}, execStateGuardArgs...)...)
 	return wrap(err)
+}
+
+// emptyStrings 把 nil 切片归一为空数组,避免落库成 JSON null。
+func emptyStrings(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
 }
 
 // execStateGuardSQL / execStateGuardArgs 是 state 列的守卫表达式(参数化)。
@@ -493,11 +518,13 @@ func buildExecStateGuard() (string, []any) {
 
 // GetExecution 读取执行记录。
 func (d *DB) GetExecution(id string) (*model.Execution, error) {
-	row := d.sql.QueryRow(`SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json FROM executions WHERE id=?`, id)
+	row := d.Read().QueryRow(`SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json,workspace_json,via_failure_branch_json,queued_at,usage_json FROM executions WHERE id=?`, id)
 	var e model.Execution
 	var variables, iterations, nodeStates, snapshot, stateData string
+	var workspace, viaFailure, usage string
 	if err := row.Scan(&e.ID, &e.WorkflowID, &e.WorkflowVersion, &e.WorkflowName, &e.State, &e.Task,
-		&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData); err != nil {
+		&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData,
+		&workspace, &viaFailure, &e.QueuedAt, &usage); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, model.NewError(model.KindValidationError, "NOT_FOUND", fmt.Sprintf("执行 %q 不存在", id))
 		}
@@ -518,6 +545,19 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 		return nil, wrap(err)
 	}
 	e.StateData = model.NormalizeStateJSON(e.StateData)
+	if err := decodeJSONColumn("workspace_json", workspace, &e.WorkspaceDirs); err != nil {
+		return nil, wrap(err)
+	}
+	if err := decodeJSONColumn("via_failure_branch_json", viaFailure, &e.ViaFailureBranch); err != nil {
+		return nil, wrap(err)
+	}
+	if usage != "" && usage != "{}" {
+		var u model.TokenUsage
+		if err := decodeJSONColumn("usage_json", usage, &u); err != nil {
+			return nil, wrap(err)
+		}
+		e.Usage = &u
+	}
 	// variables_json 同理:变量里的 int 经一次往返也会退化成 float64
 	//(约定 #2)。此前只有 state_json 被归一,变量这条路径漏了。
 	if err := decodeJSONColumn("variables_json", variables, &e.Variables); err != nil {
@@ -554,16 +594,43 @@ func (d *DB) GetExecution(id string) (*model.Execution, error) {
 // 语句,必须由调用方保证原子性)。
 func (d *DB) CountActiveExecutions(workflowID string) (int, error) {
 	var n int
-	err := d.sql.QueryRow(
+	err := d.Read().QueryRow(
 		`SELECT COUNT(1) FROM executions WHERE workflow_id=? AND state IN ('CREATED','RUNNING','WAITING_USER')`,
 		workflowID,
 	).Scan(&n)
 	return n, wrap(err)
 }
 
+// CountExecutionsByState 返回各状态的执行数(运行时统计用)。
+func (d *DB) CountExecutionsByState() (map[string]int, error) {
+	rows, err := d.Read().Query(`SELECT state, COUNT(1) FROM executions GROUP BY state`)
+	if err != nil {
+		return nil, wrap(err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var state string
+		var n int
+		if err := rows.Scan(&state, &n); err != nil {
+			return nil, wrap(err)
+		}
+		out[state] = n
+	}
+	return out, rows.Err()
+}
+
+// CountRunningExecutions 统计全局处于 RUNNING 的执行数(全局并发上限用)。
+// QUEUED/WAITING_USER 不占进程资源,不计入。
+func (d *DB) CountRunningExecutions() (int, error) {
+	var n int
+	err := d.Read().QueryRow(`SELECT COUNT(1) FROM executions WHERE state='RUNNING'`).Scan(&n)
+	return n, wrap(err)
+}
+
 // ListExecutions 返回执行列表(可按 workflow 过滤,limit<=0 表示全部)。
 func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, error) {
-	q := `SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json FROM executions`
+	q := `SELECT id,workflow_id,workflow_version,workflow_name,state,task,variables_json,current_node_id,iterations_json,created_at,started_at,finished_at,error,node_states_json,snapshot_json,state_json,workspace_json,via_failure_branch_json,queued_at,usage_json FROM executions`
 	args := []any{}
 	if workflowID != "" {
 		q += ` WHERE workflow_id=?`
@@ -573,7 +640,7 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 	if limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, limit)
 	}
-	rows, err := d.sql.Query(q, args...)
+	rows, err := d.Read().Query(q, args...)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -582,8 +649,10 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 	for rows.Next() {
 		var e model.Execution
 		var variables, iterations, nodeStates, snapshot, stateData string
+		var workspace, viaFailure, usage string
 		if err := rows.Scan(&e.ID, &e.WorkflowID, &e.WorkflowVersion, &e.WorkflowName, &e.State, &e.Task,
-			&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData); err != nil {
+			&variables, &e.CurrentNodeID, &iterations, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &nodeStates, &snapshot, &stateData,
+			&workspace, &viaFailure, &e.QueuedAt, &usage); err != nil {
 			return nil, wrap(err)
 		}
 		// 历史遗留的 PAUSED 行归一为 CANCELLED(与 GetExecution 同口径)。
@@ -609,6 +678,20 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 				"execution", e.ID, "error", err.Error())
 		}
 		e.Variables = model.NormalizeStateJSON(e.Variables)
+		if err := decodeJSONColumn("workspace_json", workspace, &e.WorkspaceDirs); err != nil {
+			logx.Warn("执行记录 workspace_json 损坏,已按空工作区处理", "execution", e.ID, "error", err.Error())
+		}
+		if err := decodeJSONColumn("via_failure_branch_json", viaFailure, &e.ViaFailureBranch); err != nil {
+			logx.Warn("执行记录 via_failure_branch_json 损坏,已按空失败分支处理", "execution", e.ID, "error", err.Error())
+		}
+		if usage != "" && usage != "{}" {
+			var u model.TokenUsage
+			if err := decodeJSONColumn("usage_json", usage, &u); err != nil {
+				logx.Warn("执行记录 usage_json 损坏,已忽略用量", "execution", e.ID, "error", err.Error())
+			} else {
+				e.Usage = &u
+			}
+		}
 		if err := decodeJSONColumn("iterations_json", iterations, &e.Iterations); err != nil {
 			logx.Warn("执行记录 iterations_json 损坏,已按空迭代表处理",
 				"execution", e.ID, "error", err.Error())
@@ -629,6 +712,88 @@ func (d *DB) ListExecutions(workflowID string, limit int) ([]*model.Execution, e
 		out = append(out, &e)
 	}
 	return out, rows.Err()
+}
+
+// ListExecutionSummaries 返回执行列表摘要(不含 snapshot/state_json)。
+//
+// 游标由 created_at + id 组成,按降序翻页;返回下一页游标(空串 = 没有更多)。
+// 这是列表页的唯一读路径:整份快照/会话状态不进入列表响应。
+func (d *DB) ListExecutionSummaries(workflowID string, limit int, cursor string) ([]*model.Execution, string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	q := `SELECT id,workflow_id,workflow_version,workflow_name,state,task,created_at,started_at,finished_at,error,workspace_json,via_failure_branch_json,queued_at FROM executions`
+	var where []string
+	var args []any
+	if workflowID != "" {
+		where = append(where, "workflow_id=?")
+		args = append(args, workflowID)
+	}
+	if cursor != "" {
+		created, id, ok := decodeExecCursor(cursor)
+		if !ok {
+			return nil, "", model.NewError(model.KindValidationError, "BAD_REQUEST", "执行列表游标非法")
+		}
+		where = append(where, "(created_at < ? OR (created_at = ? AND id < ?))")
+		args = append(args, created, created, id)
+	}
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY created_at DESC, id DESC LIMIT ?"
+	args = append(args, limit+1)
+
+	rows, err := d.Read().Query(q, args...)
+	if err != nil {
+		return nil, "", wrap(err)
+	}
+	defer rows.Close()
+	out := []*model.Execution{}
+	for rows.Next() {
+		var e model.Execution
+		var workspace, viaFailure string
+		if err := rows.Scan(&e.ID, &e.WorkflowID, &e.WorkflowVersion, &e.WorkflowName, &e.State, &e.Task,
+			&e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.Error, &workspace, &viaFailure, &e.QueuedAt); err != nil {
+			return nil, "", wrap(err)
+		}
+		e.State = NormalizeExecutionState(e.State)
+		if err := decodeJSONColumn("workspace_json", workspace, &e.WorkspaceDirs); err != nil {
+			logx.Warn("执行摘要 workspace_json 损坏,已按空工作区处理", "execution", e.ID, "error", err.Error())
+		}
+		if err := decodeJSONColumn("via_failure_branch_json", viaFailure, &e.ViaFailureBranch); err != nil {
+			logx.Warn("执行摘要 via_failure_branch_json 损坏,已按空失败分支处理", "execution", e.ID, "error", err.Error())
+		}
+		out = append(out, &e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", wrap(err)
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = encodeExecCursor(last.CreatedAt, last.ID)
+	}
+	return out, next, nil
+}
+
+func encodeExecCursor(createdAt, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(createdAt + "\x00" + id))
+}
+
+func decodeExecCursor(s string) (string, string, bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return "", "", false
+	}
+	parts := strings.SplitN(string(raw), "\x00", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // legacyPausedState 是历史遗留的执行状态字面量(PAUSED 已从状态机移除,
@@ -656,7 +821,7 @@ func NormalizeExecutionState(s model.ExecutionState) model.ExecutionState {
 // 遗留的 PAUSED 行**不在**这里:它不是"还在跑"的执行(它从来不可达),
 // 读出口会把它归一成 CANCELLED(persistence.NormalizeExecutionState)。
 func (d *DB) ListRunningExecutions() ([]*model.Execution, error) {
-	rows, err := d.sql.Query(`SELECT id FROM executions WHERE state IN ('RUNNING','WAITING_USER','CREATED')`)
+	rows, err := d.Read().Query(`SELECT id FROM executions WHERE state IN ('RUNNING','WAITING_USER','CREATED','QUEUED') ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -696,16 +861,24 @@ func (d *DB) ListRunningExecutions() ([]*model.Execution, error) {
 // SaveExecutionNode 插入或更新节点执行明细(原子 upsert;
 // execution_id/node_id/node_type/node_name 只在插入时写入)。
 func (d *DB) SaveExecutionNode(n *model.ExecutionNode) error {
-	_, err := d.sql.Exec(`INSERT INTO execution_nodes
-		(id,execution_id,node_id,node_type,node_name,state,attempt,output,result_json,error,started_at,finished_at,duration_ms)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+	usage := []byte("{}")
+	var err error
+	if n.Usage != nil {
+		usage, err = marshalJSON(n.Usage)
+		if err != nil {
+			return wrap(err)
+		}
+	}
+	_, err = d.sql.Exec(`INSERT INTO execution_nodes
+		(id,execution_id,node_id,node_type,node_name,state,attempt,output,result_json,error,started_at,finished_at,duration_ms,usage_json)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			state=excluded.state, attempt=excluded.attempt, output=excluded.output,
 			result_json=excluded.result_json, error=excluded.error,
 			started_at=excluded.started_at, finished_at=excluded.finished_at,
-			duration_ms=excluded.duration_ms`,
+			duration_ms=excluded.duration_ms, usage_json=excluded.usage_json`,
 		n.ID, n.ExecutionID, n.NodeID, string(n.NodeType), n.NodeName, string(n.State), n.Attempt,
-		n.Output, n.ResultJSON, n.Error, n.StartedAt, n.FinishedAt, n.DurationMS)
+		n.Output, n.ResultJSON, n.Error, n.StartedAt, n.FinishedAt, n.DurationMS, string(usage))
 	return wrap(err)
 }
 
@@ -733,7 +906,7 @@ func (d *DB) MarkExecutionNodesSkipped(executionID string) (int64, error) {
 
 // ListExecutionNodes 返回某次执行的全部节点明细(按开始时间)。
 func (d *DB) ListExecutionNodes(executionID string) ([]*model.ExecutionNode, error) {
-	rows, err := d.sql.Query(`SELECT id,execution_id,node_id,node_type,node_name,state,attempt,output,result_json,error,started_at,finished_at,duration_ms FROM execution_nodes WHERE execution_id=? ORDER BY started_at ASC, id ASC`, executionID)
+	rows, err := d.Read().Query(`SELECT id,execution_id,node_id,node_type,node_name,state,attempt,output,result_json,error,started_at,finished_at,duration_ms,usage_json FROM execution_nodes WHERE execution_id=? ORDER BY started_at ASC, id ASC`, executionID)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -741,9 +914,16 @@ func (d *DB) ListExecutionNodes(executionID string) ([]*model.ExecutionNode, err
 	out := []*model.ExecutionNode{}
 	for rows.Next() {
 		var n model.ExecutionNode
+		var usage string
 		if err := rows.Scan(&n.ID, &n.ExecutionID, &n.NodeID, &n.NodeType, &n.NodeName, &n.State, &n.Attempt,
-			&n.Output, &n.ResultJSON, &n.Error, &n.StartedAt, &n.FinishedAt, &n.DurationMS); err != nil {
+			&n.Output, &n.ResultJSON, &n.Error, &n.StartedAt, &n.FinishedAt, &n.DurationMS, &usage); err != nil {
 			return nil, wrap(err)
+		}
+		if usage != "" && usage != "{}" {
+			var u model.TokenUsage
+			if err := decodeJSONColumn("usage_json", usage, &u); err == nil {
+				n.Usage = &u
+			}
 		}
 		out = append(out, &n)
 	}
@@ -783,7 +963,7 @@ func (d *DB) ListEvents(executionID string, limit int) ([]map[string]any, error)
 	if limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, limit)
 	}
-	rows, err := d.sql.Query(q, executionID)
+	rows, err := d.Read().Query(q, executionID)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -819,6 +999,218 @@ func (d *DB) ListEvents(executionID string, limit int) ([]map[string]any, error)
 	return out, rows.Err()
 }
 
+// ListEventsPage 按 seq 游标读取事件页。
+//
+// afterSeq > 0:取其后的事件(升序);beforeSeq > 0:取之前的最近一页;
+// 两者为 0:取最近一页。返回本页最大 seq 与"是否还有更多"。
+func (d *DB) ListEventsPage(executionID string, afterSeq, beforeSeq int64, limit int) ([]map[string]any, int64, bool, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+	q := `SELECT seq,execution_id,node_id,type,data_json,created_at FROM events WHERE execution_id=?`
+	args := []any{executionID}
+	reverse := false
+	switch {
+	case afterSeq > 0:
+		q += ` AND seq>? ORDER BY seq ASC LIMIT ?`
+		args = append(args, afterSeq, limit+1)
+	case beforeSeq > 0:
+		q += ` AND seq<? ORDER BY seq DESC LIMIT ?`
+		args = append(args, beforeSeq, limit+1)
+		reverse = true
+	default:
+		q += ` ORDER BY seq DESC LIMIT ?`
+		args = append(args, limit+1)
+		reverse = true
+	}
+	rows, err := d.Read().Query(q, args...)
+	if err != nil {
+		return nil, 0, false, wrap(err)
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var seq int64
+		var execID, nodeID, typ, dataJSON, createdAt string
+		if err := rows.Scan(&seq, &execID, &nodeID, &typ, &dataJSON, &createdAt); err != nil {
+			return nil, 0, false, wrap(err)
+		}
+		data := map[string]any{}
+		if err := decodeJSONColumn("data_json", dataJSON, &data); err != nil {
+			logx.Warn("事件 data_json 损坏,已按空载荷处理", "execution", execID, "event", typ, "error", err.Error())
+			data = map[string]any{}
+		}
+		if data == nil {
+			data = map[string]any{}
+		}
+		out = append(out, map[string]any{
+			"seq": seq, "execution_id": execID, "node_id": nodeID,
+			"type": typ, "data": data, "created_at": createdAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, false, wrap(err)
+	}
+	hasMore := false
+	if len(out) > limit {
+		out = out[:limit]
+		hasMore = true
+	}
+	if reverse {
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+	}
+	var maxSeq int64
+	for _, ev := range out {
+		if s, ok := ev["seq"].(int64); ok && s > maxSeq {
+			maxSeq = s
+		}
+	}
+	return out, maxSeq, hasMore, nil
+}
+
+// RetentionStats 是一次清理的影响面。
+type RetentionStats struct {
+	Events     int64 `json:"events"`
+	Artifacts  int64 `json:"artifacts"`
+	Nodes      int64 `json:"nodes"`
+	Executions int64 `json:"executions"`
+	// EstimatedBytes 估算将释放的字节数(主要文本列的长度和:事件 data_json、
+	// 制品 content、节点 output/result/error、执行 task/快照)。票 15 的
+	// dry_run 报告项;是**估算**(不含索引与行开销),用于给用户量级感知。
+	EstimatedBytes int64 `json:"estimated_bytes"`
+}
+
+// Cleanup 按保留策略清理终态数据。dryRun=true 只统计不删除。
+//
+// 只处理 COMPLETED/FAILED/CANCELLED;RUNNING/WAITING_USER/QUEUED 永不清理。
+func (d *DB) Cleanup(dryRun bool, eventDays, executionDays, maxEventsPerExecution int) (RetentionStats, error) {
+	var stats RetentionStats
+	now := time.Now()
+	terminal := `('COMPLETED','FAILED','CANCELLED')`
+	var execIDs []string
+	if executionDays > 0 {
+		cutoff := now.AddDate(0, 0, -executionDays).Format(time.RFC3339Nano)
+		rows, err := d.Read().Query(`SELECT id FROM executions WHERE state IN `+terminal+` AND created_at < ?`, cutoff)
+		if err != nil {
+			return stats, wrap(err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return stats, wrap(err)
+			}
+			execIDs = append(execIDs, id)
+		}
+		rows.Close()
+	}
+	if len(execIDs) > 0 {
+		for _, id := range execIDs {
+			var n int64
+			_ = d.Read().QueryRow(`SELECT COUNT(1) FROM events WHERE execution_id=?`, id).Scan(&n)
+			stats.Events += n
+			_ = d.Read().QueryRow(`SELECT COUNT(1) FROM artifacts WHERE execution_id=?`, id).Scan(&n)
+			stats.Artifacts += n
+			_ = d.Read().QueryRow(`SELECT COUNT(1) FROM execution_nodes WHERE execution_id=?`, id).Scan(&n)
+			stats.Nodes += n
+			// 估算字节:事件/制品/节点明细/执行行的主要文本列长度和。
+			var b int64
+			_ = d.Read().QueryRow(`SELECT COALESCE(SUM(LENGTH(data_json)),0) FROM events WHERE execution_id=?`, id).Scan(&b)
+			stats.EstimatedBytes += b
+			_ = d.Read().QueryRow(`SELECT COALESCE(SUM(LENGTH(content)),0) FROM artifacts WHERE execution_id=?`, id).Scan(&b)
+			stats.EstimatedBytes += b
+			_ = d.Read().QueryRow(`SELECT COALESCE(SUM(LENGTH(output)+LENGTH(result_json)+LENGTH(error)),0) FROM execution_nodes WHERE execution_id=?`, id).Scan(&b)
+			stats.EstimatedBytes += b
+			_ = d.Read().QueryRow(`SELECT COALESCE(SUM(LENGTH(task)+LENGTH(state_json)+LENGTH(snapshot_json)),0) FROM executions WHERE id=?`, id).Scan(&b)
+			stats.EstimatedBytes += b
+		}
+		stats.Executions = int64(len(execIDs))
+	}
+	if eventDays > 0 {
+		cutoff := now.AddDate(0, 0, -eventDays).Format(time.RFC3339Nano)
+		var n, b int64
+		_ = d.Read().QueryRow(`SELECT COUNT(1) FROM events WHERE created_at < ? AND execution_id IN (SELECT id FROM executions WHERE state IN `+terminal+`)`, cutoff).Scan(&n)
+		stats.Events += n
+		_ = d.Read().QueryRow(`SELECT COALESCE(SUM(LENGTH(data_json)),0) FROM events WHERE created_at < ? AND execution_id IN (SELECT id FROM executions WHERE state IN `+terminal+`)`, cutoff).Scan(&b)
+		stats.EstimatedBytes += b
+	}
+	if maxEventsPerExecution > 0 {
+		rows, err := d.Read().Query(`SELECT id FROM executions WHERE state IN ` + terminal)
+		if err == nil {
+			var ids []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err == nil {
+					ids = append(ids, id)
+				}
+			}
+			rows.Close()
+			for _, id := range ids {
+				var n, b int64
+				_ = d.Read().QueryRow(`SELECT COUNT(1) FROM events WHERE execution_id=? AND seq NOT IN (SELECT seq FROM events WHERE execution_id=? ORDER BY seq DESC LIMIT ?)`, id, id, maxEventsPerExecution).Scan(&n)
+				stats.Events += n
+				_ = d.Read().QueryRow(`SELECT COALESCE(SUM(LENGTH(data_json)),0) FROM events WHERE execution_id=? AND seq NOT IN (SELECT seq FROM events WHERE execution_id=? ORDER BY seq DESC LIMIT ?)`, id, id, maxEventsPerExecution).Scan(&b)
+				stats.EstimatedBytes += b
+			}
+		}
+	}
+	if dryRun {
+		return stats, nil
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return stats, wrap(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// 先删旧的执行(按 ID),再删按事件时间的孤立事件。
+	for _, id := range execIDs {
+		for _, q := range []string{
+			`DELETE FROM events WHERE execution_id=?`,
+			`DELETE FROM artifacts WHERE execution_id=?`,
+			`DELETE FROM execution_nodes WHERE execution_id=?`,
+			`DELETE FROM executions WHERE id=?`,
+		} {
+			if _, err := tx.Exec(q, id); err != nil {
+				return stats, wrap(err)
+			}
+		}
+	}
+	if eventDays > 0 {
+		cutoff := now.AddDate(0, 0, -eventDays).Format(time.RFC3339Nano)
+		if _, err := tx.Exec(`DELETE FROM events WHERE created_at < ? AND execution_id IN (SELECT id FROM executions WHERE state IN `+terminal+`)`, cutoff); err != nil {
+			return stats, wrap(err)
+		}
+	}
+	if maxEventsPerExecution > 0 {
+		rows, err := tx.Query(`SELECT id FROM executions WHERE state IN ` + terminal)
+		if err == nil {
+			var ids []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err == nil {
+					ids = append(ids, id)
+				}
+			}
+			rows.Close()
+			for _, id := range ids {
+				if _, err := tx.Exec(`DELETE FROM events WHERE execution_id=? AND seq NOT IN (SELECT seq FROM events WHERE execution_id=? ORDER BY seq DESC LIMIT ?)`, id, id, maxEventsPerExecution); err != nil {
+					return stats, wrap(err)
+				}
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return stats, wrap(err)
+	}
+	_, _ = d.sql.Exec(`PRAGMA optimize`)
+	return stats, nil
+}
+
 // WorkflowStats 是某工作流的执行统计。
 //
 // failed 与 cancelled **分列**:此前 failed 用
@@ -851,7 +1243,7 @@ type WorkflowStats struct {
 //	WAITING_USER→ waiting
 //	RUNNING / CREATED → running(都还没终结)
 func (d *DB) GetWorkflowStats() ([]WorkflowStats, error) {
-	rows, err := d.sql.Query(`
+	rows, err := d.Read().Query(`
 		SELECT w.id, w.name,
 			COUNT(e.id) AS total,
 			COALESCE(SUM(CASE WHEN e.state='COMPLETED' THEN 1 ELSE 0 END),0) AS completed,
@@ -897,7 +1289,7 @@ func (d *DB) ListAllEvents(eventType string, limit int) ([]map[string]any, error
 	if limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, limit)
 	}
-	rows, err := d.sql.Query(q, args...)
+	rows, err := d.Read().Query(q, args...)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -948,7 +1340,7 @@ func (d *DB) SaveSkillEnabled(id string, enabled bool) error {
 
 // ListDisabledSkills 返回被禁用的 Skill 集合。
 func (d *DB) ListDisabledSkills() (map[string]bool, error) {
-	rows, err := d.sql.Query(`SELECT id FROM skill_configs WHERE enabled=0`)
+	rows, err := d.Read().Query(`SELECT id FROM skill_configs WHERE enabled=0`)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -1029,7 +1421,7 @@ func (d *DB) SaveArtifact(a *model.Artifact) error {
 
 // ListArtifacts 列出某次执行的制品。
 func (d *DB) ListArtifacts(executionID string) ([]*model.Artifact, error) {
-	rows, err := d.sql.Query(`SELECT id,execution_id,node_id,name,content_type,content,created_at FROM artifacts WHERE execution_id=? ORDER BY created_at ASC`, executionID)
+	rows, err := d.Read().Query(`SELECT id,execution_id,node_id,name,content_type,content,created_at FROM artifacts WHERE execution_id=? ORDER BY created_at ASC`, executionID)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -1048,7 +1440,7 @@ func (d *DB) ListArtifacts(executionID string) ([]*model.Artifact, error) {
 // GetSetting / SaveSetting 简单 KV 设置。
 func (d *DB) GetSetting(key string, out any) error {
 	var raw string
-	err := d.sql.QueryRow(`SELECT value_json FROM settings WHERE key=?`, key).Scan(&raw)
+	err := d.Read().QueryRow(`SELECT value_json FROM settings WHERE key=?`, key).Scan(&raw)
 	if err != nil {
 		// 设置项不存在是正常初始状态,映射为 NOT_FOUND 让调用方能区分
 		// "尚未设置"与"读取失败"(此前一律 DB_ERROR,掩盖真实故障)
@@ -1268,7 +1660,7 @@ func (d *DB) configUpsert(table string, row []configCol, updateCols []string) er
 // 只用于"按实际列拼语句"的兼容路径(table 参数是本文件里的字面量,
 // 不是用户输入)。
 func (d *DB) tableColumns(table string) (map[string]bool, error) {
-	rows, err := d.sql.Query("PRAGMA table_info(" + table + ")")
+	rows, err := d.Read().Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -1294,7 +1686,7 @@ func (d *DB) tableColumns(table string) (map[string]bool, error) {
 // GetAgentConfig 读取某 Agent 的配置 JSON(不存在返回 nil)。
 func (d *DB) GetAgentConfig(id string) ([]byte, error) {
 	var raw string
-	err := d.sql.QueryRow(`SELECT config_json FROM agent_configs WHERE id=?`, id).Scan(&raw)
+	err := d.Read().QueryRow(`SELECT config_json FROM agent_configs WHERE id=?`, id).Scan(&raw)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1306,7 +1698,7 @@ func (d *DB) GetAgentConfig(id string) ([]byte, error) {
 
 // ListAgentConfigs 返回全部 Agent 配置。
 func (d *DB) ListAgentConfigs() (map[string]json.RawMessage, error) {
-	rows, err := d.sql.Query(`SELECT id, config_json FROM agent_configs`)
+	rows, err := d.Read().Query(`SELECT id, config_json FROM agent_configs`)
 	if err != nil {
 		return nil, wrap(err)
 	}

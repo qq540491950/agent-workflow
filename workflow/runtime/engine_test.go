@@ -447,6 +447,9 @@ edges:
 // 取消协程等曾存在泄漏风险);执行完成后的基线允许少量常驻协程。
 func TestNoGoroutineLeakAcrossExecutions(t *testing.T) {
 	f := newFixture(t, []coreagent.AgentDecision{coreagent.DecisionApproved})
+	// 本用例只验证 goroutine 回落,不验证同目录串行化;显式跳过租约,
+	// 避免连续 20 次同目录执行拿到 WORKSPACE_BUSY。
+	f.engine.Workspaces = noopWorkspaceLeases{}
 	wf := loadWf(t, f.engine, loopWorkflowYAML)
 
 	// 预热一次,让惰性初始化的协程(replector/连接池)稳定

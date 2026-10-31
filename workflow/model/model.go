@@ -214,10 +214,14 @@ type Node struct {
 }
 
 // Edge 连接两个节点。Condition 为空表示无条件跳转。
+//
+// OnFailure 为真表示"节点失败(重试耗尽)后走这条边"。它与 Condition
+// 互斥:失败路由不参与条件求值。
 type Edge struct {
 	From      string `json:"from" yaml:"from"`
 	To        string `json:"to" yaml:"to"`
 	Condition string `json:"condition,omitempty" yaml:"condition,omitempty"`
+	OnFailure bool   `json:"on_failure,omitempty" yaml:"on_failure,omitempty"`
 }
 
 // WorkflowSettings 控制 Workflow 级别的执行策略。
@@ -401,6 +405,7 @@ type ExecutionState string
 
 const (
 	ExecutionCreated     ExecutionState = "CREATED"
+	ExecutionQueued      ExecutionState = "QUEUED"
 	ExecutionRunning     ExecutionState = "RUNNING"
 	ExecutionWaitingUser ExecutionState = "WAITING_USER"
 	ExecutionCompleted   ExecutionState = "COMPLETED"
@@ -439,7 +444,8 @@ const (
 // 它),留着转换分支等于留着一个永远走不到的分支(见 legacyPausedState)。
 func CanTransitionExecution(from, to ExecutionState) bool {
 	allowed := map[ExecutionState][]ExecutionState{
-		ExecutionCreated:     {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
+		ExecutionCreated:     {ExecutionQueued, ExecutionRunning, ExecutionCancelled, ExecutionFailed},
+		ExecutionQueued:      {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
 		ExecutionRunning:     {ExecutionWaitingUser, ExecutionCompleted, ExecutionFailed, ExecutionCancelled},
 		ExecutionWaitingUser: {ExecutionRunning, ExecutionCancelled, ExecutionFailed},
 		ExecutionCompleted:   {},
@@ -472,6 +478,18 @@ func CanTransitionNode(from, to NodeState) bool {
 	return false
 }
 
+// TokenUsage 是一次 Agent 调用的 token 用量(可选)。
+//
+// 不同 CLI 的输出形态不同:拿不到就留空,不猜测;价格也不内置,
+// CostUSD 只在适配器/CLI 明确提供时展示。
+type TokenUsage struct {
+	InputTokens  int      `json:"input_tokens,omitempty"`
+	OutputTokens int      `json:"output_tokens,omitempty"`
+	TotalTokens  int      `json:"total_tokens,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	CostUSD      *float64 `json:"cost_usd,omitempty"`
+}
+
 // Execution 是一次 Workflow 运行实例。它绑定具体的 Workflow 版本,
 // 保证运行中的 Execution 不受后续修改影响。
 type Execution struct {
@@ -490,25 +508,36 @@ type Execution struct {
 	FinishedAt      string            `json:"finished_at,omitempty"`
 	Error           string            `json:"error,omitempty"`
 	NodeStates      map[string]string `json:"node_states,omitempty"`
+	// WorkspaceDirs 是本次执行取得租约的工作目录(规范化后的绝对路径)。
+	WorkspaceDirs []string `json:"workspace_dirs,omitempty"`
+	// ViaFailureBranch 是本次执行实际走过的失败分支节点 ID。
+	ViaFailureBranch []string `json:"via_failure_branch,omitempty"`
+	// QueuedAt 是进入 QUEUED 的时间(仅排队中的执行有意义)。
+	QueuedAt string `json:"queued_at,omitempty"`
+	// QueuePosition 是运行时计算出的队列位置(不落库)。
+	QueuePosition int `json:"queue_position,omitempty"`
+	// Usage 是执行内全部 Agent 调用的聚合用量。
+	Usage *TokenUsage `json:"usage,omitempty"`
 	// StateData 是运行时的会话状态快照(用于恢复与 UI 查询)。
 	StateData map[string]any `json:"state_data,omitempty"`
 }
 
 // ExecutionNode 记录某个节点在某次 Execution 中的执行明细。
 type ExecutionNode struct {
-	ID          string    `json:"id"`
-	ExecutionID string    `json:"execution_id"`
-	NodeID      string    `json:"node_id"`
-	NodeType    NodeType  `json:"node_type"`
-	NodeName    string    `json:"node_name"`
-	State       NodeState `json:"state"`
-	Attempt     int       `json:"attempt"`
-	Output      string    `json:"output,omitempty"`
-	ResultJSON  string    `json:"result_json,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	StartedAt   string    `json:"started_at,omitempty"`
-	FinishedAt  string    `json:"finished_at,omitempty"`
-	DurationMS  int64     `json:"duration_ms,omitempty"`
+	ID          string      `json:"id"`
+	ExecutionID string      `json:"execution_id"`
+	NodeID      string      `json:"node_id"`
+	NodeType    NodeType    `json:"node_type"`
+	NodeName    string      `json:"node_name"`
+	State       NodeState   `json:"state"`
+	Attempt     int         `json:"attempt"`
+	Output      string      `json:"output,omitempty"`
+	ResultJSON  string      `json:"result_json,omitempty"`
+	Error       string      `json:"error,omitempty"`
+	StartedAt   string      `json:"started_at,omitempty"`
+	FinishedAt  string      `json:"finished_at,omitempty"`
+	DurationMS  int64       `json:"duration_ms,omitempty"`
+	Usage       *TokenUsage `json:"usage,omitempty"`
 }
 
 // Artifact 是执行过程中产生的制品(例如 plan、diff、review 结果)。

@@ -19,6 +19,7 @@ import (
 // 不会发生的事(前端若订阅它,永远等不到)。
 const (
 	WorkflowStarted     = "workflow.started"
+	WorkflowQueued      = "workflow.queued"
 	WorkflowResumed     = "workflow.resumed"
 	WorkflowCompleted   = "workflow.completed"
 	WorkflowFailed      = "workflow.failed"

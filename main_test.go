@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,30 @@ func TestParseArgsRejectsInvalidAddr(t *testing.T) {
 	// 桌面模式不用监听地址,不因此拒绝启动
 	if _, err := parseArgs([]string{"-addr", "not-a-host-port"}); err != nil {
 		t.Errorf("桌面模式不应校验监听地址: %v", err)
+	}
+}
+
+// TestParseArgsServerBoundary 锁住服务模式的监听边界:
+// 默认只允许回环;空 host 等于所有网卡,必须显式写地址并开远程。
+func TestParseArgsServerBoundary(t *testing.T) {
+	for _, addr := range []string{":8080", "0.0.0.0:8080", "192.168.1.10:8080"} {
+		if _, err := parseArgs([]string{"-server", "-addr", addr}); err == nil {
+			t.Errorf("addr=%q 未开远程模式应被拒绝", addr)
+		}
+	}
+	if _, err := parseArgs([]string{"-server", "-addr", "0.0.0.0:8080", "-allow-remote"}); err != nil {
+		t.Errorf("显式远程模式应通过: %v", err)
+	}
+	if _, err := parseArgs([]string{"-server", "-addr", "127.0.0.1:8080"}); err != nil {
+		t.Errorf("回环地址应通过: %v", err)
+	}
+}
+
+// TestNewHTTPServerTimeouts 锁住慢连接防护。
+func TestNewHTTPServerTimeouts(t *testing.T) {
+	srv := newHTTPServer("127.0.0.1:0", http.NewServeMux())
+	if srv.ReadHeaderTimeout <= 0 || srv.ReadTimeout <= 0 || srv.IdleTimeout <= 0 {
+		t.Fatalf("HTTP 服务器必须设置读头/读/空闲超时: %+v", srv)
 	}
 }
 

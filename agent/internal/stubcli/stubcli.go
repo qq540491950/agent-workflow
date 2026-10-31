@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -132,6 +133,9 @@ func buildStub() error {
 		return err
 	}
 	out := filepath.Join(dir, "stubcli")
+	if runtime.GOOS == "windows" {
+		out += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", out, ".")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),

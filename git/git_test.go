@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -167,6 +168,9 @@ func TestUnsupportedOperation(t *testing.T) {
 // 回归:commit 触发的钩子若挂起并持有输出管道,CombinedOutput 曾会
 // 阻塞到钩子自行退出(超过取消时机);进程组击杀 + WaitDelay 后及时返回。
 func TestCommitHookCancelPromptReturn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 的 hook 进程组/管道语义与 Unix 不同;该用例只在类 Unix 环境验证")
+	}
 	dir := t.TempDir()
 	s := New(dir)
 	for _, args := range [][]string{{"init"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
@@ -270,6 +274,9 @@ func gitErrCode(t *testing.T, err error) string {
 // 回归:失败语义必须可区分(约定 14:该失败却成功等同 P0)。
 // 此前 GIT_TIMEOUT / GIT_CANCELLED 两个分支没有任何测试覆盖。
 func TestExecTimeoutMapsToTimeoutCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 的 hook 进程组/管道语义与 Unix 不同;该用例只在类 Unix 环境验证")
+	}
 	dir := newTempRepo(t)
 	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
 	if err := os.WriteFile(hook, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
@@ -291,6 +298,9 @@ func TestExecTimeoutMapsToTimeoutCode(t *testing.T) {
 }
 
 func TestExecCancelMapsToCancelledCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 的 hook 进程组/管道语义与 Unix 不同;该用例只在类 Unix 环境验证")
+	}
 	dir := newTempRepo(t)
 	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
 	if err := os.WriteFile(hook, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {

@@ -97,8 +97,35 @@ func (a *Agent) Name() string { return "Claude Code" }
 
 // claudeOutput 是 claude --output-format json 的结构。
 type claudeOutput struct {
-	Result  string   `json:"result"`
-	IsError jsonBool `json:"is_error"`
+	Result  string      `json:"result"`
+	IsError jsonBool    `json:"is_error"`
+	Model   string      `json:"model,omitempty"`
+	Usage   *claudeUsage `json:"usage,omitempty"`
+}
+
+// claudeUsage 是 CLI 明确给出的 token 用量(形态因版本而异,只取认识的键)。
+type claudeUsage struct {
+	InputTokens  int      `json:"input_tokens"`
+	OutputTokens int      `json:"output_tokens"`
+	TotalTokens  int      `json:"total_tokens"`
+	CostUSD      *float64 `json:"cost_usd,omitempty"`
+}
+
+func (u *claudeUsage) toUsage(modelName string) *model.TokenUsage {
+	if u == nil {
+		return nil
+	}
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.InputTokens + u.OutputTokens
+	}
+	if u.InputTokens == 0 && u.OutputTokens == 0 && total == 0 {
+		return nil
+	}
+	return &model.TokenUsage{
+		InputTokens: u.InputTokens, OutputTokens: u.OutputTokens,
+		TotalTokens: total, Model: modelName, CostUSD: u.CostUSD,
+	}
 }
 
 // jsonBool 兼容 CLI 把 is_error 写成布尔 / 字符串 / 数字的几种形态。
@@ -281,6 +308,7 @@ func (a *Agent) parseOutput(out []byte, stderr string) (*coreagent.AgentResponse
 	resp := &coreagent.AgentResponse{
 		Status: coreagent.StatusSuccess,
 		Output: co.Result,
+		Usage:  co.Usage.toUsage(co.Model),
 	}
 	// 结构化决策:要求模型按约定返回 JSON(见 buildPrompt 的指令)。
 	// 解析失败不猜测,decision 留空 —— 但"留空"不等于"成功"。

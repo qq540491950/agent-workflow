@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"math"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +147,10 @@ func TestRetryBackoffKnobsFailClosed(t *testing.T) {
 // TestScriptRetryZeroBackoffFast 端到端:initial=0 的重试不等待。
 func TestScriptRetryZeroBackoffFast(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "fast-retry")
+	shell := ""
+	if runtime.GOOS == "windows" {
+		shell = "    shell: sh\n"
+	}
 	yml := `
 version: "1"
 workflow:
@@ -154,7 +159,7 @@ workflow:
 nodes:
   - id: sh
     type: script
-    command: test -f "__M__" && echo ok || { touch "__M__"; exit 1; }
+` + shell + `    command: test -f "__M__" && echo ok || { touch "__M__"; exit 1; }
     retry:
       max_attempts: 2
       backoff: fixed

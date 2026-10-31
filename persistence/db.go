@@ -5,6 +5,7 @@
 package persistence
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -15,6 +16,10 @@ import (
 // DB 封装 SQLite 连接与迁移。
 type DB struct {
 	sql *sql.DB
+	// read 是只读连接池(WAL 下允许并发读)。写连接仍只有一条。
+	// 列表/详情/事件/统计等 SELECT 走这里,避免与同步事件写入
+	// 抢同一条连接。
+	read *sql.DB
 	// queryFault 仅测试使用:非 nil 时,在执行敏感语句前先问一次,
 	// 返回非 nil 即让该语句失败。正常内存 SQLite 无法构造
 	// IO/锁/查询失败,而"查询失败被吞 → 走错分支"这类缺陷只有
@@ -51,14 +56,50 @@ func Open(path string) (*DB, error) {
 	if err := d.migrate(); err != nil {
 		return nil, err
 	}
+	// 只读连接池:迁移完成后再打开,确保表/索引已存在。
+	// WAL 下多个读连接可以并发;写仍由 d.sql 单连接串行。
+	readDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("persistence: open read pool: %w", err)
+	}
+	readDB.SetMaxOpenConns(4)
+	if err := readDB.Ping(); err != nil {
+		_ = readDB.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("persistence: ping read pool: %w", err)
+	}
+	d.read = readDB
 	return d, nil
 }
 
-// Close 关闭连接。
-func (d *DB) Close() error { return d.sql.Close() }
+// Close 关闭读写连接。
+func (d *DB) Close() error {
+	var first error
+	if d.read != nil {
+		first = d.read.Close()
+	}
+	if err := d.sql.Close(); first == nil {
+		first = err
+	}
+	return first
+}
 
-// SQL 暴露底层连接(仅限包内服务使用)。
+// SQL 暴露底层写连接(仅限包内服务使用)。
 func (d *DB) SQL() *sql.DB { return d.sql }
+
+// Ping 检查数据库可用性(健康检查用)。
+func (d *DB) Ping(ctx context.Context) error {
+	return d.sql.PingContext(ctx)
+}
+
+// Read 暴露只读连接池(仅限 SELECT;写语句必须走 SQL())。
+func (d *DB) Read() *sql.DB {
+	if d.read != nil {
+		return d.read
+	}
+	return d.sql
+}
 
 func (d *DB) migrate() error {
 	stmts := []string{
@@ -110,11 +151,18 @@ func (d *DB) migrate() error {
 			error TEXT DEFAULT '',
 			node_states_json TEXT DEFAULT '{}',
 			snapshot_json TEXT DEFAULT '',
-			state_json TEXT DEFAULT '{}'
+			state_json TEXT DEFAULT '{}',
+			workspace_json TEXT DEFAULT '[]',
+			via_failure_branch_json TEXT DEFAULT '[]',
+			queued_at TEXT DEFAULT '',
+			usage_json TEXT DEFAULT '{}'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_executions_workflow ON executions(workflow_id)`,
 		// 执行列表按 created_at DESC 排序(列表页与 Dashboard 都走它)
 		`CREATE INDEX IF NOT EXISTS idx_executions_created ON executions(created_at)`,
+		// 队列/恢复按状态筛选,分页按 created_at
+		`CREATE INDEX IF NOT EXISTS idx_executions_state_created ON executions(state, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_executions_workflow_created ON executions(workflow_id, created_at)`,
 		`CREATE TABLE IF NOT EXISTS execution_nodes (
 			id TEXT PRIMARY KEY,
 			execution_id TEXT NOT NULL,
@@ -128,7 +176,8 @@ func (d *DB) migrate() error {
 			error TEXT DEFAULT '',
 			started_at TEXT DEFAULT '',
 			finished_at TEXT DEFAULT '',
-			duration_ms INTEGER DEFAULT 0
+			duration_ms INTEGER DEFAULT 0,
+			usage_json TEXT DEFAULT '{}'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_exec_nodes_exec ON execution_nodes(execution_id)`,
 		`CREATE TABLE IF NOT EXISTS events (
@@ -140,6 +189,8 @@ func (d *DB) migrate() error {
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_exec ON events(execution_id)`,
+		// 按执行读取事件时同时命中执行 ID 与 seq 顺序,避免额外排序
+		`CREATE INDEX IF NOT EXISTS idx_events_exec_seq ON events(execution_id, seq)`,
 		// 审计页按 type 前缀过滤(events 是唯一无上限增长的表,长期运行后
 		// 无索引即全表扫描 + ORDER BY seq DESC)
 		`CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)`,
@@ -196,6 +247,11 @@ func (d *DB) migrateColumns() error {
 		`ALTER TABLE workflows ADD COLUMN permission_json TEXT DEFAULT '{}'`,
 		`ALTER TABLE workflows ADD COLUMN inputs_json TEXT DEFAULT '[]'`,
 		`ALTER TABLE executions ADD COLUMN state_json TEXT DEFAULT '{}'`,
+		`ALTER TABLE executions ADD COLUMN workspace_json TEXT DEFAULT '[]'`,
+		`ALTER TABLE executions ADD COLUMN via_failure_branch_json TEXT DEFAULT '[]'`,
+		`ALTER TABLE executions ADD COLUMN queued_at TEXT DEFAULT ''`,
+		`ALTER TABLE executions ADD COLUMN usage_json TEXT DEFAULT '{}'`,
+		`ALTER TABLE execution_nodes ADD COLUMN usage_json TEXT DEFAULT '{}'`,
 	}
 	for _, a := range alters {
 		if _, err := d.sql.Exec(a); err != nil {

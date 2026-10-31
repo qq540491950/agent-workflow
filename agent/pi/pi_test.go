@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,9 @@ import (
 
 func writeFakeCLI(t *testing.T, name, body string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell 替身仅适用于类 Unix 环境(stubcli 覆盖真实子进程路径)")
+	}
 	bin := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
 		t.Fatal(err)

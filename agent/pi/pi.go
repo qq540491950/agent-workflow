@@ -216,14 +216,25 @@ func parseOutput(out []byte, stderr string) *coreagent.AgentResponse {
 	}
 	if js := trailingJSONObject(text); js != "" {
 		var structured struct {
-			Status   string `json:"status"`
-			Decision string `json:"decision"`
-			Summary  string `json:"summary"`
-			Error    string `json:"error"`
+			Status   string            `json:"status"`
+			Decision string            `json:"decision"`
+			Summary  string            `json:"summary"`
+			Error    string            `json:"error"`
+			Model    string            `json:"model,omitempty"`
+			Usage    *model.TokenUsage `json:"usage,omitempty"`
 		}
 		if err := json.Unmarshal([]byte(js), &structured); err == nil {
 			if structured.Summary != "" {
 				resp.Summary = structured.Summary
+			}
+			if structured.Usage != nil {
+				if structured.Usage.TotalTokens == 0 {
+					structured.Usage.TotalTokens = structured.Usage.InputTokens + structured.Usage.OutputTokens
+				}
+				if structured.Usage.Model == "" {
+					structured.Usage.Model = structured.Model
+				}
+				resp.Usage = structured.Usage
 			}
 			// 决策取值必须合法才进路由(非法取值留痕但不路由)。
 			coreagent.ApplyDecision(resp, structured.Decision)

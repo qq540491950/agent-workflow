@@ -7,14 +7,20 @@ import (
 	"fmt"
 	"math"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	coreagent "agentworkflow/agent"
 	"agentworkflow/contextx"
 	"agentworkflow/event"
 	"agentworkflow/logx"
+	"agentworkflow/observability"
 	"agentworkflow/permission"
 	"agentworkflow/skill"
 	"agentworkflow/workflow/compiler"
@@ -28,6 +34,25 @@ const defaultScriptTimeoutSeconds = 120
 // ExecuteNode 实现 compiler.NodeRunner:记录节点明细后按类型分发执行。
 // compiler 负责编排;本方法只关心单节点的业务语义。
 func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) (outcome compiler.NodeOutcome) {
+	ctx, span := observability.Tracer().Start(ctx, "workflow.node",
+		trace.WithAttributes(
+			attribute.String("execution.id", env.Exec.ID),
+			attribute.String("node.id", node.ID),
+			attribute.String("node.type", string(node.Type)),
+			attribute.String("node.name", node.Name),
+		))
+	defer func() {
+		switch outcome.State {
+		case model.NodeFailed:
+			span.SetStatus(codes.Error, outcome.Error)
+			if outcome.Error != "" {
+				span.RecordError(fmt.Errorf("%s", outcome.Error))
+			}
+		case model.NodeSuccess:
+			span.SetStatus(codes.Ok, "")
+		}
+		span.End()
+	}()
 	// 节点适配器 panic 时本函数**不会正常返回**:异常沿栈上抛,由 compiler
 	// 的 runNodeGuarded 兜底转成 FAILED outcome(约定 #12 的分层:兜底在
 	// 节点执行这一层,与并行分支在不在同一 goroutine 无关)。
@@ -48,6 +73,7 @@ func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *mo
 	started := time.Now()
 	// 尝试次数:循环/重试导致的重复执行记为 attempt 递增
 	attempt := nextAttempt(st, node.ID)
+	span.SetAttributes(attribute.Int("node.attempt", attempt))
 	st.Set(attemptKey(node.ID), attempt)
 	en := &model.ExecutionNode{
 		// 明细主键带 attempt:此前固定为 exec:node,SaveExecutionNode 按主键
@@ -68,6 +94,10 @@ func (e *Engine) ExecuteNode(ctx context.Context, env *compiler.RunEnv, node *mo
 	}
 
 	outcome = e.dispatchNode(ctx, env, node, st)
+	en.Usage = outcome.Usage
+	if outcome.Usage != nil {
+		env.AddUsage(outcome.Usage)
+	}
 
 	// 节点失败 → 记失败台账。
 	//
@@ -704,17 +734,37 @@ func referencedVars(tpl TemplateRenderer, texts ...string) map[string]bool {
 }
 
 // invokeAgent 调用 Agent 并把结果映射为节点结果。
-func (e *Engine) invokeAgent(ctx context.Context, a coreagent.Agent, req coreagent.AgentRequest) compiler.NodeOutcome {
+func (e *Engine) invokeAgent(ctx context.Context, a coreagent.Agent, req coreagent.AgentRequest) (outcome compiler.NodeOutcome) {
+	ctx, span := observability.Tracer().Start(ctx, "agent.call",
+		trace.WithAttributes(
+			attribute.String("execution.id", req.ExecutionID),
+			attribute.String("agent.id", a.ID()),
+			attribute.String("agent.mode", req.Mode),
+			attribute.String("agent.model", req.Model),
+		))
+	defer func() {
+		if outcome.State == model.NodeFailed {
+			span.SetStatus(codes.Error, outcome.Error)
+			if outcome.Error != "" {
+				span.RecordError(fmt.Errorf("%s", outcome.Error))
+			}
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+		span.End()
+	}()
 	resp, err := a.Execute(ctx, req)
 	if err != nil {
+		span.RecordError(err)
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: err.Error()}
 	}
-	outcome := compiler.NodeOutcome{
+	outcome = compiler.NodeOutcome{
 		State:    model.NodeSuccess,
 		Decision: string(resp.Decision),
 		Summary:  resp.Summary,
 		Output:   resp.Output,
 		Data:     resp.Data,
+		Usage:    resp.Usage,
 	}
 	switch normalizeAgentStatus(resp.Status) {
 	case string(coreagent.StatusSuccess):
@@ -1123,7 +1173,25 @@ func (e *Engine) runSkillNode(ctx context.Context, env *compiler.RunEnv, node *m
 }
 
 // runGitNode 执行 Git 节点(权限由 Permission Manager 控制)。
-func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) compiler.NodeOutcome {
+func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *model.Node, st compiler.StateAccess) (outcome compiler.NodeOutcome) {
+	// git.operation span(spec 阶段 F):git 调用是外部副作用,链路上
+	// 必须可见;属性只带标识与操作名,不带参数全文(可能含分支名等,
+	// 但绝不放凭据)。命名返回值让 defer 读到真实结局。
+	ctx, span := observability.Tracer().Start(ctx, "git.operation",
+		trace.WithAttributes(
+			attribute.String("execution.id", env.Exec.ID),
+			attribute.String("node.id", node.ID),
+			attribute.String("node.type", string(node.Type)),
+			attribute.String("git.operation", cfgStr(node, "operation")),
+		))
+	defer func() {
+		if outcome.State == model.NodeFailed {
+			span.SetStatus(codes.Error, outcome.Error)
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+		span.End()
+	}()
 	op := cfgStr(node, "operation")
 	switch op {
 	case "status", "diff", "log", "branch":
@@ -1200,7 +1268,24 @@ func (e *Engine) runGitNode(ctx context.Context, env *compiler.RunEnv, node *mod
 // runScriptNode 执行脚本节点(本地 shell)。
 // 显式开关门禁:该节点等价于任意本地命令执行,而工作流可由 YAML 导入
 // 获得,故默认拒绝,需用户在设置页显式放行(需求 §42 禁止绕过权限系统)。
-func (e *Engine) runScriptNode(ctx context.Context, env *compiler.RunEnv, node *model.Node) compiler.NodeOutcome {
+func (e *Engine) runScriptNode(ctx context.Context, env *compiler.RunEnv, node *model.Node) (outcome compiler.NodeOutcome) {
+	// script.exec span(spec 阶段 F):本地命令执行是外部副作用;属性只带
+	// 标识与 shell,不带 command 全文(命令里可能拼了用户数据)。
+	ctx, span := observability.Tracer().Start(ctx, "script.exec",
+		trace.WithAttributes(
+			attribute.String("execution.id", env.Exec.ID),
+			attribute.String("node.id", node.ID),
+			attribute.String("node.type", string(node.Type)),
+			attribute.String("script.shell", cfgStr(node, "shell")),
+		))
+	defer func() {
+		if outcome.State == model.NodeFailed {
+			span.SetStatus(codes.Error, outcome.Error)
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+		span.End()
+	}()
 	command := cfgStr(node, "command")
 	if command == "" {
 		return compiler.NodeOutcome{State: model.NodeFailed, Error: "script 节点缺少 command"}
@@ -1212,8 +1297,15 @@ func (e *Engine) runScriptNode(ctx context.Context, env *compiler.RunEnv, node *
 		}
 	}
 	shell := cfgStr(node, "shell")
+	shellFlag := "-c"
 	if shell == "" {
-		shell = "/bin/sh"
+		// Windows 没有 /bin/sh;默认用 cmd.exe /C,让 script 节点在
+		// 桌面主平台可用。用户显式配置 shell 时仍按 Unix 约定传 -c。
+		if runtime.GOOS == "windows" {
+			shell, shellFlag = "cmd.exe", "/C"
+		} else {
+			shell = "/bin/sh"
+		}
 	}
 	// 超时与工作目录读节点配置(此前硬编码 120s、且始终用全局 Git 目录,
 	// 节点上写的 timeout_seconds / working_dir 都不生效)
@@ -1231,7 +1323,7 @@ func (e *Engine) runScriptNode(ctx context.Context, env *compiler.RunEnv, node *
 	return e.withNodeRetries(ctx, env, node, func(ectx context.Context) compiler.NodeOutcome {
 		cctx, cancel := context.WithTimeout(ectx, time.Duration(timeout)*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(cctx, shell, "-c", command)
+		cmd := exec.CommandContext(cctx, shell, shellFlag, command)
 		// 脚本派生的后台子进程可能持有输出管道:进程组击杀 + WaitDelay
 		// 兜底,保证调用方及时返回(与 Agent 适配器同一策略)
 		coreagent.ConfigureProcess(cmd)

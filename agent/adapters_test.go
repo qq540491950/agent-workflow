@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,8 +14,18 @@ import (
 	"agentworkflow/agent/pi"
 )
 
+// skipWindowsShell 跳过依赖 /bin/sh 脚本替身的用例;真实子进程路径由
+// stubcli 的跨平台替身覆盖。
+func skipWindowsShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell 脚本替身仅适用于类 Unix 环境")
+	}
+}
+
 // TestClaudeAdapterParsing 用假 CLI 脚本验证 Claude 适配器的解析与权限参数。
 func TestClaudeAdapterParsing(t *testing.T) {
+	skipWindowsShell(t)
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fake-claude")
 	script := "#!/bin/sh\necho '{\"result\":\"looks good. {\\\"decision\\\": \\\"APPROVED\\\", \\\"summary\\\": \\\"ok\\\"}\",\"is_error\":false}'\n"
@@ -40,6 +51,7 @@ func TestClaudeAdapterParsing(t *testing.T) {
 // TestClaudeAdapterForbiddenWrite 验证 Claude 适配器拒绝写操作:
 // 即便策略配置错误,CLI 参数也强制 --disallowedTools 包含 Write/Edit。
 func TestClaudeAdapterForbiddenWrite(t *testing.T) {
+	skipWindowsShell(t)
 	// 通过参数捕获脚本验证 CLI 收到的参数(写入本次测试的临时目录,避免并发冲突)
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fake-claude-args")
@@ -63,6 +75,7 @@ func TestClaudeAdapterForbiddenWrite(t *testing.T) {
 
 // TestPiAdapterStructuredOutput 验证 Pi 适配器的结构化输出解析。
 func TestPiAdapterStructuredOutput(t *testing.T) {
+	skipWindowsShell(t)
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fake-pi")
 	script := "#!/bin/sh\necho 'fixed 2 issues'\necho '{\"status\":\"success\",\"decision\":\"DONE\",\"summary\":\"fixed\"}'\n"

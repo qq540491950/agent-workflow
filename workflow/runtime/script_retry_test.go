@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,12 @@ import (
 // scriptRetryYAML 生成单 script 节点的工作流(固定 max_attempts=2 / fixed 退避)。
 // command 里的 __MARKER__ 会被替换成测试专属的标记文件路径。
 func scriptRetryYAML(command string) string {
+	// 测试里的命令是 POSIX sh 语法;Windows 下显式用 Git Bash 的 sh,
+	// 避免默认 cmd.exe 把 test/touch/exit 当成另一种语言。
+	shell := ""
+	if runtime.GOOS == "windows" {
+		shell = "    shell: sh\n"
+	}
 	return `
 version: "1"
 workflow:
@@ -39,7 +46,7 @@ workflow:
 nodes:
   - id: sh
     type: script
-    command: ` + command + `
+` + shell + `    command: ` + command + `
     retry:
       max_attempts: 2
       backoff: fixed

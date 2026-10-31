@@ -75,6 +75,8 @@ var structuredStateKeys = map[string]bool{
 	compiler.KeyLoopExited:   true,
 	compiler.KeyLoopStuck:    true,
 	compiler.KeyLoopDecision: true,
+	// 失败分支记录:节点 ID 数组,恢复与审计读取,不含自由文本。
+	compiler.KeyViaFailureBranch: true,
 }
 
 // 节点级状态键的后缀(node:<id>:<suffix>)。
@@ -95,6 +97,8 @@ const (
 	routePrefix = "route:"
 	// routeSuffixBranch 出口分支下标:结构化(枚举,原样保留)。
 	routeSuffixBranch = ":branch"
+	// routeSuffixFailure 失败分支已选中标记:结构化(bool,原样保留)。
+	routeSuffixFailure = ":failure"
 )
 
 // structuredStateKey 判定键是否为"结构化键"(值必须原样保留)。
@@ -113,7 +117,8 @@ func structuredStateKey(key string) bool {
 	// 回放的是另一个分支 —— "人批准 A 分支,恢复后走 B 分支"。
 	// 值是 int,脱敏对它没有意义,但必须显式登记:漏登记 = 将来某天
 	// 有人把它改成字符串(比如存条件表达式)时,明文/改写会静默发生。
-	if strings.HasPrefix(key, routePrefix) && strings.HasSuffix(key, routeSuffixBranch) {
+	if strings.HasPrefix(key, routePrefix) &&
+		(strings.HasSuffix(key, routeSuffixBranch) || strings.HasSuffix(key, routeSuffixFailure)) {
 		return true
 	}
 	return false

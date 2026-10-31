@@ -4,11 +4,15 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -22,17 +26,36 @@ import (
 	"agentworkflow/workflow/model"
 )
 
-// Server 是 HTTP API 服务器。
-type Server struct {
-	app *application.App
-	mux *http.ServeMux
+// Options 是服务器模式的安全边界配置。
+//
+// 零值表示"不启用 HTTP 安全中间件":桌面模式经 Wails AssetHandler 挂载
+// /api,调用方是应用自己的 WebView,不需要 Host/Origin/token 校验。
+type Options struct {
+	// AuthToken 非空时,除健康检查外的 /api/* 都要求 Bearer 令牌。
+	AuthToken string
+	// Loopback 为真时只允许回环 Host / 同源 Origin。
+	Loopback bool
+	// Addr 是监听地址,用于提取端口并校验 Host/Origin。
+	Addr string
 }
 
-// NewServer 创建服务器并注册路由。
+// Server 是 HTTP API 服务器。
+type Server struct {
+	app  *application.App
+	mux  *http.ServeMux
+	opts Options
+}
+
+// NewServer 创建服务器并注册路由(桌面模式/测试用,不启用安全中间件)。
 // 顺接通 Bus → UI 处理器的桥接(SSE 依赖;幂等,桌面模式重复调用无害)。
 func NewServer(app *application.App) *Server {
+	return NewServerWithOptions(app, Options{})
+}
+
+// NewServerWithOptions 创建带安全边界的服务器(服务器模式用)。
+func NewServerWithOptions(app *application.App, opts Options) *Server {
 	app.ConnectEvents()
-	s := &Server{app: app, mux: http.NewServeMux()}
+	s := &Server{app: app, mux: http.NewServeMux(), opts: opts}
 	s.routes()
 	return s
 }
@@ -41,17 +64,185 @@ func NewServer(app *application.App) *Server {
 // 额外挂一层错误体拦截:net/http ServeMux 对"方法不匹配"(405)与
 // "路由不存在"(404)直接写纯文本,与本 API 的 JSON 错误体契约不一致
 // (前端 http() 解析不出 error 字段,只能回退成 "HTTP 405")。
-func (s *Server) Handler() http.Handler { return jsonErrorHandler(s.mux) }
+func (s *Server) Handler() http.Handler {
+	h := jsonErrorHandler(s.mux)
+	if s.opts.Addr != "" && (s.opts.Loopback || s.opts.AuthToken != "") {
+		h = s.security(h)
+	}
+	return h
+}
+
+// security 是服务器模式的第一道边界:Host / Origin / Content-Type / token。
+//
+// 它挡的不是"本机恶意进程"(本机进程本来就能读数据目录),而是**浏览器
+// 页面**与**局域网客户端**:前者可以不带预检地向 127.0.0.1 发简单请求,
+// 后者在 `--addr 0.0.0.0` 时可以直接访问全部控制面。
+func (s *Server) security(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.hostAllowed(r.Host) {
+			writeSecurityError(w, http.StatusForbidden, securityCodeForbidden,
+				"请求的 Host 不在受信地址内")
+			return
+		}
+		if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !s.originAllowed(origin, r.Host) {
+			writeSecurityError(w, http.StatusForbidden, securityCodeForbidden,
+				"拒绝跨站请求:Origin 与当前服务不同源")
+			return
+		}
+		if isMutatingMethod(r.Method) && r.ContentLength != 0 && !s.contentTypeAllowed(r) {
+			writeSecurityError(w, http.StatusUnsupportedMediaType, securityCodeMediaType,
+				"写接口要求 Content-Type: application/json(导入接口允许 YAML)")
+			return
+		}
+		if s.opts.AuthToken != "" && r.URL.Path != "/api/health" {
+			if !bearerTokenOK(r.Header.Get("Authorization"), s.opts.AuthToken) {
+				writeSecurityError(w, http.StatusUnauthorized, securityCodeAuth,
+					"缺少或错误的访问令牌")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostAllowed 校验 Host 头。
+//
+// 回环模式:只允许 localhost / 127.0.0.1 / ::1,且端口必须与监听端口一致。
+// 远程模式:端口必须一致;token 承担身份校验。
+func (s *Server) hostAllowed(hostport string) bool {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		// httptest / 某些代理可能不带端口;回环模式要求明确端口。
+		return false
+	}
+	_, wantPort, err := net.SplitHostPort(s.opts.Addr)
+	if err != nil || port != wantPort {
+		return false
+	}
+	if !s.opts.Loopback {
+		return host != ""
+	}
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// originAllowed 校验 Origin 是否同源。没有 Origin 的本机 CLI 客户端放行。
+func (s *Server) originAllowed(origin, hostport string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || u.Host == "null" {
+		return false
+	}
+	if strings.EqualFold(u.Host, hostport) {
+		return true
+	}
+	if s.opts.Loopback {
+		// 同源 SPA 可能通过 localhost 与 127.0.0.1 互相打开。
+		_, wantPort, err := net.SplitHostPort(s.opts.Addr)
+		if err != nil {
+			return false
+		}
+		oh, op, err := net.SplitHostPort(u.Host)
+		if err != nil || op != wantPort {
+			return false
+		}
+		switch strings.ToLower(oh) {
+		case "localhost", "127.0.0.1", "::1":
+			return true
+		}
+	}
+	return false
+}
+
+// contentTypeAllowed 校验写请求的媒体类型。
+func (s *Server) contentTypeAllowed(r *http.Request) bool {
+	ct := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if ct == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
+		return true
+	}
+	if strings.HasSuffix(r.URL.Path, "/api/workflows/import") {
+		switch mediaType {
+		case "application/yaml", "application/x-yaml", "text/yaml", "text/x-yaml":
+			return true
+		}
+	}
+	return false
+}
+
+func isMutatingMethod(method string) bool {
+	switch method {
+	// DELETE 也在列(spec"请求边界"):带 body 的 DELETE 同样要求
+	// application/json。无 body 的 DELETE(ContentLength==0)不受影响,
+	// 既有客户端不受任何行为变化。
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
+func bearerTokenOK(header, want string) bool {
+	const prefix = "Bearer "
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return false
+	}
+	got := strings.TrimSpace(header[len(prefix):])
+	if got == "" || want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func writeSecurityError(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": msg,
+		"code":  code,
+		"kind":  string(model.KindPermissionError),
+	})
+}
+
+// securityCodes 是安全中间件会返回的错误码全集,供 api/security_test.go
+// 与前端 CODE_HINTS 守卫测试用正则收集(var 声明符合扫描模式)。
+var (
+	securityCodeForbidden = "FORBIDDEN_ORIGIN"
+	securityCodeMediaType = "UNSUPPORTED_MEDIA_TYPE"
+	securityCodeAuth      = "UNAUTHORIZED"
+)
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		info := VersionInfo()
 		w.Header().Set("Content-Type", "application/json")
+		if err := s.app.Repo.Ping(r.Context()); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "error", "code": "DB_ERROR", "error": "数据库不可用",
+			})
+			return
+		}
+		info := VersionInfo()
+		queueDepth, _ := s.app.Engine.QueueStats()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "ok", "version": info["version"], "mode": "server",
 			"adk": info["adk"], "wails": info["wails"],
+			"running": s.app.Engine.RunningCount(),
+			"queued":  queueDepth,
 		})
 	})
+	s.mux.HandleFunc("GET /api/runtime/stats", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		return writeJSON(w, s.app.RuntimeStats(), nil)
+	}))
 	s.mux.HandleFunc("GET /api/version", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		return writeJSON(w, VersionInfo(), nil)
 	}))
@@ -172,10 +363,16 @@ func (s *Server) routes() {
 	// 执行
 	s.mux.HandleFunc("GET /api/executions", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		wfID := r.URL.Query().Get("workflow_id")
-		limit, truncated := queryLimit(r, "limit", 0)
-		execs, err := s.app.Executions.List(wfID, limit)
+		limit, truncated := queryLimitMax(r, "limit", 50, 500)
+		execs, next, err := s.app.Executions.ListPage(wfID, limit, r.URL.Query().Get("cursor"))
+		if err != nil {
+			return err
+		}
+		if next != "" {
+			w.Header().Set("X-Next-Cursor", next)
+		}
 		markLimitTruncated(w, truncated, limit)
-		return writeJSON(w, execs, err)
+		return writeJSON(w, execs, nil)
 	}))
 	s.mux.HandleFunc("GET /api/executions/{id}", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		e, err := s.app.Executions.Get(r.PathValue("id"))
@@ -186,8 +383,30 @@ func (s *Server) routes() {
 		return writeJSON(w, nodes, err)
 	}))
 	s.mux.HandleFunc("GET /api/executions/{id}/events", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		events, err := s.app.Executions.Events(r.PathValue("id"))
-		return writeJSON(w, events, err)
+		after, err := queryInt64(r, "after_seq")
+		if err != nil {
+			return err
+		}
+		before, err := queryInt64(r, "before_seq")
+		if err != nil {
+			return err
+		}
+		if after > 0 && before > 0 {
+			return badRequest("after_seq 与 before_seq 不能同时使用")
+		}
+		limit, truncated := queryLimitMax(r, "limit", 500, 2000)
+		events, maxSeq, hasMore, err := s.app.Executions.EventsPage(r.PathValue("id"), after, before, limit)
+		if err != nil {
+			return err
+		}
+		if maxSeq > 0 {
+			w.Header().Set("X-Next-Seq", strconv.FormatInt(maxSeq, 10))
+		}
+		if hasMore {
+			w.Header().Set("X-Has-More", "true")
+		}
+		markLimitTruncated(w, truncated, limit)
+		return writeJSON(w, events, nil)
 	}))
 	s.mux.HandleFunc("GET /api/executions/{id}/export", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		data, err := s.app.Executions.Export(r.PathValue("id"))
@@ -213,7 +432,13 @@ func (s *Server) routes() {
 			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
 		}
 		exec, err := s.app.Executions.Run(r.Context(), r.PathValue("id"), body.Task, body.Variables)
-		return writeJSON(w, exec, err)
+		if err != nil {
+			return err
+		}
+		if exec.Execution != nil && exec.Execution.State == model.ExecutionQueued {
+			w.WriteHeader(http.StatusAccepted)
+		}
+		return writeJSON(w, exec, nil)
 	}))
 	s.mux.HandleFunc("POST /api/executions/{id}/input", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var response map[string]any
@@ -414,6 +639,14 @@ func (s *Server) routes() {
 			LogLevel      string  `json:"log_level"`
 			// 缺省(nil)表示不修改,保持既有值
 			AllowScriptNodes *bool `json:"allow_script_nodes"`
+			// 运行时准入/排队设置;nil = 不修改。
+			MaxActiveExecutions *int    `json:"max_active_executions"`
+			QueueEnabled        *bool   `json:"queue_enabled"`
+			MaxQueuedExecutions *int    `json:"max_queued_executions"`
+			QueuePolicy         *string `json:"queue_policy"`
+			EventRetentionDays     *int `json:"event_retention_days"`
+			ExecutionRetentionDays *int `json:"execution_retention_days"`
+			MaxEventsPerExecution  *int `json:"max_events_per_execution"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			return err // 结构化错误(PAYLOAD_TOO_LARGE / INVALID_JSON)
@@ -425,8 +658,38 @@ func (s *Server) routes() {
 		if body.GitWorkingDir != nil {
 			dir = *body.GitWorkingDir
 		}
-		info, err := s.app.Settings.Update(dir, body.LogLevel, body.AllowScriptNodes)
-		return writeJSON(w, info, err)
+		if _, err := s.app.Settings.Update(dir, body.LogLevel, body.AllowScriptNodes); err != nil {
+			return err
+		}
+		if body.MaxActiveExecutions != nil || body.QueueEnabled != nil ||
+			body.MaxQueuedExecutions != nil || body.QueuePolicy != nil {
+			if _, err := s.app.Settings.UpdateRuntime(body.MaxActiveExecutions, body.QueueEnabled,
+				body.MaxQueuedExecutions, body.QueuePolicy); err != nil {
+				return err
+			}
+		}
+		for key, v := range map[string]*int{
+			"event_retention_days":     body.EventRetentionDays,
+			"execution_retention_days": body.ExecutionRetentionDays,
+			"max_events_per_execution": body.MaxEventsPerExecution,
+		} {
+			if v != nil {
+				if err := s.app.Settings.Set(key, *v); err != nil {
+					return err
+				}
+			}
+		}
+		return writeJSON(w, s.app.Settings.Info(), nil)
+	}))
+	s.mux.HandleFunc("POST /api/maintenance/cleanup", s.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		var body struct {
+			DryRun bool `json:"dry_run"`
+		}
+		if err := decodeOptionalJSON(r, &body); err != nil {
+			return err
+		}
+		stats, err := s.app.Settings.Cleanup(body.DryRun)
+		return writeJSON(w, stats, err)
 	}))
 
 	// SSE 实时事件
@@ -604,6 +867,15 @@ func statusForError(se *model.Error) int {
 		// 只是"现在不能跑" —— 409 Conflict 语义正确(与既有的
 		// INVALID_TRANSITION=400 无关,那是历史契约,不动)。
 		return http.StatusConflict
+	case "WORKSPACE_BUSY", "SYSTEM_BUSY":
+		// 工作区被占 / 全局并发满且未开排队:同样"请求合法,现在不能跑",
+		// spec 要求 409(此前落 KindStateError 默认 400,客户端无法
+		// 区分"参数错"与"容量不足"—— 容量类应重试,参数错不该)。
+		return http.StatusConflict
+	case "QUEUE_FULL":
+		// 队列也满了:请求合法但连排队都排不进 —— 429 Too Many Requests
+		// (spec 允许 429 或 409,文档固定 429)。
+		return http.StatusTooManyRequests
 	}
 	switch se.Kind {
 	case model.KindPermissionError:
@@ -891,7 +1163,23 @@ func badRequest(msg string) error {
 // "返回全表"(内存与响应体都不可控)。
 const maxQueryLimit = 1000
 
+func queryInt64(r *http.Request, key string) (int64, error) {
+	v := strings.TrimSpace(r.URL.Query().Get(key))
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return 0, badRequest(fmt.Sprintf("%s 必须是非负整数", key))
+	}
+	return n, nil
+}
+
 func queryLimit(r *http.Request, key string, def int) (applied int, truncated bool) {
+	return queryLimitMax(r, key, def, maxQueryLimit)
+}
+
+func queryLimitMax(r *http.Request, key string, def, max int) (applied int, truncated bool) {
 	v := r.URL.Query().Get(key)
 	if v == "" {
 		return def, false
@@ -902,8 +1190,8 @@ func queryLimit(r *http.Request, key string, def int) (applied int, truncated bo
 			return def, false
 		}
 		n = n*10 + int(c-'0')
-		if n > maxQueryLimit {
-			return maxQueryLimit, true // 收敛到上限,杜绝溢出成负数
+		if n > max {
+			return max, true // 收敛到上限,杜绝溢出成负数
 		}
 	}
 	return n, false

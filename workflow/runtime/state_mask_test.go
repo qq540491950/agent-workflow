@@ -367,11 +367,12 @@ func TestRetryNodeWritesNodeStatusViaStateEntry(t *testing.T) {
 //
 // 形态里的 * 表示该段由运行期变量决定(节点 ID 等)。
 var stateKeyFuncs = map[string]string{
-	"StatusKey":      "node:*:status",
-	"ResultKey":      "node:*:result",
-	"AnsweredKey":    "node:*:answered",
-	"attemptKey":     "node:*:attempt",
-	"RouteBranchKey": "route:*:branch",
+	"StatusKey":       "node:*:status",
+	"ResultKey":       "node:*:result",
+	"AnsweredKey":     "node:*:answered",
+	"attemptKey":      "node:*:attempt",
+	"RouteBranchKey":  "route:*:branch",
+	"FailureRouteKey": "route:*:failure",
 }
 
 // expectedStateKeyClass 是每个状态键的期望分类。
@@ -381,18 +382,20 @@ var stateKeyFuncs = map[string]string{
 // 凭印象维护清单必然漏项(约定 #13 的同源精神)。
 var expectedStateKeyClass = map[string]string{
 	// 结构化:路由/决策依据,必须原样保留
-	"decision":       "structured",
-	"status":         "structured",
-	"_abort":         "structured",
-	"_resume_node":   "structured",
-	"_current_node":  "structured",
-	"_loop_count":    "structured",
-	"_loop_exited":   "structured",
-	"_loop_stuck":    "structured",
-	"_loop_decision": "structured",
-	"node:*:status":  "structured",
-	"node:*:attempt": "structured",
-	"route:*:branch": "structured",
+	"decision":            "structured",
+	"status":              "structured",
+	"_abort":              "structured",
+	"_resume_node":        "structured",
+	"_current_node":       "structured",
+	"_loop_count":         "structured",
+	"_loop_exited":        "structured",
+	"_loop_stuck":         "structured",
+	"_loop_decision":      "structured",
+	"_via_failure_branch": "structured",
+	"node:*:status":       "structured",
+	"node:*:attempt":      "structured",
+	"route:*:branch":      "structured",
+	"route:*:failure":     "structured",
 	// 自由文本:凭据的载体,必须脱敏
 	"output":            "free",
 	"task":              "free",
